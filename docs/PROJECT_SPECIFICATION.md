@@ -16,11 +16,10 @@ Hệ thống được thiết kế hướng tới **hai nhóm đối tượng d�
 Xây dựng một hệ sinh thái **AIoT hoàn chỉnh (Edge AI + Multi-sensor IoT + ThingsBoard / Web Platform)** nhằm:
 1. **Phát hiện té ngã tức thời tại biên (Edge Computing):** Sử dụng Camera kết hợp mô hình AI Deep Learning (MediaPipe + Transformer) phân tích tư thế và kích hoạt báo động trong thời gian dưới 1 giây.
 2. **Giám sát & Cảnh báo bất động kéo dài (Prolonged Immobility Monitoring):** Nhận diện trạng thái bất động bất thường trên sàn nhà hoặc giường/nôi vượt quá thời gian cho phép (dấu hiệu ngất, đột quỵ, chấn thương nặng ở người già hoặc ngạt thở, bất tỉnh ở trẻ nhỏ).
-3. **Bảo vệ quyền riêng tư (Privacy-First):** Chỉ phân tích và truyền tọa độ khớp xương (Skeleton), không lưu trữ hoặc truyền tải video nhạy cảm của người dùng.
-4. **Giám sát môi trường phòng sống đa tham số:** 
+3. **Giám sát môi trường phòng sống đa tham số:** 
    * Thu thập nhiệt độ & độ ẩm thời gian thực thông qua cảm biến **DHT11**.
    * *Mở rộng cải tiến:* Đo cường độ ánh sáng bằng **TSL2561** để tự động cảnh báo/bật đèn khi tối; phát hiện rò rỉ khí độc/cháy bằng **cảm biến Gas (MQ-2)**.
-5. **Hạ tầng truyền thông & Điều phối cảnh báo thông minh:** Sử dụng nền tảng **ThingsBoard** qua giao thức **MQTT**, hỗ trợ Rule Chain cảnh báo đa kênh (Web Dashboard, Popup khẩn cấp, Telegram Bot / SMS).
+4. **Hạ tầng truyền thông & Điều phối cảnh báo thông minh:** Sử dụng nền tảng **ThingsBoard** qua giao thức **MQTT**, hỗ trợ Rule Chain cảnh báo đa kênh (Web Dashboard, Popup khẩn cấp, Telegram Bot / SMS).
 
 ---
 
@@ -73,7 +72,6 @@ Xây dựng một hệ sinh thái **AIoT hoàn chỉnh (Edge AI + Multi-sensor I
 | **FN-AI-03** | Phân loại hành động chuỗi thời gian | Đưa chuỗi trượt 30 khung hình (tương đương 1-2 giây cử động) vào mô hình **Transformer Sequence Classifier (TFLite/ONNX)** để phân loại nhị phân: `Fall` hoặc `No-Fall`. |
 | **FN-AI-04** | Cơ chế chống báo động giả (False-alarm filter) | Kết hợp kiểm tra trạng thái: sau khi phát hiện rơi đột ngột, theo dõi thêm $T$ giây (ví dụ: 3 - 5s). Nếu đối tượng tự ngồi/đứng dậy $\rightarrow$ Hủy cảnh báo té ngã. |
 | **FN-AI-05** | Giám sát & Cảnh báo Bất Động Kéo Dài (Prolonged Immobility Detection) | **(Tính năng quan trọng)**: Theo dõi chuyển động vi sai (micro-motion) của các khớp xương. Nếu đối tượng ở trạng thái nằm/gục bất động trên sàn nhà hoặc vị trí nguy hiểm vượt quá thời gian $T_{\text{immobile}}$:<br>• **Trẻ nhỏ:** Cảnh báo nhanh sau **30 - 60 giây** bất động (nguy cơ ngạt thở, co giật, chấn thương).<br>• **Người già:** Cảnh báo mức nhắc nhở sau **1 phút**, nâng lên **Báo động Đỏ sau 2 - 3 phút** bất động (nguy cơ đột quỵ, chấn thương gãy xương, mất ý thức). |
-| **FN-AI-06** | Bảo vệ quyền riêng tư (Privacy Protection) | Hệ thống không lưu trữ video quay cảnh sinh hoạt của người dùng. Trên màn hình giám sát chỉ vẽ đường que bộ xương (Skeleton Wireframe) trên nền đen hoặc làm mờ hoàn toàn khuôn mặt. |
 
 ---
 
