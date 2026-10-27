@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+venv_*/
+ENV/
+
+# Environment Variables
+.env
+
+# Logs
+*.log
+fall_detection_log.txt
+
+# OS
+.DS_Store
+Thumbs.db
