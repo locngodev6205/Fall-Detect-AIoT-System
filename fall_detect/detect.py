@@ -1,3 +1,42 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+================================================================================
+SMARTFALL EDGE MONITOR - HỆ THỐNG PHÁT HIỆN TÉ NGÃ REALTIME (TFLITE EDGE AI)
+================================================================================
+
+Mô tả:
+  Script nhận diện hành vi té ngã thời gian thực dựa trên 17 điểm khớp xương MediaPipe
+  kết hợp mô hình Transformer TFLite siêu nhẹ (~313 KB) chạy trực tiếp trên Raspberry Pi / PC.
+
+--------------------------------------------------------------------------------
+HƯỚNG DẪN CÁC LỆNH CHẠY (COMMAND EXECUTION GUIDE):
+--------------------------------------------------------------------------------
+
+1. Chạy với Camera / Webcam trực tiếp:
+   $ python detect.py --source webcam
+   $ python detect.py --source webcam --camera-id 0
+
+2. Chạy với tệp Video có sẵn (để kiểm thử):
+   $ python detect.py --source file --file sample_videos/fall_example_1.mp4
+   $ python detect.py --source file --file sample_videos/fall_example_2.mp4
+   $ python detect.py --source file --file /duong/dan/toi/video.mp4
+
+3. Chạy chế độ ngầm Headless (Không mở cửa sổ GUI - Dành riêng cho Raspberry Pi qua SSH):
+   $ python detect.py --source webcam --no-display
+   $ python detect.py --source file --file sample_videos/fall_example_1.mp4 --no-display
+
+4. Xem toàn bộ các tham số hỗ trợ:
+   $ python detect.py --help
+
+--------------------------------------------------------------------------------
+CẤU HÌNH KẾT NỐI & CẢNH BÁO:
+- Tham số cài đặt nằm trong file `config.py` hoặc file môi trường `.env`.
+- Cấu hình MQTT Broker, Telegram Bot Token, Chat ID, Ngưỡng phát hiện ngã (FALL_CONFIDENCE_THRESHOLD),
+  Thời gian bất động báo động (IMMOBILITY_TIMEOUT_SECONDS).
+================================================================================
+"""
+
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -435,12 +474,13 @@ def process_frame(frame, pose_estimator): # frame is BGR
 
 
 # --- Main Function ---
-def main(source_type, file_path=None):
+def main(source_type, file_path=None, no_display=False, camera_id=0):
     log_message("Starting Fall Detection System...")
+    active_camera_id = camera_id if camera_id is not None else CAMERA_INDEX
     if source_type == "webcam":
-        cap = cv2.VideoCapture(CAMERA_INDEX)
+        cap = cv2.VideoCapture(active_camera_id)
         if not cap.isOpened():
-            log_message(f"Error: Cannot open webcam {CAMERA_INDEX}")
+            log_message(f"Error: Cannot open webcam {active_camera_id}")
             return
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
@@ -474,22 +514,18 @@ def main(source_type, file_path=None):
                 break
 
             frame_counter += 1
-            # start_time_proc = time.perf_counter() # More precise for timing
 
             processed_frame = process_frame(frame, pose)
-            cv2.imshow(DISPLAY_WINDOW_NAME, processed_frame)
+            if not no_display:
+                cv2.imshow(DISPLAY_WINDOW_NAME, processed_frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    log_message("Exiting program...")
+                    break
 
-            # end_time_proc = time.perf_counter()
-            # proc_time_ms = (end_time_proc - start_time_proc) * 1000
-            # if frame_counter % 30 == 0: # Print FPS every 30 frames
-            #     print(f"Frame {frame_counter}, Processing time: {proc_time_ms:.2f} ms")
-
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                log_message("Exiting program...")
-                break
     cap.release()
-    cv2.destroyAllWindows()
+    if not no_display:
+        cv2.destroyAllWindows()
     log_message("Fall Detection System Stopped.")
 
 
@@ -499,7 +535,11 @@ if __name__ == "__main__":
                         help="Input source: 'webcam' or 'file'")
     parser.add_argument("--file", type=str, default=None,
                         help="Path to the video file if source is 'file'")
+    parser.add_argument("--no-display", action="store_true",
+                        help="Run in headless mode without GUI window (ideal for Raspberry Pi via SSH)")
+    parser.add_argument("--camera-id", type=int, default=0,
+                        help="Webcam/Camera device index (default: 0)")
     args = parser.parse_args()
     if args.source == "file" and not args.file:
         parser.error("--file argument is required when source is 'file'")
-    main(source_type=args.source, file_path=args.file)
+    main(source_type=args.source, file_path=args.file, no_display=args.no_display, camera_id=args.camera_id)
