@@ -35,3 +35,6 @@ MQTT_TOPIC_STATUS = os.getenv("MQTT_TOPIC_STATUS", "smartfall/status")
 ENABLE_TELEGRAM = os.getenv("ENABLE_TELEGRAM", "false").lower() == "true"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
+# Credential issued by the AnNha provisioning command; never use a browser session.
+DEVICE_TOKEN = os.getenv("DEVICE_TOKEN", "")

@@ -19,3 +19,16 @@ fall_detection_log.txt
 # OS
 .DS_Store
 Thumbs.db
+
+# Imported source archives
+/archives/source-imports/
+
+# Frontend build/dependencies
+node_modules/
+dist/
+
+# Local runtime data
+/backend/data/
+.pytest_cache/
+
+.venv/

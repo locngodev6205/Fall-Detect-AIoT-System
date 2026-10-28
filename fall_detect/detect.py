@@ -1,3 +1,4 @@
+import uuid
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -150,6 +151,8 @@ def send_mqtt_alert(confidence, confidence_str):
         return
     payload = {
         "device_id": DEVICE_ID,
+        "device_token": getattr(config, "DEVICE_TOKEN", ""),
+        "event_id": str(uuid.uuid4()),
         "event": "FALL_DETECTED",
         "confidence": float(confidence),
         "confidence_pct": confidence_str,
@@ -167,6 +170,8 @@ def send_mqtt_immobility_alert(duration_s):
         return
     payload = {
         "device_id": DEVICE_ID,
+        "device_token": getattr(config, "DEVICE_TOKEN", ""),
+        "event_id": str(uuid.uuid4()),
         "target_audience": TARGET_AUDIENCE,
         "event": "PROLONGED_IMMOBILITY_DETECTED",
         "immobility_duration_s": int(duration_s),
