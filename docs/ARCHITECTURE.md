@@ -2,7 +2,7 @@
 
 - **Dự án:** FALL-DETECT-AIOT-SYSTEM.
 - **Phiên bản:** 2.0 — ngày 28/10/2026.
-- **Tài liệu nghiệp vụ:** [PROJECT_SPECIFICATION.md](PROJECT_SPECIFICATION.md).
+- **Tài liệu nghiệp vụ:** [PROJECT_SPECIFICATION_ANNHA.md](PROJECT_SPECIFICATION_ANNHA.md).
 - **Phạm vi:** Kiến trúc mục tiêu cho camera, cảnh báo an toàn, môi trường và hỗ trợ sinh hoạt. Phần hiện trạng bên dưới được đối chiếu mã nguồn; các phần còn lại là thiết kế cần triển khai, không phải xác nhận hệ thống đang hoạt động đầy đủ.
 
 ## 1. HIỆN TRẠNG TRIỂN KHAI
@@ -275,4 +275,4 @@ Bản tin cần có `schema_version`, `message_id`, `device_id`, thời gian ngu
 - Schema/topic/API chi tiết và kế hoạch chuyển đổi payload hiện tại.
 - Thời gian chờ cảnh báo, FPS, độ trễ, ngưỡng chất lượng AI và dung lượng/thời hạn lưu.
 
-Phần hiện trạng đã được cập nhật theo backend nghiệp vụ và giao diện dùng API thật; các mục tiêu edge và kiểm chứng phần cứng còn lại không được coi là đã hoàn thành. Kiểm chứng theo [các kịch bản nghiệm thu trong specification](PROJECT_SPECIFICATION.md#7-kịch-bản-nghiệm-thu-nghiệp-vụ), có phân biệt kiểm tra nguồn, mô phỏng và chạy thiết bị thật.
+Phần hiện trạng đã được cập nhật theo backend nghiệp vụ và giao diện dùng API thật; các mục tiêu edge và kiểm chứng phần cứng còn lại không được coi là đã hoàn thành. Kiểm chứng theo [các kịch bản nghiệm thu trong specification](PROJECT_SPECIFICATION_ANNHA.md#7-kịch-bản-nghiệm-thu-nghiệp-vụ), có phân biệt kiểm tra nguồn, mô phỏng và chạy thiết bị thật.

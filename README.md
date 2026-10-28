@@ -95,4 +95,4 @@ docker compose config --quiet
 
 Các test dùng DB/media tạm; không sửa dữ liệu ứng dụng. Test backend kiểm tra auth/CSRF/reset, mời/thu hồi quyền, truy cập chéo camera, cấu hình, sự kiện/WebSocket, file, lệnh, telemetry/hysteresis và relay media. Test Sites chỉ kiểm tra bộ đóng gói tĩnh từ ZIP, không publish website. Mã đóng gói Sites không triển khai được backend nghiệp vụ này thay Docker.
 
-ZIP gốc giữ tại `archives/source-imports/AnNha-website.zip` và đã gitignore. Tài liệu: [Specification](docs/PROJECT_SPECIFICATION.md), [Architecture](docs/ARCHITECTURE.md), [Device API](docs/DEVICE_API.md).
+ZIP gốc giữ tại `archives/source-imports/AnNha-website.zip` và đã gitignore. Tài liệu: [Specification](docs/PROJECT_SPECIFICATION_ANNHA.md), [Architecture](docs/ARCHITECTURE.md), [Device API](docs/DEVICE_API.md).

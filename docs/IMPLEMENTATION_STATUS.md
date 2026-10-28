@@ -29,4 +29,4 @@ Các tài khoản/nhà/camera tên “kiểm thử” trong volume cục bộ l�
 - Telegram cần cấu hình bot/người nhận và sự đồng ý chia sẻ ảnh. Chưa gửi kiểm thử đến Telegram bên ngoài trong lần triển khai này.
 - Chưa đánh giá recall/báo giả, FPS AI, độ trễ video/audio, mất mạng/nguồn hoặc runtime dài giờ trên Pi.
 
-Xem [README](../README.md), [Architecture](ARCHITECTURE.md), [Device API](DEVICE_API.md) và [Specification](PROJECT_SPECIFICATION.md).
+Xem [README](../README.md), [Architecture](ARCHITECTURE.md), [Device API](DEVICE_API.md) và [Specification](PROJECT_SPECIFICATION_ANNHA.md).
