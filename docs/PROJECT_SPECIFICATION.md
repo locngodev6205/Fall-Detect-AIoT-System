@@ -19,7 +19,11 @@ Xây dựng một hệ sinh thái **AIoT hoàn chỉnh (Edge AI + Multi-sensor I
 3. **Giám sát môi trường phòng sống đa tham số:** 
    * Thu thập nhiệt độ & độ ẩm thời gian thực thông qua cảm biến **DHT11**.
    * *Mở rộng cải tiến:* Đo cường độ ánh sáng bằng **TSL2561** để tự động cảnh báo/bật đèn khi tối; phát hiện rò rỉ khí độc/cháy bằng **cảm biến Gas (MQ-2)**.
-4. **Hạ tầng truyền thông & Điều phối cảnh báo thông minh:** Sử dụng nền tảng **ThingsBoard** qua giao thức **MQTT**, hỗ trợ Rule Chain cảnh báo đa kênh (Web Dashboard, Popup khẩn cấp, Telegram Bot / SMS).
+4. **Hẹn giờ & Nhắc nhở sinh hoạt thông minh (Smart Scheduling & Reminders):**
+   * Quản lý lịch trình sinh hoạt: Nhắc uống thuốc đúng giờ, nhắc uống nước, chống ngồi một chỗ quá lâu (cho người già).
+   * Quản lý cữ sữa, cữ ăn dặm, giờ ngủ, kiểm tra tã (cho trẻ nhỏ).
+   * Phát giọng nói nhắc nhở qua loa tại phòng và gửi thông báo kèm nút xác nhận qua Telegram Bot / Web Dashboard.
+5. **Hạ tầng truyền thông & Điều phối cảnh báo thông minh:** Sử dụng nền tảng **ThingsBoard** qua giao thức **MQTT**, hỗ trợ Rule Chain cảnh báo đa kênh (Web Dashboard, Popup khẩn cấp, Telegram Bot / SMS).
 
 ---
 
@@ -34,26 +38,29 @@ Xây dựng một hệ sinh thái **AIoT hoàn chỉnh (Edge AI + Multi-sensor I
 │   [ Cảm biến DHT11 ]    ──> GPIO (Đọc Nhiệt độ / Độ ẩm)       │        │
 │   [ Cảm biến TSL2561 ]  ──> I2C (Cường độ ánh sáng Lux)       │        │
 │   [ Cảm biến Khí Gas ]  ──> GPIO/ADC (Nồng độ PPM)            │        │
+│   [ Loa / Buzzer ]      <── Phát giọng nói nhắc nhở / Hẹn giờ │        │
+│   [ Nút bấm xác nhận ]  ──> GPIO (Bệnh nhân bấm xác nhận)     │        │
 │                                                               │        │
 │   ───> Đóng gói Telemetry JSON & Gửi qua MQTT (Port 1883) ────┘        │
 └───────────────────────────────────┬────────────────────────────────────┘
-                                    │ Giao thức MQTT (v1/devices/me/telemetry)
+                                    │ Giao thức MQTT (v1/devices/me/telemetry & RPC)
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
 │                   TẦNG NỀN TẢNG IOT (THINGSBOARD PLATFORM)             │
 │                                                                        │
 │   • MQTT Broker & Device Manager: Quản lý kết nối & Access Token       │
 │   • Telemetry Database: Lưu trữ lịch sử nhiệt độ, độ ẩm, ánh sáng, gas │
-│   • Rule Engine: Kích hoạt Alarms khi Fall = True hoặc Khí Gas vượt mức│
-│   • RPC Remote Control: Điều khiển bật tắt thiết bị ngoại vi từ xa     │
+│   • Scheduler & Rule Engine: Hẹn giờ uống thuốc, cảnh báo nguy cấp     │
+│   • RPC Remote Control: Gửi lệnh phát loa nhắc nhở, điều khiển đèn     │
 └───────────────────┬────────────────────────────────┬───────────────────┘
                     │                                │
                     ▼                                ▼
 ┌──────────────────────────────────────┐  ┌──────────────────────────────┐
-│     TẦNG ỨNG DỤNG (WEB DASHBOARD)    │  │    KÊNH CẢNH BÁO KHẨN CẤP    │
+│     TẦNG ỨNG DỤNG (WEB DASHBOARD)    │  │    KÊNH CẢNH BÁO & NHẮC NHỞ   │
 │                                      │  │                              │
-│ • Giám sát trực quan trạng thái phòng│  │ • Telegram Bot gửi cảnh báo  │
-│ • Popup khẩn cấp khi có người té ngã │  │ • Còi buzzer / Đèn LED phòng │
+│ • Giám sát trực quan trạng thái phòng│  │ • Telegram Bot nhắc uống thuốc│
+│ • Popup khẩn cấp khi có người té ngã │  │ • Phát giọng nói qua Loa     │
+│ • Cài đặt lịch hẹn giờ / Nhắc việc   │  │ • Còi buzzer / Đèn LED phòng │
 │ • Biểu đồ quan trắc môi trường sống │  │ • SMS / Cuộc gọi khẩn cấp    │
 │ • Nhật ký sự kiện & xử lý sự cố      │  │                              │
 └──────────────────────────────────────┘  └──────────────────────────────┘
@@ -147,6 +154,23 @@ Dữ liệu từ module AI và các cảm biến được đóng gói thành đ�
   * Lưu trữ toàn bộ lịch sử các vụ té ngã: Thời điểm xảy ra, độ tin cậy của AI, thời lượng nằm bất động, nhân viên đã xử lý.
 * **Cấu hình tham số từ xa (Remote Configuration via ThingsBoard Shared Attributes):**
   * Cho phép người quản trị điều chỉnh ngưỡng độ tin cậy AI (ví dụ: từ `0.85` lên `0.90`), thời gian chờ xác nhận ngã ($T$ giây), bật/tắt gửi Telegram mà không cần cắm màn hình vào Raspberry Pi.
+* **Quản lý Lịch trình & Hẹn giờ (Schedule & Reminder Management):**
+  * Giao diện thêm/sửa/xóa các mốc hẹn giờ uống thuốc (cho người già), cữ sữa/ăn dặm/giờ ngủ (cho trẻ nhỏ).
+  * Đồng bộ lịch trình xuống Raspberry Pi thông qua giao thức MQTT / ThingsBoard Shared Attributes.
+
+---
+
+### 3.5. Nhóm Nghiệp Vụ Hẹn Giờ & Nhắc Nhở Thông Minh (Smart Scheduling & Reminders)
+
+Đây là nhóm chức năng chăm sóc sức khỏe chủ động (Proactive Healthcare) nhằm hỗ trợ người già hay quên và hỗ trợ cha mẹ quản lý thời gian biểu chăm sóc con nhỏ:
+
+| Mã NV | Tên nghiệp vụ | Đối tượng áp dụng | Mô tả chi tiết |
+| :--- | :--- | :--- | :--- |
+| **FN-REM-01** | Hẹn giờ nhắc uống thuốc (Medication Scheduler) | Người cao tuổi | • Thiết lập lịch uống thuốc theo cữ (Sáng - Trưa - Tối) trên Web Dashboard hoặc ThingsBoard.<br>• Đến giờ hẹn: Loa tại phòng phát giọng nói: *"Bác ơi, đã đến giờ uống thuốc huyết áp buổi sáng rồi ạ!"*.<br>• Đồng thời gửi tin nhắn thông báo nhắc việc đến Telegram của người nhà. |
+| **FN-REM-02** | Cảnh báo ngồi bất động quá lâu (Sedentary Reminder) | Người cao tuổi | • Dựa vào AI camera: Nếu người già ngồi im một vị trí (xem TV, ngồi ghế sofa) liên tục $> 90 - 120\text{ phút}$, hệ thống tự động phát lời nhắc: *"Bác ơi, bác đã ngồi khá lâu rồi, hãy đứng dậy đi dạo nhẹ nhàng và uống nước nhé!"*. |
+| **FN-REM-03** | Hẹn giờ cữ sữa & ăn dặm (Feeding Scheduler) | Trẻ nhỏ | • Hẹn giờ chu kỳ $2 - 3\text{ tiếng}$ nhắc cha mẹ/người trông trẻ chuẩn bị cữ sữa hoặc bột ăn dặm cho bé.<br>• Gửi thông báo đẩy về điện thoại của phụ huynh qua Telegram Bot. |
+| **FN-REM-04** | Hẹn giờ giấc ngủ & kiểm tra tã (Sleep & Care Timer) | Trẻ nhỏ | • Nhắc nhở giờ ngủ trưa / giờ ngủ tối của bé.<br>• Hẹn giờ chu kỳ nhắc kiểm tra tã lót để tránh hăm tã và ngạt bí cho trẻ sơ sinh. |
+| **FN-REM-05** | Xác nhận hoàn thành & Phản hồi hai chiều (Two-way Acknowledge) | Cả hai nhóm | • **Nút bấm vật lý tại phòng (GPIO):** Người già sau khi uống thuốc xong có thể bấm nút để xác nhận "Đã hoàn thành".<br>• **Xác nhận qua Telegram:** Tin nhắn Telegram đính kèm 2 nút bấm Inline `[✅ Đã xong]` và `[⏰ Nhắc lại sau 10 phút]`.<br>• **Cảnh báo trễ (Escalation):** Nếu sau 15 phút chưa có ai bấm xác nhận, hệ thống gửi cảnh báo nhắc nhở lần 2 cho người thân. |
 
 ---
 
@@ -177,13 +201,14 @@ GIAI ĐOẠN 1: NỀN TẢNG CỐT LÕI (HIỆN TẠI)
 ├── Xây dựng giao thức đóng gói MQTT đẩy trực tiếp lên ThingsBoard / Backend
 └── Xây dựng Web Dashboard cơ bản nhận diện sự cố thời gian thực
 
-GIAI ĐOẠN 2: CẢI TIẾN CẢM BIẾN & TỰ ĐỘNG HÓA (TIẾP THEO)
+GIAI ĐOẠN 2: CẢI TIẾN CẢM BIẾN, HẸN GIỜ & TỰ ĐỘNG HÓA (TIẾP THEO)
 ├── Tích hợp cảm biến ánh sáng I2C TSL2561 (tự động bật đèn chống ngã phòng tối)
 ├── Tích hợp cảm biến Khí Gas & Khói MQ-2 (cảnh báo nguy cơ cháy nổ / ngạt khí)
-├── Cấu hình ThingsBoard Rule Chain nâng cao (Alarms, Gửi SMS/Telegram đa người nhận)
+├── Module Hẹn giờ & Nhắc nhở thông minh (nhắc uống thuốc, cữ sữa, vận động qua Telegram & Loa)
+├── Cấu hình ThingsBoard Rule Chain nâng cao (Alarms, Scheduler, Gửi SMS/Telegram đa người nhận)
 └── Thiết kế vỏ hộp thiết bị 3D tích hợp Camera và các cảm biến thành 1 hộp AIoT Box gọn gàng
 
 GIAI ĐOẠN 3: TỐI ƯU HÓA NÂNG CAO (NẾU CÓ THỜI GIAN)
 ├── Chuyển đổi mô hình sang NCNN hoặc tăng tốc qua NPU (Raspberry Pi AI HAT)
-└── Tích hợp loa thông minh phát giọng nói: "Bạn có sao không? Hãy nhấn nút nếu an toàn"
+└── Tích hợp loa thông minh tương tác giọng nói hai chiều: "Bạn có sao không? Hãy nhấn nút nếu an toàn"
 ```
