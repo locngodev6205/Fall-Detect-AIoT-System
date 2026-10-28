@@ -137,6 +137,43 @@ def normalize_skeleton_frame(frame_features_sorted, min_confidence=0.3):
     return normalized_frame
 
 
+def is_person_present(pose_landmarks, min_confidence=0.4, min_valid_keypoints=5):
+    """
+    Kiểm tra xem trong khung hình thực sự có người hay không dựa trên độ tin cậy (visibility)
+    của các điểm khớp MediaPipe:
+    1. Bắt buộc phải có đối tượng pose_landmarks khác None.
+    2. Ít nhất một khớp thân chính (Vai trái/phải hoặc Hông trái/phải) phải có visibility >= min_confidence.
+    3. Tổng số khớp hợp lệ (visibility >= min_confidence) trong 17 khớp phải >= min_valid_keypoints.
+
+    Trả về:
+        bool: True nếu có người trong khung hình, False nếu không có người hoặc nhiễu.
+    """
+    if not pose_landmarks:
+        return False
+
+    landmarks = pose_landmarks.landmark
+    valid_count = 0
+    torso_visible = False
+    torso_landmarks = {
+        mp_pose.PoseLandmark.LEFT_SHOULDER,
+        mp_pose.PoseLandmark.RIGHT_SHOULDER,
+        mp_pose.PoseLandmark.LEFT_HIP,
+        mp_pose.PoseLandmark.RIGHT_HIP,
+    }
+
+    for mp_landmark_enum in MEDIAPIPE_TO_YOUR_KEYPOINTS_MAPPING.keys():
+        try:
+            lm = landmarks[mp_landmark_enum.value]
+            if lm.visibility >= min_confidence:
+                valid_count += 1
+                if mp_landmark_enum in torso_landmarks:
+                    torso_visible = True
+        except (IndexError, Exception):
+            pass
+
+    return torso_visible and (valid_count >= min_valid_keypoints)
+
+
 def extract_and_normalize_features(pose_landmarks, min_confidence=0.3):
     """
     Trích xuất tọa độ 17 khớp từ đối tượng pose_landmarks của MediaPipe,

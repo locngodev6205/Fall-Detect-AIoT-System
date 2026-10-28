@@ -1,0 +1,604 @@
+{
+  "title": "SmartFall AIoT Monitor",
+  "image": null,
+  "mobileHide": false,
+  "mobileOrder": null,
+  "configuration": {
+    "description": "Dashboard giám sát phát hiện té ngã & bất động thời gian thực trên Raspberry Pi (SmartFall AIoT)",
+    "widgets": {
+      "3c59e4be-03a5-44c8-ab5f-62b49183941d": {
+        "id": "3c59e4be-03a5-44c8-ab5f-62b49183941d",
+        "type": "timeseries",
+        "typeFullFqn": "system.time_series_chart",
+        "sizeX": 16,
+        "sizeY": 7,
+        "row": 0,
+        "col": 8,
+        "config": {
+          "datasources": [
+            {
+              "type": "entity",
+              "entityAliasId": "3e904359-de03-4499-89ef-7b3dbb0e1932",
+              "dataKeys": [
+                {
+                  "name": "fall_prob",
+                  "type": "timeseries",
+                  "label": "Xác suất P(Fall)",
+                  "color": "#ef4444",
+                  "settings": {
+                    "yAxisId": "default",
+                    "showInLegend": true,
+                    "type": "line",
+                    "lineSettings": {
+                      "showLine": true,
+                      "smooth": true,
+                      "lineWidth": 3
+                    }
+                  },
+                  "_hash": 0.23456
+                }
+              ]
+            }
+          ],
+          "timewindow": {
+            "hideAggregation": false,
+            "hideAggInterval": false,
+            "hideTimezone": false,
+            "selectedTab": 0,
+            "realtime": {
+              "realtimeType": 0,
+              "timewindowMs": 60000,
+              "quickInterval": "CURRENT_DAY",
+              "interval": 1000
+            },
+            "aggregation": {
+              "type": "AVG",
+              "limit": 25000
+            },
+            "timezone": null
+          },
+          "showTitle": true,
+          "backgroundColor": "rgba(0, 0, 0, 0)",
+          "color": "rgba(0, 0, 0, 0.87)",
+          "padding": "0px",
+          "settings": {
+            "showLegend": true,
+            "legendConfig": {
+              "direction": "column",
+              "position": "top",
+              "sortDataKeys": false,
+              "showMin": false,
+              "showMax": false,
+              "showAvg": true,
+              "showTotal": false,
+              "showLatest": false
+            },
+            "thresholds": [
+              {
+                "thresholdValue": 0.85,
+                "thresholdColor": "#ef4444",
+                "thresholdName": "Ngưỡng Báo Động Té Ngã (0.85)"
+              }
+            ],
+            "dataZoom": true,
+            "stack": false,
+            "yAxis": {
+              "show": true,
+              "label": "",
+              "labelFont": {
+                "family": "Roboto",
+                "size": 12,
+                "sizeUnit": "px",
+                "style": "normal",
+                "weight": "600",
+                "lineHeight": "1"
+              },
+              "labelColor": "rgba(0, 0, 0, 0.54)",
+              "position": "left",
+              "showTickLabels": true,
+              "tickLabelFont": {
+                "family": "Roboto",
+                "size": 12,
+                "sizeUnit": "px",
+                "style": "normal",
+                "weight": "400",
+                "lineHeight": "1"
+              },
+              "tickLabelColor": "rgba(0, 0, 0, 0.54)",
+              "showTicks": true,
+              "ticksColor": "rgba(0, 0, 0, 0.54)",
+              "showLine": true,
+              "lineColor": "rgba(0, 0, 0, 0.54)",
+              "showSplitLines": true,
+              "splitLinesColor": "rgba(0, 0, 0, 0.12)"
+            },
+            "xAxis": {
+              "show": true,
+              "label": "",
+              "labelFont": {
+                "family": "Roboto",
+                "size": 12,
+                "sizeUnit": "px",
+                "style": "normal",
+                "weight": "600",
+                "lineHeight": "1"
+              },
+              "labelColor": "rgba(0, 0, 0, 0.54)",
+              "position": "bottom",
+              "showTickLabels": true,
+              "tickLabelFont": {
+                "family": "Roboto",
+                "size": 10,
+                "sizeUnit": "px",
+                "style": "normal",
+                "weight": "400",
+                "lineHeight": "1"
+              },
+              "tickLabelColor": "rgba(0, 0, 0, 0.54)",
+              "ticksFormat": {},
+              "showTicks": true,
+              "ticksColor": "rgba(0, 0, 0, 0.54)",
+              "showLine": true,
+              "lineColor": "rgba(0, 0, 0, 0.54)",
+              "showSplitLines": true,
+              "splitLinesColor": "rgba(0, 0, 0, 0.12)"
+            },
+            "legendLabelFont": {
+              "family": "Roboto",
+              "size": 12,
+              "sizeUnit": "px",
+              "style": "normal",
+              "weight": "400",
+              "lineHeight": "16px"
+            },
+            "legendLabelColor": "rgba(0, 0, 0, 0.76)",
+            "showTooltip": true,
+            "tooltipTrigger": "axis",
+            "tooltipValueFont": {
+              "family": "Roboto",
+              "size": 12,
+              "sizeUnit": "px",
+              "style": "normal",
+              "weight": "500",
+              "lineHeight": "16px"
+            },
+            "tooltipValueColor": "rgba(0, 0, 0, 0.76)",
+            "tooltipShowDate": true,
+            "tooltipDateFormat": {
+              "format": null,
+              "lastUpdateAgo": false,
+              "custom": false,
+              "auto": true,
+              "autoDateFormatSettings": {}
+            },
+            "tooltipDateFont": {
+              "family": "Roboto",
+              "size": 11,
+              "sizeUnit": "px",
+              "style": "normal",
+              "weight": "400",
+              "lineHeight": "16px"
+            },
+            "tooltipDateColor": "rgba(0, 0, 0, 0.76)",
+            "tooltipDateInterval": true,
+            "tooltipBackgroundColor": "rgba(255, 255, 255, 0.76)",
+            "tooltipBackgroundBlur": 4,
+            "background": {
+              "type": "color",
+              "color": "#fff",
+              "overlay": {
+                "enabled": false,
+                "color": "rgba(255,255,255,0.72)",
+                "blur": 3
+              }
+            },
+            "yAxes": {
+              "default": {
+                "units": null,
+                "decimals": 0,
+                "show": true,
+                "label": "",
+                "labelFont": {
+                  "family": "Roboto",
+                  "size": 12,
+                  "sizeUnit": "px",
+                  "style": "normal",
+                  "weight": "600",
+                  "lineHeight": "1"
+                },
+                "labelColor": "rgba(0, 0, 0, 0.54)",
+                "position": "left",
+                "showTickLabels": true,
+                "tickLabelFont": {
+                  "family": "Roboto",
+                  "size": 12,
+                  "sizeUnit": "px",
+                  "style": "normal",
+                  "weight": "400",
+                  "lineHeight": "1"
+                },
+                "tickLabelColor": "rgba(0, 0, 0, 0.54)",
+                "ticksFormatter": null,
+                "showTicks": true,
+                "ticksColor": "rgba(0, 0, 0, 0.54)",
+                "showLine": true,
+                "lineColor": "rgba(0, 0, 0, 0.54)",
+                "showSplitLines": true,
+                "splitLinesColor": "rgba(0, 0, 0, 0.12)",
+                "id": "default",
+                "order": 0,
+                "min": 0,
+                "max": 1
+              }
+            },
+            "noAggregationBarWidthSettings": {
+              "strategy": "group",
+              "groupWidth": {
+                "relative": true,
+                "relativeWidth": 2,
+                "absoluteWidth": 1000
+              },
+              "barWidth": {
+                "relative": true,
+                "relativeWidth": 2,
+                "absoluteWidth": 1000
+              }
+            },
+            "animation": {
+              "animation": true,
+              "animationThreshold": 2000,
+              "animationDuration": 500,
+              "animationEasing": "cubicOut",
+              "animationDelay": 0,
+              "animationDurationUpdate": 300,
+              "animationEasingUpdate": "cubicOut",
+              "animationDelayUpdate": 0
+            },
+            "padding": "12px"
+          },
+          "title": "Xác Suất Té Ngã Thời Gian Thực - P(Fall)",
+          "dropShadow": true,
+          "enableFullscreen": true,
+          "titleStyle": null,
+          "mobileHeight": null,
+          "configMode": "basic",
+          "actions": {},
+          "showTitleIcon": false,
+          "titleIcon": "thermostat",
+          "iconColor": "#1F6BDD",
+          "useDashboardTimewindow": false,
+          "displayTimewindow": true,
+          "titleFont": {
+            "size": 16,
+            "sizeUnit": "px",
+            "family": "Roboto",
+            "weight": "500",
+            "style": "normal",
+            "lineHeight": "24px"
+          },
+          "titleColor": "rgba(0, 0, 0, 0.87)",
+          "titleTooltip": "",
+          "widgetStyle": {},
+          "widgetCss": "",
+          "pageSize": 1024,
+          "units": "",
+          "decimals": null,
+          "noDataDisplayMessage": "",
+          "timewindowStyle": {
+            "showIcon": false,
+            "iconSize": "24px",
+            "icon": null,
+            "iconPosition": "left",
+            "font": {
+              "size": 12,
+              "sizeUnit": "px",
+              "family": "Roboto",
+              "weight": "400",
+              "style": "normal",
+              "lineHeight": "16px"
+            },
+            "color": "rgba(0, 0, 0, 0.38)",
+            "displayTypePrefix": true
+          },
+          "margin": "0px",
+          "borderRadius": "0px",
+          "iconSize": "0px"
+        }
+      },
+      "30dde395-e4fc-4cc8-bf9b-e5f549e3db81": {
+        "id": "30dde395-e4fc-4cc8-bf9b-e5f549e3db81",
+        "type": "latest",
+        "typeFullFqn": "system.cards.html_value_card",
+        "sizeX": 13,
+        "sizeY": 5,
+        "row": 7,
+        "col": 0,
+        "config": {
+          "datasources": [
+            {
+              "type": "entity",
+              "entityAliasId": "3e904359-de03-4499-89ef-7b3dbb0e1932",
+              "dataKeys": [
+                {
+                  "name": "status",
+                  "type": "timeseries",
+                  "label": "status",
+                  "color": "#10b981",
+                  "settings": {}
+                },
+                {
+                  "name": "person_status",
+                  "type": "timeseries",
+                  "label": "person_status",
+                  "color": "#10b981",
+                  "settings": {}
+                },
+                {
+                  "name": "ai_state",
+                  "type": "timeseries",
+                  "label": "ai_state",
+                  "color": "#38bdf8",
+                  "settings": {}
+                },
+                {
+                  "name": "fps",
+                  "type": "timeseries",
+                  "label": "fps",
+                  "color": "#f59e0b",
+                  "settings": {}
+                },
+                {
+                  "name": "fall_prob",
+                  "type": "timeseries",
+                  "label": "fall_prob",
+                  "color": "#ef4444",
+                  "settings": {}
+                },
+                {
+                  "name": "immobile_seconds",
+                  "type": "timeseries",
+                  "label": "immobile_seconds",
+                  "color": "#f97316",
+                  "settings": {}
+                },
+                {
+                  "name": "target_audience",
+                  "type": "timeseries",
+                  "label": "target_audience",
+                  "color": "#a855f7",
+                  "settings": {}
+                },
+                {
+                  "name": "last_alert_event",
+                  "type": "timeseries",
+                  "label": "last_alert_event",
+                  "color": "#ef4444",
+                  "settings": {}
+                },
+                {
+                  "name": "last_alert_time",
+                  "type": "timeseries",
+                  "label": "last_alert_time",
+                  "color": "#94a3b8",
+                  "settings": {}
+                },
+                {
+                  "name": "cpu_temp",
+                  "type": "timeseries",
+                  "label": "cpu_temp",
+                  "color": "#ef4444",
+                  "settings": {}
+                }
+              ]
+            }
+          ],
+          "timewindow": {
+            "displayValue": "",
+            "selectedTab": 0,
+            "realtime": {
+              "realtimeType": 1,
+              "interval": 1000,
+              "timewindowMs": 60000,
+              "quickInterval": "CURRENT_DAY",
+              "hideInterval": false,
+              "hideLastInterval": false,
+              "hideQuickInterval": false
+            },
+            "history": {
+              "historyType": 0,
+              "interval": 1000,
+              "timewindowMs": 60000,
+              "fixedTimewindow": {
+                "startTimeMs": 1791950996911,
+                "endTimeMs": 1792037396911
+              },
+              "quickInterval": "CURRENT_DAY",
+              "hideInterval": false,
+              "hideLastInterval": false,
+              "hideFixedInterval": false,
+              "hideQuickInterval": false
+            },
+            "aggregation": {
+              "type": "AVG",
+              "limit": 25000
+            }
+          },
+          "showTitle": true,
+          "backgroundColor": "#fff",
+          "color": "rgba(0, 0, 0, 0.87)",
+          "padding": "0px",
+          "settings": {
+            "cardHtml": "<div class=\"gate-status-card\">\n  <div class=\"header-row\">\n    <div class=\"device-info\">\n      <span class=\"device-name\">RASPI_ROOM_101</span>\n      <span class=\"device-model\">SmartFall Edge AIoT (MediaPipe + Transformer)</span>\n    </div>\n    <div class=\"badge status-badge\">● ${status:ONLINE}</div>\n  </div>\n  \n  <div class=\"telemetry-body\">\n    <div class=\"mode-container\">\n      <div class=\"mode-label\">TRẠNG THÁI AI HIỆN TẠI</div>\n      <div class=\"mode-value\">${ai_state:NO_PERSON}</div>\n    </div>\n    \n    <div class=\"telemetry-badges\">\n      <div class=\"badge-item\">\n        <span class=\"badge-label\">Trong hình:</span>\n        <span class=\"badge-val badge-AWAKE\">${person_status:KHÔNG CÓ NGƯỜI}</span>\n      </div>\n      <div class=\"badge-item\">\n        <span class=\"badge-label\">Đối tượng:</span>\n        <span class=\"badge-val badge-AWAKE\">${target_audience:elderly}</span>\n      </div>\n      <div class=\"badge-item\">\n        <span class=\"badge-label\">P(Fall):</span>\n        <span class=\"badge-val latch-READY\">${fall_prob:0.00}</span>\n      </div>\n    </div>\n  </div>\n\n  <div class=\"section-divider\"></div>\n\n  <div class=\"hw-section\">\n    <div class=\"section-title\">🚨 CHỈ SỐ AN TOÀN & CẢNH BÁO GẦN NHẤT</div>\n    <div class=\"hw-grid\">\n      <div class=\"hw-box\">\n        <span class=\"hw-name\">TG Bất Động</span>\n        <span class=\"hw-val\">${immobile_seconds:0}s</span>\n      </div>\n      <div class=\"hw-box\">\n        <span class=\"hw-name\">Sự Kiện Gần Nhất</span>\n        <span class=\"hw-val\">${last_alert_event:NONE}</span>\n      </div>\n      <div class=\"hw-box\">\n        <span class=\"hw-name\">Thời Điểm Báo</span>\n        <span class=\"hw-val\">${last_alert_time:--:--}</span>\n      </div>\n    </div>\n  </div>\n\n  <div class=\"footer-row\">\n    <div class=\"info-item\">Chuỗi: <span>30 frames (17 khớp)</span></div>\n    <div class=\"info-item\">Tốc độ: <span>${fps:0} FPS</span></div>\n    <div class=\"info-item\">Model: <span>Transformer TFLite</span></div>\n  </div>\n</div>",
+            "cardCss": ".gate-status-card {\n  width: 100%;\n  height: 100%;\n  background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);\n  border: 1px solid #334155;\n  border-radius: 12px;\n  padding: 14px 18px;\n  display: flex;\n  flex-direction: column;\n  justify-content: space-between;\n  box-sizing: border-box;\n  font-family: \"Inter\", -apple-system, sans-serif;\n  color: #e2e8f0;\n}\n.header-row {\n  display: flex;\n  justify-content: space-between;\n  align-items: center;\n}\n.device-info {\n  display: flex;\n  flex-direction: column;\n  gap: 2px;\n}\n.device-name {\n  color: #f8fafc;\n  font-size: 13px;\n  font-weight: 700;\n  letter-spacing: 0.05em;\n  text-transform: uppercase;\n}\n.device-model {\n  color: #64748b;\n  font-size: 10px;\n  font-weight: 500;\n}\n.status-badge {\n  background: rgba(16, 185, 129, 0.15);\n  color: #10b981;\n  border: 1px solid rgba(16, 185, 129, 0.4);\n  padding: 3px 10px;\n  border-radius: 20px;\n  font-size: 11px;\n  font-weight: 700;\n  letter-spacing: 0.05em;\n}\n.telemetry-body {\n  display: flex;\n  justify-content: space-between;\n  align-items: center;\n  margin: 4px 0;\n}\n.mode-label {\n  color: #64748b;\n  font-size: 10px;\n  font-weight: 600;\n  letter-spacing: 0.06em;\n  text-transform: uppercase;\n}\n.mode-value {\n  color: #38bdf8;\n  font-size: 24px;\n  font-weight: 800;\n  letter-spacing: -0.02em;\n  text-shadow: 0 0 16px rgba(56, 189, 248, 0.3);\n}\n.telemetry-badges {\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n  align-items: flex-end;\n}\n.badge-item {\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  font-size: 11px;\n}\n.badge-label {\n  color: #94a3b8;\n  font-weight: 600;\n}\n.badge-val {\n  padding: 2px 7px;\n  border-radius: 6px;\n  font-weight: 700;\n  font-size: 10px;\n}\n.badge-AWAKE {\n  background: rgba(16, 185, 129, 0.2);\n  color: #10b981;\n  border: 1px solid rgba(16, 185, 129, 0.4);\n}\n.badge-SLEEP {\n  background: rgba(100, 116, 139, 0.2);\n  color: #94a3b8;\n  border: 1px solid rgba(100, 116, 139, 0.3);\n}\n.latch-READY {\n  background: rgba(56, 189, 248, 0.2);\n  color: #38bdf8;\n  border: 1px solid rgba(56, 189, 248, 0.4);\n}\n.latch-LOCKED {\n  background: rgba(245, 158, 11, 0.2);\n  color: #f59e0b;\n  border: 1px solid rgba(245, 158, 11, 0.4);\n}\n.section-divider {\n  height: 1px;\n  background: #334155;\n  margin: 4px 0;\n}\n.section-title {\n  color: #94a3b8;\n  font-size: 10px;\n  font-weight: 700;\n  letter-spacing: 0.05em;\n  margin-bottom: 4px;\n  text-transform: uppercase;\n}\n.hw-grid {\n  display: grid;\n  grid-template-columns: repeat(3, 1fr);\n  gap: 8px;\n}\n.hw-box {\n  background: rgba(15, 23, 42, 0.6);\n  border: 1px solid rgba(51, 65, 85, 0.8);\n  border-radius: 8px;\n  padding: 6px 8px;\n  display: flex;\n  flex-direction: column;\n  gap: 2px;\n}\n.hw-name {\n  color: #64748b;\n  font-size: 9px;\n  font-weight: 600;\n  text-transform: uppercase;\n}\n.hw-val {\n  color: #f1f5f9;\n  font-size: 13px;\n  font-weight: 700;\n}\n.val-temp {\n  color: #10b981;\n}\n.periph-grid {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 6px;\n}\n.periph-box {\n  background: rgba(15, 23, 42, 0.5);\n  border: 1px solid rgba(51, 65, 85, 0.6);\n  border-radius: 6px;\n  padding: 3px 8px;\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  font-size: 10px;\n}\n.periph-name {\n  color: #94a3b8;\n  font-weight: 600;\n}\n.periph-val {\n  color: #38bdf8;\n  font-weight: 700;\n}\n.badge-toggle {\n  color: #a7f3d0;\n}\n.footer-row {\n  display: flex;\n  justify-content: space-between;\n  border-top: 1px solid #334155;\n  padding-top: 6px;\n  margin-top: 2px;\n}\n.info-item {\n  color: #64748b;\n  font-size: 10px;\n}\n.info-item span {\n  color: #cbd5e1;\n  font-weight: 600;\n}"
+          },
+          "title": "Trạng Thái Giám Sát Phòng (RASPI_ROOM_101)",
+          "dropShadow": false,
+          "enableFullscreen": true,
+          "widgetStyle": {},
+          "titleStyle": {
+            "fontSize": "16px",
+            "fontWeight": 400
+          },
+          "useDashboardTimewindow": true,
+          "showLegend": false,
+          "actions": {}
+        }
+      },
+      "35fa7634-b016-40c0-b681-a833ad7ad31b": {
+        "id": "35fa7634-b016-40c0-b681-a833ad7ad31b",
+        "type": "rpc",
+        "typeFullFqn": "system.control_widgets.switch_control",
+        "sizeX": 11,
+        "sizeY": 5,
+        "row": 7,
+        "col": 13,
+        "config": {
+          "targetDeviceAliases": [
+            "3e904359-de03-4499-89ef-7b3dbb0e1932"
+          ],
+          "showTitle": true,
+          "backgroundColor": "#e6e7e8",
+          "color": "rgba(0, 0, 0, 0.87)",
+          "padding": "0px",
+          "settings": {
+            "requestTimeout": 2000,
+            "initialValue": true,
+            "getValueMethod": "getImmobilityDetection",
+            "setValueMethod": "setImmobilityDetection",
+            "showOnOffLabels": true,
+            "title": "BẬT / TẮT Phát Hiện Nằm Bất Động Kéo Dài",
+            "retrieveValueMethod": "attribute",
+            "valueKey": "enable_immobility_detection",
+            "parseValueFunction": "return data === true || data === 'true';"
+          },
+          "title": "Điều Khiển Giám Sát Bất Động (2 Chiều RPC)",
+          "dropShadow": true,
+          "enableFullscreen": false,
+          "widgetStyle": {},
+          "titleStyle": {
+            "fontSize": "16px",
+            "fontWeight": 400
+          },
+          "useDashboardTimewindow": true,
+          "showLegend": false,
+          "actions": {},
+          "decimals": 2,
+          "targetDevice": {
+            "type": "entity",
+            "entityAliasId": "3e904359-de03-4499-89ef-7b3dbb0e1932"
+          },
+          "targetDeviceId": "0b987260-d29b-11f1-9716-fb9cda8edabf",
+          "datasources": []
+        }
+      }
+    },
+    "entityAliases": {
+      "3e904359-de03-4499-89ef-7b3dbb0e1932": {
+        "id": "3e904359-de03-4499-89ef-7b3dbb0e1932",
+        "alias": "RASPI_ROOM_101",
+        "filter": {
+          "type": "singleEntity",
+          "singleEntity": {
+            "entityType": "DEVICE",
+            "id": "0b987260-d29b-11f1-9716-fb9cda8edabf"
+          }
+        }
+      }
+    },
+    "states": {
+      "default": {
+        "name": "SmartFall AIoT Monitor",
+        "root": true,
+        "layouts": {
+          "main": {
+            "widgets": {
+              "3c59e4be-03a5-44c8-ab5f-62b49183941d": {
+                "sizeX": 24,
+                "sizeY": 7,
+                "row": 6,
+                "col": 0,
+                "mobileOrder": 3
+              },
+              "30dde395-e4fc-4cc8-bf9b-e5f549e3db81": {
+                "sizeX": 14,
+                "sizeY": 6,
+                "row": 0,
+                "col": 0,
+                "mobileOrder": 1
+              },
+              "35fa7634-b016-40c0-b681-a833ad7ad31b": {
+                "sizeX": 10,
+                "sizeY": 6,
+                "row": 0,
+                "col": 14,
+                "mobileOrder": 2
+              }
+            },
+            "gridSettings": {
+              "backgroundColor": "#0f172a",
+              "color": "rgba(255, 255, 255, 0.87)",
+              "columns": 24,
+              "autoFillHeight": true,
+              "backgroundSizeMode": "100%",
+              "mobileAutoFillHeight": false,
+              "mobileRowHeight": 70,
+              "margin": 10,
+              "outerMargin": true,
+              "layoutType": "default"
+            }
+          }
+        }
+      }
+    },
+    "timewindow": {
+      "displayValue": "",
+      "selectedTab": 0,
+      "realtime": {
+        "realtimeType": 0,
+        "interval": 1000,
+        "timewindowMs": 3600000,
+        "quickInterval": "CURRENT_DAY",
+        "hideInterval": false,
+        "hideLastInterval": false,
+        "hideQuickInterval": false
+      },
+      "aggregation": {
+        "type": "NONE",
+        "limit": 500
+      }
+    },
+    "settings": {
+      "stateControllerId": "entity",
+      "showTitle": true,
+      "showDashboardsSelect": true,
+      "showEntitiesSelect": false,
+      "showDashboardTimewindow": true,
+      "showDashboardExport": true,
+      "toolbarAlwaysOpen": true
+    },
+    "filters": {}
+  },
+  "name": "SmartFall AIoT Monitor",
+  "resources": null,
+  "id": {
+    "entityType": "DASHBOARD",
+    "id": "0bdd6aa0-d29b-11f1-9716-fb9cda8edabf"
+  },
+  "createdTime": 1793169878601,
+  "tenantId": {
+    "entityType": "TENANT",
+    "id": "74c05500-c7f6-11f1-9b9a-73474c36c48d"
+  },
+  "assignedCustomers": [
+    {
+      "customerId": {
+        "entityType": "CUSTOMER",
+        "id": "0c8d5690-c80f-11f1-8ff0-51a080711a36"
+      },
+      "title": "Public",
+      "public": true
+    }
+  ],
+  "version": 3,
+  "externalId": null
+}

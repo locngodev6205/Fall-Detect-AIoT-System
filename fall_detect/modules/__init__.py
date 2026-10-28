@@ -7,6 +7,7 @@ Package modules chứa các thành phần cốt lõi của hệ thống nhận d
 """
 
 from .skeleton import (
+    is_person_present,
     extract_and_normalize_features,
     normalize_skeleton_frame,
     get_kpt_indices_training_order,
@@ -20,6 +21,7 @@ from .detector import FallDetector, DetectionResult
 from .visualizer import Visualizer
 
 __all__ = [
+    'is_person_present',
     'extract_and_normalize_features',
     'normalize_skeleton_frame',
     'get_kpt_indices_training_order',

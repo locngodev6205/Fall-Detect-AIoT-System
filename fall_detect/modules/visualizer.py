@@ -26,7 +26,7 @@ class Visualizer:
         self.thickness_alert = 2
         self.padding = 30
 
-    def draw(self, frame_bgr, pose_landmarks, detection_result):
+    def draw(self, frame_bgr, pose_landmarks, detection_result, fps=None):
         """
         Vẽ toàn bộ thông tin trực quan lên khung hình:
         1. Các điểm khớp và đường nối khung xương.
@@ -38,8 +38,8 @@ class Visualizer:
         """
         display_frame = frame_bgr.copy()
 
-        # 1. Vẽ các điểm khớp xương và đường nối
-        if pose_landmarks:
+        # 1. Vẽ các điểm khớp xương và đường nối (chỉ vẽ khi có người hợp lệ)
+        if pose_landmarks and getattr(detection_result, "person_present", True):
             temp_rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
             mp_drawing.draw_landmarks(
                 temp_rgb,
@@ -53,6 +53,8 @@ class Visualizer:
         status_text = detection_result.status_text
         if "Error" in status_text:
             status_color = (0, 0, 255)      # Đỏ cho lỗi
+        elif detection_result.label == "no_person" or not getattr(detection_result, "person_present", True):
+            status_color = (180, 180, 180)  # Xám nhạt khi không có người trong khung hình
         elif "Collecting" in status_text:
             status_color = (255, 255, 0)    # Xanh lơ khi đang gom dữ liệu
         elif detection_result.label == "fall":
@@ -85,6 +87,16 @@ class Visualizer:
                 display_frame, alert_text, (alert_x, alert_y),
                 self.font_face, self.font_scale_alert, (0, 0, 255),
                 self.thickness_alert, cv2.LINE_AA
+            )
+
+        # 4b. Hiển thị FPS ở góc dưới bên trái màn hình
+        if fps is not None:
+            fps_text = f"FPS: {fps:.1f}"
+            fps_y = display_frame.shape[0] - self.padding // 2
+            cv2.putText(
+                display_frame, fps_text, (self.padding // 2, fps_y),
+                self.font_face, self.font_scale_status, (0, 255, 0),
+                self.thickness_status, cv2.LINE_AA
             )
 
         # 5. Hiển thị cảnh báo nếu đang nằm bất động

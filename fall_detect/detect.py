@@ -38,18 +38,22 @@ CẤU HÌNH KẾT NỐI & CẢNH BÁO:
 """
 
 import os
+import time
 import argparse
 import cv2
 import mediapipe as mp
 
 import config
-from modules.skeleton import extract_and_normalize_features, NUM_FEATURES
+from modules.skeleton import is_person_present, extract_and_normalize_features, NUM_FEATURES
 from modules.notifier import Notifier
 from modules.detector import FallDetector
 from modules.visualizer import Visualizer
 
 
 def main(source_type="webcam", file_path=None, no_display=False, camera_id=0):
+    # Tự động chuyển sang chế độ Headless (no_display=True) nếu chạy trên Linux qua SSH (không có biến DISPLAY)
+    if not no_display and os.name == "posix" and not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+        no_display = True
     # 1. Xác định đường dẫn mô hình
     model_path = config.MODEL_PATH if os.path.exists(config.MODEL_PATH) else 'fall_detection_transformer.tflite'
     if not os.path.exists(model_path):
@@ -58,17 +62,21 @@ def main(source_type="webcam", file_path=None, no_display=False, camera_id=0):
         if os.path.exists(sub_path):
             model_path = sub_path
 
-    # 2. Khởi tạo Notifier (MQTT & Telegram)
+    # 2. Khởi tạo Notifier (ThingsBoard MQTT & Telegram)
     notifier = Notifier(
         device_id=config.DEVICE_ID,
         enable_mqtt=config.ENABLE_MQTT,
-        mqtt_broker=config.MQTT_BROKER,
-        mqtt_port=config.MQTT_PORT,
+        mqtt_broker=getattr(config, 'TB_HOST', config.MQTT_BROKER),
+        mqtt_port=getattr(config, 'TB_PORT', config.MQTT_PORT),
         mqtt_topic=config.MQTT_TOPIC_FALL_ALERT,
+        tb_token=getattr(config, 'TB_TOKEN', ''),
         enable_telegram=config.ENABLE_TELEGRAM,
         telegram_token=config.TELEGRAM_BOT_TOKEN,
         telegram_chat_id=config.TELEGRAM_CHAT_ID,
-        target_audience=getattr(config, 'TARGET_AUDIENCE', 'elderly')
+        target_audience=getattr(config, 'TARGET_AUDIENCE', 'elderly'),
+        enable_immobility=getattr(config, 'ENABLE_IMMOBILITY_DETECTION', True),
+        immobility_timeout_seconds=getattr(config, 'IMMOBILITY_TIMEOUT_SECONDS', 60),
+        device_token=getattr(config, 'DEVICE_TOKEN', '')
     )
     notifier.log("Khởi động hệ thống SmartFall Edge Monitor...")
 
@@ -84,6 +92,20 @@ def main(source_type="webcam", file_path=None, no_display=False, camera_id=0):
         on_fall_alert=notifier.send_fall_alert,
         on_immobility_alert=notifier.send_immobility_alert
     )
+
+    # Đồng bộ cài đặt thời gian thực từ ThingsBoard (Shared Attributes / RPC)
+    def handle_tb_settings(updates: dict):
+        if "fall_confidence_threshold" in updates:
+            detector.confidence_threshold = float(updates["fall_confidence_threshold"])
+        if "immobility_timeout_seconds" in updates:
+            detector.immobility_timeout_seconds = int(updates["immobility_timeout_seconds"])
+        if "enable_immobility_detection" in updates:
+            detector.enable_immobility = bool(updates["enable_immobility_detection"])
+        if "target_audience" in updates and "immobility_timeout_seconds" not in updates:
+            detector.immobility_timeout_seconds = 30 if updates["target_audience"] == "child" else 120
+        notifier.log(f"[ThingsBoard] Đã đồng bộ cấu hình từ xa: {updates}")
+
+    notifier.on_settings_change = handle_tb_settings
 
     # 4. Khởi tạo Visualizer đồ họa
     window_title = f"SmartFall Edge Monitor - {config.DEVICE_ID}"
@@ -123,6 +145,12 @@ def main(source_type="webcam", file_path=None, no_display=False, camera_id=0):
         min_tracking_confidence=0.5
     ) as pose:
 
+        fps = 0.0
+        prev_tick = time.perf_counter()
+        last_fps_log_time = prev_tick
+        frame_count_since_log = 0
+        FPS_LOG_INTERVAL = 2.0  # In log FPS mỗi 2 giây
+
         while cap.isOpened():
             success, frame = cap.read()
             if not success:
@@ -137,15 +165,36 @@ def main(source_type="webcam", file_path=None, no_display=False, camera_id=0):
             image_rgb.flags.writeable = False
             pose_results = pose.process(image_rgb)
 
-            # Trích xuất 17 khớp & Chuẩn hóa tọa độ không gian
-            features = extract_and_normalize_features(pose_results.pose_landmarks)
+            # Kiểm tra xem có người trong khung hình hay không
+            person_present = is_person_present(pose_results.pose_landmarks)
+
+            # Trích xuất 17 khớp & Chuẩn hóa tọa độ không gian (chỉ khi có người)
+            features = extract_and_normalize_features(pose_results.pose_landmarks) if person_present else None
 
             # Cập nhật bộ đệm và phán đoán qua mô hình TFLite
-            result = detector.update(features)
+            result = detector.update(features, person_present=person_present)
+
+            # Tính FPS (làm mượt bằng trung bình trượt mũ) và in log định kỳ
+            now_tick = time.perf_counter()
+            instant_fps = 1.0 / max(now_tick - prev_tick, 1e-6)
+            fps = instant_fps if fps == 0.0 else 0.9 * fps + 0.1 * instant_fps
+            prev_tick = now_tick
+            frame_count_since_log += 1
+            if now_tick - last_fps_log_time >= FPS_LOG_INTERVAL:
+                avg_fps = frame_count_since_log / (now_tick - last_fps_log_time)
+                presence_str = "CÓ NGƯỜI" if result.person_present else "KHÔNG CÓ NGƯỜI"
+                notifier.log(
+                    f"FPS: {avg_fps:.1f} ({1000.0 / max(avg_fps, 1e-6):.1f} ms/frame) | "
+                    f"Trạng thái: {presence_str} ({result.status_text}) | "
+                    f"Bất động: {result.immobile_duration:.1f}s"
+                )
+                notifier.send_heartbeat(fps_val=avg_fps, detection_result=result)
+                last_fps_log_time = now_tick
+                frame_count_since_log = 0
 
             # Hiển thị đồ họa (nếu không ở chế độ Headless)
             if not no_display:
-                display_frame = visualizer.draw(frame, pose_results.pose_landmarks, result)
+                display_frame = visualizer.draw(frame, pose_results.pose_landmarks, result, fps=fps)
                 cv2.imshow(window_title, display_frame)
 
                 key = cv2.waitKey(1) & 0xFF

@@ -18,12 +18,13 @@ import tflite_runtime.interpreter as tflite
 @dataclass
 class DetectionResult:
     status_text: str          # Văn bản trạng thái hiển thị
-    label: str                # 'fall' hoặc 'no_fall'
+    label: str                # 'fall', 'no_fall', hoặc 'no_person'
     confidence: float         # Độ tin cậy hiển thị (0.0 - 1.0)
     raw_fall_prob: float      # Xác suất P(fall) thô từ sigmoid (0.0 - 1.0)
     is_fall: bool             # True nếu model dự đoán ngã
     is_alert_active: bool     # True nếu đang trong thời gian hiển thị cảnh báo ngã
     immobile_duration: float  # Số giây đối tượng đang nằm bất động liên tục
+    person_present: bool = False  # True nếu phát hiện có người trong khung hình
 
 
 class FallDetector:
@@ -78,25 +79,46 @@ class FallDetector:
             )
         print(f"[Detector] Đã nạp thành công mô hình TFLite: {self.model_path}")
 
-    def update(self, current_features):
+    def update(self, current_features, person_present=True):
         """
-        Nhận vector 51 đặc trưng của frame hiện tại,
+        Nhận vector 51 đặc trưng của frame hiện tại và cờ person_present,
         cập nhật bộ đệm, kiểm tra bất động và chạy suy luận té ngã.
+        Khi không có người trong khung hình (person_present=False), hệ thống sẽ
+        reset bộ đếm bất động và không cảnh báo nhầm.
         
         Trả về:
             DetectionResult: Kết quả phán đoán hoàn chỉnh của frame
         """
-        # 1. Cập nhật bộ đệm chuỗi
+        # 0. Nếu không có người trong khung hình -> Reset bộ đếm bất động & không tích lũy vector 0
+        if not person_present or current_features is None:
+            self.immobility_start_time = None
+            self.prev_features = None
+            self.sequence_buffer.clear()
+            return DetectionResult(
+                status_text="NO PERSON",
+                label="no_person",
+                confidence=0.0,
+                raw_fall_prob=0.0,
+                is_fall=False,
+                is_alert_active=False,
+                immobile_duration=0.0,
+                person_present=False
+            )
+
+        # 1. Cập nhật bộ đệm chuỗi (chỉ khi thực sự có người trong hình)
         self.sequence_buffer.append(current_features)
 
-        # 2. Xử lý logic phát hiện bất động kéo dài (FN-AI-05)
+        # 2. Xử lý logic phát hiện bất động kéo dài (chỉ tính khi có người trong khung hình)
         immobile_duration = 0.0
-        if self.enable_immobility and current_features is not None:
+        if self.enable_immobility:
+            # Chỉ lấy tọa độ không gian (x, y) của 17 khớp để đo độ dịch chuyển, bỏ qua kênh confidence
+            curr_xy = np.delete(current_features, np.arange(2, len(current_features), 3))
             if self.prev_features is not None:
-                # Tính biến thiên trung bình giữa 2 frame liên tiếp
-                movement_delta = np.mean(np.abs(current_features - self.prev_features))
-                # Ngưỡng vi sai < 0.008 được xem là hoàn toàn bất động
-                if movement_delta < 0.008:
+                prev_xy = np.delete(self.prev_features, np.arange(2, len(self.prev_features), 3))
+                # Tính biến thiên tọa độ (x, y) trung bình giữa 2 frame liên tiếp
+                movement_delta = float(np.mean(np.abs(curr_xy - prev_xy)))
+                # Ngưỡng vi sai < 0.012 được xem là nằm/ngồi bất động
+                if movement_delta < 0.012:
                     if self.immobility_start_time is None:
                         self.immobility_start_time = time.time()
                     else:
@@ -110,6 +132,8 @@ class FallDetector:
                 else:
                     # Có chuyển động rõ ràng -> reset timer bất động
                     self.immobility_start_time = None
+            else:
+                self.immobility_start_time = time.time()
             self.prev_features = current_features.copy()
 
         # 3. Phán đoán mô hình khi bộ đệm đủ 30 frames
@@ -165,5 +189,6 @@ class FallDetector:
             raw_fall_prob=raw_fall_prob,
             is_fall=is_fall,
             is_alert_active=is_alert_active,
-            immobile_duration=immobile_duration
+            immobile_duration=immobile_duration,
+            person_present=True
         )
