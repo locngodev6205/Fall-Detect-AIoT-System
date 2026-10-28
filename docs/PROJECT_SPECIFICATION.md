@@ -72,6 +72,20 @@ Xây dựng một hệ sinh thái **AIoT hoàn chỉnh (Edge AI + Multi-sensor I
 
 ### 3.1. Nhóm Nghiệp Vụ Phát Hiện Té Ngã Bằng AI (Core Vision AI)
 
+Hệ thống áp dụng kiến trúc **AI Hai Giai Đoạn (Two-Stage AI Pipeline)** kết hợp giữa trích xuất tư thế không gian và phân loại hành vi theo thời gian:
+
+#### Bảng Đặc Tả 2 Mô Hình AI Trong Hệ Thống:
+| Tiêu chí đặc tả | **Model 1: MediaPipe BlazePose** | **Model 2: Transformer Classifier** |
+| :--- | :--- | :--- |
+| **Vai trò / Phân loại** | Trích xuất đặc trưng tư thế không gian (Spatial Feature Extraction) | Phân loại hành động chuỗi thời gian (Temporal Action Recognition) |
+| **Kiến trúc cốt lõi** | Convolutional Neural Network (CNN) - BlazePose Detector & Tracker | Transformer Encoder (4 Attention Heads, FFN, Positional Encoding) |
+| **Nguồn gốc mô hình** | **Pre-trained Model** của Google (tối ưu hóa sẵn cho chip ARM) | **Custom Trained Model** (nhóm tự xây dựng & huấn luyện trên Kaggle) |
+| **Dữ liệu đầu vào (Input)**| Ảnh khung hình camera thô `(480, 640, 3)` RGB | Ma trận chuỗi 30 khung hình khớp xương `(1, 30, 51)` |
+| **Kết quả đầu ra (Output)**| Tọa độ $(x, y, z)$ của **17 khớp xương chính** cơ thể | Xác suất té ngã $P(\text{Fall}) \in [0.0, 1.0]$ |
+| **Định dạng & Dung lượng** | Nhúng sẵn trong gói `mediapipe` (~3 - 5 MB) | File TensorFlow Lite độc lập `fall_detection_transformer.tflite` (**313 KB**) |
+| **Thư viện chạy trên Pi** | `mediapipe` (kích hoạt tập lệnh ARM NEON) | `tflite-runtime` (tăng tốc bằng XNNPACK) |
+
+#### Danh Sách Chức Năng Cụ Thể:
 | Mã NV | Tên nghiệp vụ | Mô tả chi tiết |
 | :--- | :--- | :--- |
 | **FN-AI-01** | Trích xuất khớp xương thời gian thực | Sử dụng **MediaPipe Pose** đọc luồng video (640x480, $\ge 15$ FPS), trích xuất tọa độ không gian 17 khớp xương chính (Mũi, mắt, tai, vai, khuỷu tay, cổ tay, hông, đầu gối, mắt cá chân). |
