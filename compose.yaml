@@ -1,0 +1,54 @@
+name: annha
+services:
+  frontend:
+    build: ./frontend
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8188}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+  backend:
+    build: ./backend
+    environment:
+      MQTT_ENABLED: "true"
+      MQTT_BROKER: mqtt
+      MQTT_PORT: "1883"
+      MQTT_TOPIC_FALL_ALERT: smartfall/alerts
+      PUBLIC_URL: "${PUBLIC_URL:-http://localhost:8188}"
+      APP_ORIGINS: "${APP_ORIGINS:-http://localhost:8188,http://127.0.0.1:8188,http://localhost:5188,http://127.0.0.1:5188}"
+      COOKIE_SECURE: "${COOKIE_SECURE:-false}"
+      SMTP_HOST: "${SMTP_HOST:-mailpit}"
+      SMTP_PORT: "${SMTP_PORT:-1025}"
+      SMTP_STARTTLS: "${SMTP_STARTTLS:-false}"
+      SMTP_USER: "${SMTP_USER:-}"
+      SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
+      SMTP_FROM: "${SMTP_FROM:-AnNha <noreply@annha.local>}"
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      MEDIA_ROOT: /app/data/media
+      DATABASE_PATH: /app/data/annha.sqlite3
+    volumes:
+      - backend-data:/app/data
+    depends_on:
+      mqtt:
+        condition: service_started
+    restart: unless-stopped
+  mailpit:
+    image: axllent/mailpit:v1.27.8
+    ports:
+      - "127.0.0.1:${MAIL_PORT:-8125}:8025"
+    volumes:
+      - mail-data:/data
+    environment:
+      MP_DATABASE: /data/mailpit.db
+    restart: unless-stopped
+  mqtt:
+    image: eclipse-mosquitto:2.0.22
+    volumes:
+      - ./docker/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mqtt-data:/mosquitto/data
+    restart: unless-stopped
+volumes:
+  backend-data:
+  mqtt-data:
+  mail-data:
