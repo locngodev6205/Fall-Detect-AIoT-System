@@ -120,3 +120,9 @@ Thiết kế database đích: [Neon/PostgreSQL và Cloudinary](docs/DATABASE_DES
 Bộ Docker database/cloud tools: [compose.database.yaml](compose.database.yaml). Hướng dẫn tạo Neon, cấp role, setup Cloudinary và phân biệt các biến có hiệu lực trong [DATABASE_DESIGN_NEON.md](docs/DATABASE_DESIGN_NEON.md). Chạy `python3 scripts/cloud/prepare_secrets.py` để tạo mẫu cấu hình một lần; file hiện hữu được giữ nguyên. Backend chọn PostgreSQL bằng `DATABASE_BACKEND=postgres`; `.env` hiện tại đã cấu hình Neon.
 
 Neon đã được tích hợp; email xác nhận/reset và cảnh báo qua Mailpit đã kiểm thử. Cloudinary để sau: làm theo [NEON_SETUP.md](docs/NEON_SETUP.md). Có thể lưu direct URI qua lời nhắc ẩn bằng `python3 scripts/cloud/configure_neon.py`; không gửi mật khẩu trong chat.
+
+## Giao diện trước khi kết nối Pi
+
+Hai nhà demo hiện có bốn phòng/camera mỗi nhà. Ảnh gốc Calm Home được dùng làm placeholder có nhãn; phòng mới chưa ghép nối cũng có preview, không giả online. Ảnh/luồng thật tự thay placeholder khi được thiết bị gửi lên. Chi tiết sửa UI, kiểm tra backend và cách chạy `npm run test:ui`: [UI_OFFLINE_READINESS.md](docs/UI_OFFLINE_READINESS.md).
+
+Cập nhật tiếp theo: đã gỡ nhãn/tiền tố Demo khỏi tên hiển thị, hoàn thiện ảnh bìa trang chọn nhà và tối ưu truy vấn/tải dữ liệu. Email/mật khẩu giữ nguyên. Số đo trước/sau và kiểm chứng: [PERFORMANCE_AND_UI_REVIEW.md](docs/PERFORMANCE_AND_UI_REVIEW.md).

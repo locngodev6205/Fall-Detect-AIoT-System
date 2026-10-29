@@ -15,7 +15,7 @@ def public_user(row): return {**{key:row[key] for key in ('id','name','email')},
 def session_user(token):
     if not token: raise HTTPException(401,'Vui lòng đăng nhập.')
     with db.connect('auth') as conn:
-        row=conn.execute('''SELECT u.*,s.token_hash,s.csrf_hash FROM annha_private.sessions s JOIN annha_private.users u ON u.id=s.user_id
+        row=conn.execute('''SELECT u.id,u.name,u.email,u.email_verified_at,u.email_version,u.auth_version,s.token_hash,s.csrf_hash FROM annha_private.sessions s JOIN annha_private.users u ON u.id=s.user_id
           WHERE s.token_hash=%s AND s.expires_at>now() AND s.revoked_at IS NULL AND s.auth_version=u.auth_version
           AND u.disabled_at IS NULL AND u.deleted_at IS NULL''',(digest(token),)).fetchone()
     if not row: raise HTTPException(401,'Phiên đăng nhập đã hết hạn.')
@@ -31,12 +31,15 @@ def user(request:Request):
 
 def membership(home,user_id,owner=False):
     with db.connect('auth') as conn:
-        row=conn.execute('SELECT * FROM annha_private.home_memberships WHERE home_id=%s AND user_id=%s AND revoked_at IS NULL',(home,user_id)).fetchone()
+        row=conn.execute("""SELECT m.*,COALESCE(g.scopes,'[]'::jsonb) AS scopes,
+          jsonb_build_object('audio',COALESCE(g.audio,false),'schedules',COALESCE(g.schedules,false)) AS rights
+          FROM annha_private.home_memberships m LEFT JOIN LATERAL (
+            SELECT jsonb_agg(camera_id::text) FILTER(WHERE can_view) AS scopes,bool_or(can_play_audio) AS audio,bool_or(can_edit_reminders) AS schedules
+            FROM annha_private.camera_grants WHERE home_id=m.home_id AND user_id=m.user_id
+          ) g ON true WHERE m.home_id=%s AND m.user_id=%s AND m.revoked_at IS NULL AND EXISTS(SELECT 1 FROM annha.homes h WHERE h.id=m.home_id AND h.archived_at IS NULL)""",(home,user_id)).fetchone()
         if not row: raise HTTPException(404,'Không tìm thấy nhà hoặc chưa được cấp quyền.')
-        grants=conn.execute('SELECT * FROM annha_private.camera_grants WHERE home_id=%s AND user_id=%s',(home,user_id)).fetchall()
     if owner and row['role']!='owner': raise HTTPException(403,'Thao tác này cần quyền chủ nhà.')
-    return {**dict(row),'scopes':[str(g['camera_id']) for g in grants if g['can_view']],
-            'rights':{'audio':any(g['can_play_audio'] for g in grants),'schedules':any(g['can_edit_reminders'] for g in grants)}}
+    return dict(row)
 
 def camera_access(camera_id,user_id,action='view',historical=False):
     with db.connect('auth') as conn:
@@ -52,7 +55,7 @@ def device_identity(token):
     if not token: raise HTTPException(401,'Thông tin xác thực thiết bị không hợp lệ.')
     with db.connect('auth') as conn:
         row=conn.execute('''SELECT c.* FROM annha_private.device_credentials t JOIN annha.cameras c ON c.id=t.camera_id AND c.device_id=t.device_id
-          WHERE t.token_hash=%s AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>now()) AND c.retired_at IS NULL''',(digest(token),)).fetchone()
+          WHERE t.token_hash=%s AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>now()) AND c.retired_at IS NULL AND EXISTS(SELECT 1 FROM annha.homes h WHERE h.id=c.home_id AND h.archived_at IS NULL)''',(digest(token),)).fetchone()
     if not row: raise HTTPException(401,'Thông tin xác thực thiết bị không hợp lệ.')
     return {**dict(row),'id':str(row['id']),'home_id':str(row['home_id'])}
 

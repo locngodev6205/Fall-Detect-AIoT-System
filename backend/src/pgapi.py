@@ -11,6 +11,8 @@ from fastapi.encoders import jsonable_encoder
 from . import models as m, pgdb as db, pgservices as svc
 from .pgsecurity import COOKIE,SESSION_SECONDS,camera_access,csrf_for,device,digest,membership,password_hash,password_matches,public_user,session_user,throttle,user
 
+from .demo_metadata import demo_home
+
 router=APIRouter(prefix='/api')
 Current=Annotated[dict,Depends(user)];Device=Annotated[dict,Depends(device)]
 
@@ -105,8 +107,19 @@ def profile(payload:m.Name,current:Current):
 @router.get('/homes')
 def homes(current:Current):
     with db.connect('auth') as conn:
-        rows=conn.execute('SELECT h.* FROM annha.homes h JOIN annha_private.home_memberships m ON m.home_id=h.id WHERE m.user_id=%s AND m.revoked_at IS NULL AND h.archived_at IS NULL ORDER BY h.name',(current['id'],)).fetchall()
-    return [{**dict(row),**membership(str(row['id']),current['id']),'id':row['id'],'name':row['name'],'settings':{},'email_notifications_supported':True} for row in rows]
+        rows=conn.execute("""SELECT h.*,m.home_id,m.user_id,m.role,m.granted_by,m.created_at AS membership_created_at,m.revoked_at,m.version,
+          COALESCE(g.scopes,'[]'::jsonb) AS scopes,jsonb_build_object('audio',COALESCE(g.audio,false),'schedules',COALESCE(g.schedules,false)) AS rights,
+          (SELECT count(*) FROM annha.rooms r WHERE r.home_id=h.id AND r.archived_at IS NULL) AS room_count,
+          (SELECT count(*) FROM annha.cameras c WHERE c.home_id=h.id AND c.retired_at IS NULL AND (m.role='owner' OR c.id::text IN(SELECT jsonb_array_elements_text(COALESCE(g.scopes,'[]'::jsonb))))) AS camera_count
+          FROM annha.homes h JOIN annha_private.home_memberships m ON m.home_id=h.id
+          LEFT JOIN LATERAL (SELECT jsonb_agg(camera_id::text) FILTER(WHERE can_view) AS scopes,bool_or(can_play_audio) AS audio,bool_or(can_edit_reminders) AS schedules
+            FROM annha_private.camera_grants WHERE home_id=m.home_id AND user_id=m.user_id) g ON true
+          WHERE m.user_id=%s AND m.revoked_at IS NULL AND h.archived_at IS NULL ORDER BY h.name""",(current['id'],)).fetchall()
+    result=[]
+    for row in rows:
+        item=dict(row);item['created_at']=item.pop('membership_created_at');item.update(settings={},email_notifications_supported=True,is_demo=demo_home(row['id']),archive_supported=True)
+        result.append(item)
+    return result
 
 @router.post('/homes',status_code=201)
 def create_home(payload:m.Home,current:Current):
@@ -118,6 +131,29 @@ def create_home(payload:m.Home,current:Current):
         conn.execute('INSERT INTO annha.home_storage(home_id,quota_bytes) VALUES(%s,%s)',(home,int(os.getenv('MAX_HOME_MEDIA_BYTES','536870912'))))
         db.audit(conn,home,current['id'],'home.create',home)
     return {'id':home,**payload.model_dump()}
+
+@router.delete('/homes/{home_id}')
+async def delete_home(home_id:str,payload:m.DeleteHome,current:Current):
+    membership(home_id,current['id'],True)
+    stamp=db.now()
+    # The trusted control plane locks the home before retirement; business history stays intact.
+    with db.connect('auth',home_id,current['id']) as conn:
+        row=conn.execute('SELECT name FROM annha.homes WHERE id=%s AND archived_at IS NULL FOR UPDATE',(home_id,)).fetchone()
+        if not row: raise HTTPException(404,'Nhà không tồn tại.')
+        if payload.confirmation!=row['name']: raise HTTPException(422,'Nhập đúng tên nhà để xác nhận xoá.')
+        conn.execute('UPDATE annha.cameras SET retired_at=%s WHERE home_id=%s AND retired_at IS NULL',(stamp,home_id))
+        conn.execute('UPDATE annha_private.device_credentials SET revoked_at=%s WHERE camera_id IN(SELECT id FROM annha.cameras WHERE home_id=%s) AND revoked_at IS NULL',(stamp,home_id))
+        conn.execute("UPDATE annha_private.invitations SET status='revoked' WHERE home_id=%s AND status='pending'",(home_id,))
+        conn.execute('UPDATE annha.homes SET archived_at=%s WHERE id=%s',(stamp,home_id))
+        db.audit(conn,home_id,current['id'],'home.archive',home_id)
+    with db.connect('worker',home_id) as conn:
+        conn.execute("UPDATE annha.commands SET status='expired' WHERE home_id=%s AND status IN ('pending','accepted','executing')",(home_id,))
+        conn.execute("UPDATE annha.notification_channels SET enabled=false,revoked_at=COALESCE(revoked_at,now()) WHERE home_id=%s",(home_id,))
+        conn.execute("UPDATE annha.notification_deliveries SET status='cancelled' WHERE home_id=%s AND status IN ('pending','sending')",(home_id,))
+        conn.execute('UPDATE annha.reminders SET enabled=false,updated_at=now() WHERE home_id=%s AND deleted_at IS NULL',(home_id,))
+        conn.execute("UPDATE annha_private.job_queue SET status='failed',last_error_code='HomeArchived',secret_ciphertext=NULL,key_id=NULL,lease_owner=NULL,lease_until=NULL WHERE home_id=%s AND kind IN ('tts','compile_config') AND status IN ('pending','running')",(home_id,))
+    await svc.close_home_connections(home_id)
+    return {'message':'Đã đưa nhà vào lưu trữ và ngắt quyền truy cập thiết bị. Lịch sử được giữ lại.'}
 
 @router.patch('/homes/{home_id}')
 def update_home(home_id:str,payload:m.Home,current:Current):
@@ -148,7 +184,7 @@ def update_room(home_id:str,room_id:str,payload:m.Name,current:Current):
 @router.get('/homes/{home_id}/cameras')
 def cameras(home_id:str,current:Current):
     membership(home_id,current['id'])
-    with db.connect('app',home_id,current['id']) as conn: return [svc.camera_public(conn,row) for row in conn.execute('SELECT * FROM annha.cameras WHERE retired_at IS NULL ORDER BY name').fetchall()]
+    with db.connect('app',home_id,current['id']) as conn: return svc.cameras_public(conn,conn.execute('SELECT * FROM annha.cameras WHERE retired_at IS NULL ORDER BY name').fetchall())
 
 @router.post('/homes/{home_id}/cameras/claim',status_code=201)
 def claim(home_id:str,payload:m.Claim,current:Current):
@@ -266,12 +302,23 @@ def config(camera_id:str,current:Current):
     return {'desired_version':state.get('desired_version',0),'applied_version':state.get('applied_version') or 0,'error':state.get('error'),'payload':row['payload'] if row else {'zones':[],'reference':{}}}
 
 @router.get('/homes/{home_id}/events')
-def events(home_id:str,current:Current,limit:int=100,status:str|None=None):
+def events(home_id:str,current:Current,limit:int=100,status:str|None=None,kind:str|None=None,
+           room_id:str|None=None,camera_id:str|None=None,hours:int|None=None,page:int|None=None,page_size:int=10):
     membership(home_id,current['id'])
-    if not 1<=limit<=500: raise HTTPException(422,'Giới hạn không hợp lệ.')
+    if not 1<=limit<=500 or not 1<=page_size<=50 or (page is not None and page<1): raise HTTPException(422,'Giới hạn/trang không hợp lệ.')
+    if hours is not None and not 1<=hours<=87600: raise HTTPException(422,'Khoảng thời gian không hợp lệ.')
+    if kind and kind not in ('fall','immobility','environment','device'): raise HTTPException(422,'Loại sự kiện không hợp lệ.')
+    clauses=['e.home_id=%s'];args=[home_id]
+    for column,value in [('e.status',status),('e.kind',kind),('c.room_id',room_id),('e.camera_id',camera_id)]:
+        if value: clauses.append(column+'=%s');args.append(value)
+    if hours: clauses.append("e.first_observed_at>=now()-%s*interval '1 hour'");args.append(hours)
+    source=' FROM annha.events e JOIN annha.cameras c ON c.id=e.camera_id AND c.home_id=e.home_id LEFT JOIN annha.rooms r ON r.id=c.room_id AND r.home_id=e.home_id WHERE '+' AND '.join(clauses)
     with db.connect('app',home_id,current['id']) as conn:
-        rows=conn.execute('SELECT * FROM annha.events WHERE (%s::text IS NULL OR status=%s) ORDER BY received_at DESC,id DESC LIMIT %s',(status,status,limit)).fetchall()
-        return [svc.event_public(conn,row) for row in rows]
+        count=conn.execute('SELECT count(*) AS n'+source,args) if page is not None else None
+        rows=conn.execute('SELECT e.*,c.name AS camera_name,r.name AS room_name'+source+' ORDER BY e.received_at DESC,e.id DESC LIMIT %s OFFSET %s',args+[page_size if page is not None else limit,(page-1)*page_size if page is not None else 0]).fetchall()
+        total=count.fetchone()['n'] if count else 0
+        items=svc.events_public(conn,rows)
+    return {'items':items,'total':total,'page':page,'page_size':page_size,'total_pages':max(1,(total+page_size-1)//page_size)} if page is not None else items
 
 def event_scope(event_id,current,action='view'):
     # Resolve the tenant from trusted records, then enforce RLS and camera permission.
@@ -310,16 +357,15 @@ async def event_action(event_id:str,payload:m.Action,current:Current):
     await svc.broadcast(result);return result
 
 @router.get('/cameras/{camera_id}/telemetry')
-def telemetry(camera_id:str,current:Current,limit:int=100):
+def telemetry(camera_id:str,current:Current,limit:int=100,hours:int|None=None):
     camera=camera_access(camera_id,current['id'])
-    if not 1<=limit<=1000: raise HTTPException(422,'Giới hạn không hợp lệ.')
+    if not 1<=limit<=1000 or (hours is not None and not 1<=hours<=87600): raise HTTPException(422,'Giới hạn không hợp lệ.')
     with db.connect('app',camera['home_id'],current['id']) as conn:
-        rows=conn.execute('SELECT * FROM annha.telemetry_batches WHERE camera_id=%s ORDER BY received_at DESC,id DESC LIMIT %s',(camera_id,limit)).fetchall()
-        result=[]
-        for row in rows:
-            readings={r['metric']:{key:r[key] for key in ('value','unit','quality')} for r in conn.execute('SELECT * FROM annha.sensor_readings WHERE batch_id=%s',(row['id'],))}
-            result.append({**dict(row),'payload':{'observed_at':row['observed_at'],'readings':readings}})
-        return result
+        rows=conn.execute("""SELECT b.*,COALESCE((SELECT jsonb_object_agg(r.metric,jsonb_build_object('value',r.value,'unit',r.unit,'quality',r.quality))
+          FROM annha.sensor_readings r WHERE r.batch_id=b.id),'{}'::jsonb) AS readings
+          FROM (SELECT * FROM annha.telemetry_batches WHERE camera_id=%s AND (%s::integer IS NULL OR observed_at>=now()-%s*interval '1 hour') ORDER BY observed_at DESC,received_at DESC,id DESC LIMIT %s) b
+          ORDER BY b.observed_at DESC,b.received_at DESC,b.id DESC""",(camera_id,hours,hours,limit)).fetchall()
+        return [{**{key:value for key,value in row.items() if key!='readings'},'payload':{'observed_at':row['observed_at'],'readings':row['readings']}} for row in rows]
 
 class Settings(m.Settings):
     email_enabled: bool=False
@@ -511,12 +557,19 @@ def commands(camera_id:str,current:Current):
 @router.get('/homes/{home_id}/audit')
 def audit(home_id:str,current:Current):
     membership(home_id,current['id'],True)
-    with db.connect('app',home_id,current['id']) as conn: return conn.execute('SELECT * FROM annha.audit_logs ORDER BY created_at DESC LIMIT 200').fetchall()
+    with db.connect('app',home_id,current['id']) as conn: rows=conn.execute('SELECT * FROM annha.audit_logs ORDER BY created_at DESC,id DESC LIMIT 200').fetchall()
+    ids=list({row['user_id'] for row in rows if row['user_id']})
+    with db.connect('auth') as conn: names={row['id']:row['name'] for row in conn.execute('SELECT id,name FROM annha_private.users WHERE id=ANY(%s::uuid[])',(ids,))} if ids else {}
+    return [{**dict(row),'user_name':names.get(row['user_id'],'Thiết bị' if row['actor_type']=='device' else 'Thành viên' if row['actor_type']=='user' else 'Hệ thống')} for row in rows]
 
 @router.get('/homes/{home_id}/delivery-status')
 def deliveries(home_id:str,current:Current):
     membership(home_id,current['id'],True)
-    with db.connect('app',home_id,current['id']) as conn: return conn.execute('SELECT *,attempt_count AS attempts,last_error_code AS error FROM annha.notification_deliveries ORDER BY created_at DESC LIMIT 200').fetchall()
+    with db.connect('app',home_id,current['id']) as conn:
+        return conn.execute('''SELECT d.*,d.attempt_count AS attempts,d.last_error_code AS error,nc.kind AS channel_kind,e.kind AS event_kind,c.name AS camera_name,r.name AS room_name
+          FROM annha.notification_deliveries d JOIN annha.notification_channels nc ON nc.id=d.channel_id AND nc.home_id=d.home_id
+          JOIN annha.events e ON e.id=d.event_id AND e.home_id=d.home_id JOIN annha.cameras c ON c.id=d.camera_id AND c.home_id=d.home_id
+          LEFT JOIN annha.rooms r ON r.id=c.room_id AND r.home_id=d.home_id ORDER BY d.created_at DESC,d.id DESC LIMIT 200''').fetchall()
 
 # Device identity comes from the registered token, never from a supplied tenant ID.
 @router.post('/device/heartbeat')
@@ -605,5 +658,13 @@ async def evidence(request:Request,current:Device,event_id:str|None=None):
 def snapshot(camera_id:str,current:Current):
     camera=camera_access(camera_id,current['id'])
     with db.connect('app',camera['home_id'],current['id']) as conn:
-        row=fail_if_missing(conn.execute("SELECT * FROM annha.media_assets WHERE camera_id=%s AND mime_type LIKE 'image/%%' AND status='ready' ORDER BY created_at DESC LIMIT 1",(camera_id,)).fetchone(),'Thiết bị chưa gửi hình ảnh.')
+        row=fail_if_missing(conn.execute("SELECT * FROM annha.media_assets WHERE camera_id=%s AND mime_type LIKE 'image/%%' AND status='ready' AND upload_key<>'demo:snapshot' AND (expires_at IS NULL OR expires_at>now()) ORDER BY created_at DESC LIMIT 1",(camera_id,)).fetchone(),'Thiết bị chưa gửi hình ảnh.')
         return FileResponse(svc.asset_path(row),media_type=row['mime_type'],headers={'Cache-Control':'no-store','X-Captured-At':row['created_at'].isoformat()})
+
+
+@router.post('/cameras/{camera_id}/tts-preview')
+def tts_preview(camera_id:str,payload:m.TtsPreview,current:Current):
+    from .tts import preview_audio
+    camera_access(camera_id,current['id'],'schedules')
+    throttle('tts-preview:'+current['id'],6,60)
+    return Response(content=preview_audio(payload.text),media_type='audio/wav',headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'})

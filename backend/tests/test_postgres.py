@@ -177,3 +177,93 @@ class PostgresTests(unittest.TestCase):
         self.assertEqual(device.post('/api/device/config/ack',json={'version':100,'success':True}).status_code,422)
         invalid={'base_version':1,'zones':[{'id':'bad','name':'Bad','kind':'sofa','points':[[0,0],[1,1],[1,0],[0,1]]}]}
         self.assertEqual(owner.put(f"/api/cameras/{camera['id']}/zones",json=invalid).status_code,404)
+
+    def test_snapshots_never_substitute_demo_art_for_device_evidence(self):
+        owner,_=self.account('snapshot@example.com');home,room,camera,provision=self.home_camera(owner);device=self.device(provision)
+        self.assertFalse(owner.get(f"/api/homes/{home['id']}/cameras").json()[0]['snapshot_available'])
+        self.assertEqual(owner.get(f"/api/cameras/{camera['id']}/snapshot").status_code,404)
+        body=b'\x89PNG\r\n\x1a\n'+b'test-device-image'
+        response=device.post('/api/device/evidence',content=body,headers={'Content-Type':'image/png'})
+        self.assertEqual(response.status_code,201,response.text);asset=response.json()['id']
+        with db.connect('worker',home['id']) as conn: conn.execute("UPDATE annha.media_assets SET upload_key='demo:snapshot' WHERE id=%s",(asset,))
+        self.assertEqual(owner.get(f"/api/cameras/{camera['id']}/snapshot").status_code,404)
+        with db.connect('worker',home['id']) as conn: conn.execute("UPDATE annha.media_assets SET upload_key='actual-snapshot' WHERE id=%s",(asset,))
+        self.assertTrue(owner.get(f"/api/homes/{home['id']}/cameras").json()[0]['snapshot_available'])
+        response=owner.get(f"/api/cameras/{camera['id']}/snapshot")
+        self.assertEqual(response.content,body);self.assertTrue(response.headers.get('X-Captured-At'))
+        self.assertEqual(owner.delete(f"/api/cameras/{camera['id']}").status_code,200)
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException):
+            services.ingest_event({'id':camera['id'],'home_id':home['id']},__import__('backend.src.models',fromlist=['EventInput']).EventInput(event_id='stale-token-race',kind='fall',severity='critical',observed_at=db.now().isoformat()))
+
+    def test_buffered_telemetry_keeps_newest_observation_first(self):
+        from datetime import timedelta
+        owner,_=self.account('sensor@example.com');home,room,camera,provision=self.home_camera(owner);device=self.device(provision)
+        for message,stamp,value in [('fresh',db.now(),24),('buffered',db.now()-timedelta(hours=2),39)]:
+            response=device.post('/api/device/telemetry',json={'message_id':message,'observed_at':stamp.isoformat(),'readings':{'temperature':{'value':value,'unit':'C'}}})
+            self.assertEqual(response.status_code,200,response.text)
+        rows=owner.get(f"/api/cameras/{camera['id']}/telemetry").json()
+        self.assertEqual(rows[0]['payload']['readings']['temperature']['value'],24)
+        self.assertEqual(device.post('/api/device/telemetry',json={'message_id':'bad-unit','observed_at':db.now().isoformat(),'readings':{'temperature':{'value':24,'unit':'%'}}}).status_code,422)
+
+    def test_pipeline_rolls_back_and_pool_does_not_leak_role_or_tenant(self):
+        import psycopg
+        owner,account=self.account('pool@example.com');home,room,camera,_=self.home_camera(owner)
+        with self.assertRaises(psycopg.errors.DivisionByZero):
+            with db.connect('app',home['id'],account['id']) as conn:
+                self.assertEqual(str(conn.execute("SELECT current_setting('app.home_id') AS id").fetchone()['id']),home['id'])
+                conn.execute('SELECT 1/0').fetchone()
+        with db.POOLS['app'].connection() as conn:
+            row=conn.execute("SELECT current_user=session_user AS reset,coalesce(current_setting('app.home_id',true),'') AS home").fetchone()
+            self.assertTrue(row['reset']);self.assertEqual(row['home'],'')
+        with db.connect('app') as conn:
+            self.assertEqual(conn.execute('SELECT count(*) AS n FROM annha.cameras').fetchone()['n'],0)
+        self.assertEqual(len(owner.get(f"/api/homes/{home['id']}/cameras").json()),1)
+
+    def test_event_pagination_filters_and_home_archive(self):
+        from backend.src.models import EventInput
+        owner,user=self.account('pages@example.com');outsider,_=self.account('outside-pages@example.com')
+        home,room,camera,provision=self.home_camera(owner)
+        for index in range(13):
+            services.ingest_event({'id':camera['id'],'home_id':home['id']},EventInput(event_id='pages-'+str(index),kind='fall' if index%2 else 'environment',severity='critical',observed_at=db.now().isoformat()))
+        url=f"/api/homes/{home['id']}/events"
+        first=owner.get(url+'?page=1&page_size=10').json();second=owner.get(url+'?page=2&page_size=10').json()
+        self.assertEqual(first['total'],13);self.assertEqual(len(first['items']),10);self.assertEqual(len(second['items']),3)
+        self.assertFalse({item['id'] for item in first['items']}&{item['id'] for item in second['items']})
+        filtered=owner.get(url+f"?page=1&kind=fall&room_id={room['id']}&camera_id={camera['id']}&hours=24").json()
+        self.assertEqual(filtered['total'],6);self.assertTrue(all(item['kind']=='fall' for item in filtered['items']))
+        self.assertEqual(owner.get(url+'?page=0').status_code,422)
+        self.assertEqual(outsider.get(url+'?page=1').status_code,404)
+        self.assertEqual(owner.request('DELETE',f"/api/homes/{home['id']}",json={'confirmation':'wrong'}).status_code,422)
+        self.assertEqual(outsider.request('DELETE',f"/api/homes/{home['id']}",json={'confirmation':home['name']}).status_code,404)
+        result=owner.request('DELETE',f"/api/homes/{home['id']}",json={'confirmation':home['name']})
+        self.assertEqual(result.status_code,200,result.text)
+        self.assertNotIn(home['id'],[item['id'] for item in owner.get('/api/homes').json()])
+        self.assertEqual(owner.get(url).status_code,404)
+        self.assertEqual(self.device(provision).post('/api/device/heartbeat',json={'message_id':'after-archive'}).status_code,401)
+        with db.connect('app',home['id'],user['id']) as conn:
+            self.assertEqual(conn.execute('SELECT count(*) AS n FROM annha.events').fetchone()['n'],0)
+        with db.connect('worker',home['id']) as conn:
+            self.assertEqual(conn.execute('SELECT count(*) AS n FROM annha.events WHERE home_id=%s',(home['id'],)).fetchone()['n'],13)
+
+    def test_tts_preview_is_ephemeral_and_scoped(self):
+        from unittest.mock import patch
+        owner,_=self.account('preview@example.com');outsider,_=self.account('preview-outside@example.com')
+        home,room,camera,_=self.home_camera(owner)
+        url=f"/api/cameras/{camera['id']}/tts-preview"
+        history=owner.get(f"/api/homes/{home['id']}/audit")
+        self.assertEqual(history.status_code,200,history.text)
+        self.assertTrue(any(item['user_name'] for item in history.json()))
+        self.assertEqual(owner.get(f"/api/homes/{home['id']}/delivery-status").status_code,200)
+        with patch('backend.src.tts.preview_audio',return_value=b'RIFF-preview-WAVE') as render:
+            self.assertEqual(outsider.post(url,json={'text':'Xin chào'}).status_code,403)
+            render.assert_not_called()
+            self.assertEqual(owner.post(url,json={'text':' '}).status_code,422)
+            response=owner.post(url,json={'text':'Xin chào'})
+            self.assertEqual(response.status_code,200,response.text)
+            self.assertEqual(response.headers['content-type'],'audio/wav')
+            self.assertEqual(response.headers['cache-control'],'no-store')
+            self.assertEqual(response.content,b'RIFF-preview-WAVE')
+            render.assert_called_once_with('Xin chào')
+        self.assertEqual(owner.get(f"/api/homes/{home['id']}/reminders").json(),[])
+        self.assertEqual(owner.get(f"/api/homes/{home['id']}/assets").json(),[])

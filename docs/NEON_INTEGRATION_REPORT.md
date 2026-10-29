@@ -119,3 +119,8 @@ Cloudinary chưa nối/upload; ảnh và âm thanh vẫn local. Backup PostgreSQ
 Pi/camera/cảm biến/servo thật, tải lớn, quota đồng thời quy mô cao, phục hồi từ backup và đo hiệu năng chưa được kiểm chứng. Backend hiện chạy một uvicorn worker; nhiều instance cần pub/sub chung cho relay/WebSocket. Tự động purge event/audit, đầy đủ security_events/live_sessions analytics và key rotation nhiều khoá còn là phần mở rộng. Queue worker chạy định kỳ sẽ truy cập Neon khi app còn bật.
 
 Hai branch kiểm thử `annha-integration-20261029` và `annha-schema-20261029` tự hết hạn 30/10/2026 16:00 UTC; không chứa dữ liệu production mới. SQLite backup và Neon có thể lệch sau các lần ghi mới: rollback cần xử lý delta, không ghi đè dữ liệu.
+
+
+## Cập nhật sau khi phục hồi giao diện offline
+
+Các số liệu seed 3 camera/9 sự kiện ở trên là trạng thái ban đầu. Theo yêu cầu tiếp theo, hiện có 2 nhà demo, mỗi nhà 4 phòng/camera; ảnh thiết kế gốc dùng ở frontend và không được coi là ảnh thiết bị. Chi tiết kiểm tra mới ở [UI_OFFLINE_READINESS.md](UI_OFFLINE_READINESS.md).

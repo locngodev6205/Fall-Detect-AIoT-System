@@ -15,7 +15,7 @@ from dotenv import dotenv_values
 from cryptography.fernet import Fernet
 
 ROOT=Path(__file__).resolve().parents[2]
-MIGRATIONS=['001_schema.sql','002_security.sql','005_email_notifications.sql']
+MIGRATIONS=['001_schema.sql','002_security.sql','005_email_notifications.sql','007_home_archiving.sql','008_archived_home_notifications.sql']
 
 def deploy(env_file,output):
     settings=dotenv_values(env_file)

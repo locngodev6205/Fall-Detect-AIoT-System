@@ -107,3 +107,15 @@ WebSocket device dùng header Authorization như HTTP:
 Topic nội bộ `smartfall/alerts` cần `device_token` và thông tin sự kiện. Gateway suy ra camera từ token, không tin device_id/home_id tự khai. Dạng payload legacy FALL_DETECTED/PROLONGED_IMMOBILITY_DETECTED được chuyển thành schema sự kiện; cần event_id ổn định và timestamp có múi giờ.
 
 `fall_detect/config.py` đọc DEVICE_TOKEN từ `.env`; hai hàm publish bổ sung token và UUID. Mô hình, ngưỡng và tiền xử lý không đổi. Không công khai broker anonymous; triển khai LAN/Internet cần xác thực broker, ACL và mã hóa riêng. Tắt nhánh Telegram trực tiếp trong module AI nếu backend đã phân phối Telegram để tránh gửi trùng.
+
+
+## Preview khi chưa có thiết bị
+
+Frontend dùng ảnh thiết kế gốc cho placeholder có nhãn; Pi không cần gửi ảnh giả để lấp giao diện. API danh sách camera bổ sung `snapshot_available` và `is_demo` chỉ để trình bày. Snapshot chưa có ảnh thật trả 404; ảnh demo cũ và asset quá hạn không được dùng làm snapshot. Thiết bị gửi ảnh thật qua evidence/snapshot flow hiện có thì metadata tự có hiệu lực trong lần refresh tiếp theo. Camera online vẫn được xác định từ heartbeat; chỉ nhận frame mới mới được gắn nhãn trực tiếp.
+
+Telemetry gửi bù giữ nguyên thời điểm `observed_at` gốc. API lấy số đo mới nhất theo thời điểm đo và UI đánh dấu quá hạn theo thời điểm này. Đơn vị phải khớp metric: temperature/C, humidity/%, gas/ADC hoặc ppm, light/lux; sai đơn vị trả 422.
+
+
+### Nghe thử lời nhắc trên trình duyệt
+
+`POST /api/cameras/{camera_id}/tts-preview` với body `{"text":"Mẹ nhớ uống nước nhé."}` trả WAV (`audio/wav`, `Cache-Control: no-store`). Dùng session và CSRF như các API ghi; cần quyền sửa lịch nhắc của camera. Văn bản sau trim dài 1–3000 ký tự; tối đa 6 lượt/phút cho mỗi tài khoản. Thiếu bộ tạo giọng hoặc tạo lỗi/timeout trả 503. Backend dùng `espeak-ng -v vi -s 150` cùng giọng của lịch nhắc, file tạm được dọn ngay sau khi trả bytes; không tạo media asset, lịch hoặc lệnh phát thiết bị. Đây là endpoint dành cho web, không phải API điều khiển loa Pi.

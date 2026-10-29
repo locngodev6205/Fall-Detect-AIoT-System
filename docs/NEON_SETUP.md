@@ -9,7 +9,7 @@ Cập nhật 29/10/2026. Ứng dụng tại **http://localhost:8188** đã dùng
 - Psycopg 3 sử dụng bốn pool và bốn LOGIN SQL riêng: app/auth/device/worker. URL runtime dùng pooler; migration dùng direct endpoint. TLS `verify-full`; context RLS và role chỉ có hiệu lực trong transaction. Owner URL không được truyền vào container backend.
 - Dữ liệu SQLite cũ đã nhập: tài khoản/hash mật khẩu, nhà/phòng, camera/hash device token, cấu hình, sự kiện, media metadata, lịch nhắc, telemetry, audit. Media vẫn cùng đường dẫn trong volume. Phiên đăng nhập cũ không chuyển sang: đăng nhập lại. Liên kết email cũ cần gửi lại.
 - Backup tại `/app/data/annha-before-neon.sqlite3` trong volume và `.secrets/annha-before-neon.sqlite3` trên host; không xoá DB cũ.
-- Seed có nhãn `DEMO`: 4 tài khoản đã xác minh, 2 nhà, 3 camera mô phỏng, 9 sự kiện, 144 batch cảm biến, 3 lịch nhắc, ảnh PNG minh hoạ phòng và audio WAV. Camera demo chưa kết nối Pi thật; không giả trạng thái online lâu dài.
+- Seed có nhãn `DEMO`: 4 tài khoản đã xác minh, 2 nhà với 4 phòng/camera mô phỏng mỗi nhà, 24 sự kiện, 384 batch cảm biến, 8 lịch nhắc và audio WAV. Frontend dùng các ảnh phòng gốc của thiết kế làm placeholder có nhãn; backend không coi ảnh minh hoạ là snapshot. Camera demo chưa kết nối Pi thật; không giả trạng thái online lâu dài.
 
 ## Đăng nhập demo
 
@@ -17,8 +17,8 @@ Mở file riêng **`.secrets/demo-credentials.json`** để lấy email/mật kh
 
 | Email | Phạm vi |
 |---|---|
-| `owner@demo.annha.test` | Chủ nhà DEMO AnNhà, cả 2 camera |
-| `caregiver@demo.annha.test` | Chăm sóc, xử lý sự kiện/âm thanh/lịch của cả 2 camera |
+| `owner@demo.annha.test` | Chủ nhà DEMO AnNhà, cả 4 camera |
+| `caregiver@demo.annha.test` | Chăm sóc, xử lý sự kiện/âm thanh/lịch của cả 4 camera |
 | `viewer@demo.annha.test` | Chỉ xem camera phòng khách, không điều khiển |
 | `outsider@demo.annha.test` | Chủ nhà DEMO độc lập, không vào được nhà AnNhà |
 
@@ -118,3 +118,10 @@ python3 scripts/cloud/smoke_neon.py
 Smoke tạo dữ liệu `SMOKE` có chủ đích: sự kiện/lệnh/lịch sử nhắc và tài khoản verify/reset dùng `example.test`. Không xoá dữ liệu hay gửi email ra Internet. Nó kiểm tra đăng nhập, quyền, config/ACK, command/ACK, file local, event/WebSocket, email alert, TTS và verify/reset/session revocation.
 
 Thông tin kiểm chứng và các giới hạn còn lại được ghi tại [NEON_INTEGRATION_REPORT.md](NEON_INTEGRATION_REPORT.md).
+
+Giao diện khi chưa nối Pi đã được rà soát và khôi phục ảnh gốc: [UI_OFFLINE_READINESS.md](UI_OFFLINE_READINESS.md).
+
+
+### Cập nhật quản lý nhà và phân trang
+
+Runner migration hiện bao gồm `007_home_archiving.sql` và `008_archived_home_notifications.sql`. Chạy lại lệnh deploy ở trên sẽ chỉ áp dụng migration chưa có trong ledger, không seed/reset dữ liệu. Chức năng Xoá nhà lưu trữ mềm và thu hồi truy cập; không phải DROP/DELETE vật lý lịch sử. Tham khảo `PERFORMANCE_AND_UI_REVIEW.md` cho API phân trang, bộ lọc và kiểm chứng quyền truy cập.

@@ -7,6 +7,11 @@
   "private": true,
   "scripts": {
     "build": "npm --prefix frontend run build",
-    "dev": "npm --prefix frontend run dev"
+    "dev": "npm --prefix frontend run dev",
+    "test:ui": "node scripts/qa/frontend.mjs",
+    "test:frontend": "node --test frontend/tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.64.1"
   }
 }

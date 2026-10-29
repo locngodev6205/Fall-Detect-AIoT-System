@@ -63,6 +63,8 @@ Xem [README](../README.md), [Architecture](ARCHITECTURE.md), [Device API](DEVICE
 
 ## Neon runtime đã tích hợp — 29/10/2026
 
-Các mục cloud tools phía trên là lịch sử trước cutover. Backend Docker hiện dùng Neon PostgreSQL với Psycopg 3, bốn login/pool riêng, TLS verify-full và RLS context trong transaction. Đã nhập snapshot SQLite; giữ backup và media local. Đã seed 4 tài khoản/2 nhà/3 camera mô phỏng để thử quyền; credentials ở `.secrets/demo-credentials.json`. Không có khoanh vùng trên API/UI.
+Các mục cloud tools phía trên là lịch sử trước cutover. Backend Docker hiện dùng Neon PostgreSQL với Psycopg 3, bốn login/pool riêng, TLS verify-full và RLS context trong transaction. Đã nhập snapshot SQLite; giữ backup và media local. Đã seed 4 tài khoản/2 nhà với 4 phòng-camera mỗi nhà để thử quyền; credentials ở `.secrets/demo-credentials.json`. Không có khoanh vùng trên API/UI.
 
 73 kiểm tra SQL qua trên branch Neon sạch; kiểm thử API/WebSocket, email qua Mailpit và TTS thực thi được ghi ở [báo cáo tích hợp](NEON_INTEGRATION_REPORT.md). Cloudinary, email provider receipt, Pi/servo/camera thật vẫn chưa kiểm thử hoặc triển khai.
+
+Phục hồi giao diện offline và kiểm chứng UI/backend tiếp theo: [UI_OFFLINE_READINESS.md](UI_OFFLINE_READINESS.md).

@@ -16,6 +16,7 @@ from cryptography.fernet import Fernet
 from fastapi import HTTPException
 from fastapi.encoders import jsonable_encoder
 from . import pgdb as db, models
+from .demo_metadata import demo_camera
 from .pgsecurity import digest,membership,session_user,camera_access,device_identity
 
 connections={}
@@ -44,12 +45,23 @@ def provision_device(name):
         conn.execute('INSERT INTO annha_private.pairing_codes(code_hash,device_id,expires_at) VALUES(%s,%s,%s)',(digest(code),device,db.now()+timedelta(minutes=30)))
     return {'device_id':device,'device_token':token,'pairing_code':code,'expires_in_seconds':1800}
 
-def camera_public(conn,row):
-    state=conn.execute('SELECT * FROM annha.camera_config_state WHERE camera_id=%s',(row['id'],)).fetchone() or {}
-    desired=state.get('desired_version',0);applied=state.get('applied_version') or 0
-    return {**{key:row[key] for key in ('id','home_id','room_id','name','observation','capabilities')},
-        'last_seen':row['last_seen_at'],'online':bool(row['last_seen_at'] and (db.now()-row['last_seen_at']).total_seconds()<45),
-        'desired_version':desired,'applied_version':applied,'config_error':state.get('error'),'sync_status':'applied' if desired and desired==applied else 'pending'}
+def cameras_public(conn,rows):
+    rows=list(rows)
+    if not rows: return []
+    states={str(state['camera_id']):state for state in conn.execute("""SELECT c.id AS camera_id,s.desired_version,s.applied_version,s.error,
+      EXISTS(SELECT 1 FROM annha.media_assets a WHERE a.camera_id=c.id AND a.mime_type LIKE 'image/%%' AND a.status='ready'
+        AND a.upload_key<>'demo:snapshot' AND (a.expires_at IS NULL OR a.expires_at>now())) AS snapshot_available
+      FROM annha.cameras c LEFT JOIN annha.camera_config_state s ON s.camera_id=c.id WHERE c.id=ANY(%s::uuid[])""",([str(row['id']) for row in rows],))}
+    result=[];stamp=db.now()
+    for row in rows:
+        state=states.get(str(row['id']),{});desired=state.get('desired_version') or 0;applied=state.get('applied_version') or 0
+        result.append({**{key:row[key] for key in ('id','home_id','room_id','name','observation','capabilities')},
+            'is_demo':demo_camera(row['id']),'snapshot_available':bool(state.get('snapshot_available')),'last_seen':row['last_seen_at'],
+            'online':bool(row['last_seen_at'] and (stamp-row['last_seen_at']).total_seconds()<45),
+            'desired_version':desired,'applied_version':applied,'config_error':state.get('error'),'sync_status':'applied' if desired and desired==applied else 'pending'})
+    return result
+
+def camera_public(conn,row): return cameras_public(conn,[row])[0]
 
 def reminder_rows(conn,home,camera=None,include_deleted=False):
     sql='''SELECT r.*,v.local_time,v.timezone,v.weekdays,v.once_date,v.source,v.text_content,v.asset_id,v.volume,v.late_seconds,
@@ -81,18 +93,30 @@ def compile_config(home,camera):
             ON CONFLICT(home_id,camera_id) DO UPDATE SET desired_version=excluded.desired_version,error=NULL''',(home,camera,version))
         return body
 
-def event_public(conn,row):
-    result=dict(row);result.update(sequence=row['latest_sequence'],observed_at=row['first_observed_at'])
-    update=conn.execute('SELECT payload FROM annha.event_updates WHERE event_id=%s ORDER BY sequence DESC LIMIT 1',(row['id'],)).fetchone()
-    result['payload']=update['payload'] if update else {}
-    actions=[dict(item) for item in conn.execute('SELECT * FROM annha.event_actions WHERE event_id=%s ORDER BY created_at,id',(row['id'],))]
+def events_public(conn,rows):
+    rows=list(rows)
+    if not rows: return []
+    ids=[str(row['id']) for row in rows]
+    # Queue independent reads before fetching; the enclosing transaction pipelines them.
+    updates_cursor=conn.execute("SELECT DISTINCT ON(event_id) event_id,payload FROM annha.event_updates WHERE event_id=ANY(%s::uuid[]) ORDER BY event_id,sequence DESC",(ids,))
+    actions_cursor=conn.execute('SELECT * FROM annha.event_actions WHERE event_id=ANY(%s::uuid[]) ORDER BY created_at,id',(ids,))
+    assets_cursor=conn.execute('SELECT id,home_id,camera_id,event_id,name,status,created_at,mime_type,size_bytes,error_code FROM annha.media_assets WHERE event_id=ANY(%s::uuid[]) ORDER BY created_at',(ids,))
+    updates={str(row['event_id']):row['payload'] for row in updates_cursor.fetchall()}
+    actions=actions_cursor.fetchall();assets=assets_cursor.fetchall()
+    names={}
     if actions:
         with db.connect('auth') as auth:
-            names={str(item['id']):item['name'] for item in auth.execute('SELECT id,name FROM annha_private.users WHERE id=ANY(%s::uuid[])',([str(a['user_id']) for a in actions],))}
-        for action in actions: action['user_name']=names.get(str(action['user_id']),'Tài khoản đã ngừng sử dụng')
-    result['actions']=actions
-    result['evidence']=[asset_public(item) for item in conn.execute('SELECT * FROM annha.media_assets WHERE event_id=%s ORDER BY created_at',(row['id'],))]
-    return jsonable_encoder(result)
+            names={str(item['id']):item['name'] for item in auth.execute('SELECT id,name FROM annha_private.users WHERE id=ANY(%s::uuid[])',(list({str(a['user_id']) for a in actions}),))}
+    grouped_actions={};grouped_assets={}
+    for action in actions:
+        action=dict(action);action['user_name']=names.get(str(action['user_id']),'Tài khoản đã ngừng sử dụng')
+        grouped_actions.setdefault(str(action['event_id']),[]).append(action)
+    for asset in assets: grouped_assets.setdefault(str(asset['event_id']),[]).append(asset_public(asset))
+    return jsonable_encoder([{**dict(row),'is_demo':demo_camera(row['camera_id']),'sequence':row['latest_sequence'],
+        'observed_at':row['first_observed_at'],'payload':updates.get(str(row['id']),{}),
+        'actions':grouped_actions.get(str(row['id']),[]),'evidence':grouped_assets.get(str(row['id']),[])} for row in rows])
+
+def event_public(conn,row): return events_public(conn,[row])[0]
 
 def asset_public(row):
     return {**{key:row[key] for key in ('id','home_id','camera_id','event_id','name','status','created_at')},
@@ -109,7 +133,7 @@ def asset_path(row):
 def ingest_event(camera,payload):
     home=camera['home_id'];cam=camera['id']
     with db.connect('worker',home,camera=cam) as conn:
-        conn.execute('SELECT id FROM annha.cameras WHERE id=%s AND retired_at IS NULL FOR UPDATE',(cam,))
+        if not conn.execute('SELECT id FROM annha.cameras WHERE id=%s AND retired_at IS NULL FOR UPDATE',(cam,)).fetchone(): raise HTTPException(401,'Thiết bị đã ngừng hoạt động.')
         old=conn.execute('SELECT * FROM annha.events WHERE camera_id=%s AND source_id=%s FOR UPDATE',(cam,payload.event_id)).fetchone()
         if old and old['kind']!=payload.kind: raise HTTPException(409,'Không đổi loại của cùng sự kiện.')
         if old and old['latest_sequence']>=payload.sequence: return event_public(conn,old),False

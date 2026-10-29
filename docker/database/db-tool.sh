@@ -31,7 +31,7 @@ case "${1:-inspect}" in
   bootstrap)
     # Combine both DDL files into ONE transaction, including CREATE ROLE.
     # No rerun-on-existing-schema shortcut: refuse instead of hiding a drifted schema.
-    for file in 001_schema.sql 002_security.sql 005_email_notifications.sql; do
+    for file in 001_schema.sql 002_security.sql 005_email_notifications.sql 007_home_archiving.sql 008_archived_home_notifications.sql; do
       sed '/^BEGIN;$/d; /^COMMIT;$/d' "/opt/annha/schema/$file" >> "$work_dir/bootstrap.sql"
     done
     psql -X -q -v ON_ERROR_STOP=1 --single-transaction -f "$work_dir/bootstrap.sql"

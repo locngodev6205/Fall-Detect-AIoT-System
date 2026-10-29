@@ -1,0 +1,36 @@
+import {chromium} from 'playwright';import {readFile,writeFile} from 'node:fs/promises';import assert from 'node:assert/strict';
+const base=process.env.UI_BASE_URL||'http://localhost:8188',out='artifacts/ui-review';
+const account=JSON.parse(await readFile('.secrets/demo-credentials.json','utf8')).accounts.find(a=>a.role==='owner');
+const browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_EXECUTABLE||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',args:['--use-fake-ui-for-media-stream','--use-fake-device-for-media-stream']});
+const checks=[],errors=[];
+try{
+ const context=await browser.newContext({viewport:{width:1440,height:1000},permissions:['microphone']});
+ assert.equal((await context.request.post(base+'/api/auth/login',{data:{email:account.email,password:account.password}})).status(),200);
+ const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));
+ await page.addInitScript(()=>{const original=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);window.__qaStreams=[];navigator.mediaDevices.getUserMedia=async(...args)=>{const stream=await original(...args);window.__qaStreams.push(stream);return stream;};});
+ let uploaded=false,schedule;const asset='5df569ae-d794-4c58-8eeb-a3d3483f22da';
+ await page.route('**/api/cameras/*/assets',route=>{if(route.request().method()!=='POST')return route.continue();const bytes=route.request().postDataBuffer();assert(bytes.length>32);assert.equal(bytes.subarray(0,4).toString('hex'),'1a45dfa3');uploaded=true;return route.fulfill({status:201,json:{id:asset,name:'Lời nhắc ghi âm',status:'ready',mime:'audio/webm'}});});
+ await page.route('**/api/homes/*/reminders',route=>{if(route.request().method()!=='POST')return route.continue();schedule=route.request().postDataJSON();return route.fulfill({status:201,json:{id:'qa-recorded-reminder'}});});
+ await page.goto(base+'/#/reminders');await page.getByRole('button',{name:'Tạo lời nhắc',exact:true}).click();let dialog=page.getByRole('dialog',{name:'Tạo lời nhắc',exact:true});
+ await dialog.getByLabel('Tên lịch',{exact:true}).fill('Lời nhắc ghi âm');await dialog.getByLabel('Nguồn âm thanh',{exact:true}).selectOption('record');
+ assert(await dialog.getByRole('button',{name:'Lưu lời nhắc',exact:true}).isDisabled());
+ await dialog.getByRole('button',{name:'Bắt đầu ghi âm',exact:true}).click();await dialog.getByText(/Đang ghi 00:/).waitFor();await page.waitForTimeout(800);await dialog.getByRole('button',{name:'Dừng ghi',exact:true}).click();
+ await dialog.getByRole('button',{name:'Dùng bản ghi này',exact:true}).waitFor();await page.waitForFunction(()=>document.querySelector('.reminder-recording audio')?.readyState>=2);
+ assert(await page.evaluate(()=>window.__qaStreams.every(stream=>stream.getTracks().every(track=>track.readyState==='ended'))));
+ await page.screenshot({path:out+'/29-reminder-recording.png',fullPage:true});checks.push('Fake microphone records a decodable WebM and releases all tracks after Stop');
+ await dialog.getByRole('button',{name:'Dùng bản ghi này',exact:true}).click();await dialog.getByRole('button',{name:'Đã chọn bản ghi',exact:true}).waitFor();assert(uploaded);
+ await dialog.getByRole('button',{name:'Lưu lời nhắc',exact:true}).click();await dialog.waitFor({state:'hidden'});assert.equal(schedule.source,'audio');assert.equal(schedule.asset_id,asset);checks.push('Recorded audio uploads and is selected in reminder save payload (browser-only API fixtures)');
+ await page.getByRole('button',{name:'Tạo lời nhắc',exact:true}).click();dialog=page.getByRole('dialog',{name:'Tạo lời nhắc',exact:true});await dialog.getByLabel('Nguồn âm thanh',{exact:true}).selectOption('record');
+ await page.evaluate(()=>{navigator.mediaDevices.getUserMedia=async()=>{throw new DOMException('QA denied','NotAllowedError');};});
+ await dialog.getByRole('button',{name:'Bắt đầu ghi âm',exact:true}).click();await dialog.getByRole('alert').filter({hasText:'Bạn chưa cho phép dùng microphone'}).waitFor();assert(await dialog.getByRole('button',{name:'Lưu lời nhắc',exact:true}).isDisabled());
+ await dialog.getByRole('button',{name:'Đóng',exact:true}).click();checks.push('Denied microphone permission produces guidance and never enables saving an empty recording');
+ await page.goto(base+'/#/settings');await page.getByRole('heading',{name:'Cài đặt nhà',exact:true}).waitFor();
+ const history=page.locator('details.settings-history');assert.equal(await history.count(),2);assert.equal(await history.locator(':scope[open]').count(),0);
+ await page.getByText('Hoạt động trong nhà',{exact:true}).click();await page.locator('.activity-history-row').first().waitFor();
+ assert(!(await page.locator('.activity-history-row strong').allTextContents()).some(text=>/event\.|reminder\.|settings\./.test(text)));checks.push('Activity history is collapsed by default and uses human-readable Vietnamese descriptions');
+ await page.getByText('Lịch sử thông báo',{exact:true}).click();await page.locator('.notification-history-row').first().waitFor();assert(!(await page.locator('.notification-history-row').allTextContents()).some(text=>text.includes('Thiết bị đã nhận')));
+ const spacing=await page.locator('.settings-room-section').evaluate(section=>({top:parseFloat(getComputedStyle(section).marginTop),padding:parseFloat(getComputedStyle(section.querySelector('.room-settings-row')).paddingLeft),bottom:parseFloat(getComputedStyle(section.querySelector('.add-room-button')).marginTop)}));assert(spacing.top>=24&&spacing.padding>=12&&spacing.bottom>=20);
+ await page.screenshot({path:out+'/30-settings-history-spacing.png',fullPage:true});checks.push('Notification-specific status labels and separated room settings have correct padding');
+ await page.setViewportSize({width:390,height:844});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));await page.screenshot({path:out+'/31-mobile-settings-history.png',fullPage:true});checks.push('Settings history fits mobile without overflow');
+ assert.equal(errors.length,0,JSON.stringify(errors));await writeFile(out+'/recording-settings-checks.json',JSON.stringify({passed:checks,errors},null,2));checks.forEach(check=>console.log('PASS '+check));console.log(`ALL ${checks.length} RECORDING/SETTINGS CHECKS PASSED`);await context.close();
+}finally{await browser.close();}

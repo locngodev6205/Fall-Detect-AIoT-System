@@ -38,3 +38,6 @@ dist/
 .neon
 
 .env.local
+
+# Generated browser review screenshots and reports
+/artifacts/ui-review/

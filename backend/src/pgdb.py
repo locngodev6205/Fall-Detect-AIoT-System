@@ -45,13 +45,15 @@ def close_pools():
 @contextmanager
 def connect(role='app',home=None,user=None,camera=None):
     if role not in ROLES: raise ValueError('Unknown database role')
+    # Pipeline keeps ordered BEGIN/role/context commands in the same network batch.
+    # COMMIT/ROLLBACK is still explicit, so LOCAL context cannot leak across leases.
     with POOLS[role].connection() as conn:
-        with conn.transaction():
-            conn.execute('SET LOCAL ROLE '+ROLES[role])
-            for key,value in [('app.home_id',home),('app.user_id',user),('app.camera_id',camera),
-                              ('statement_timeout',os.getenv('DATABASE_STATEMENT_TIMEOUT_MS','10000'))]:
-                conn.execute('SELECT set_config(%s,%s,true)',(key,str(value) if value is not None else ''))
-            yield conn
+        with conn.pipeline():
+            with conn.transaction():
+                conn.execute('SET LOCAL ROLE '+ROLES[role])
+                conn.execute("SELECT set_config('app.home_id',%s,true),set_config('app.user_id',%s,true),set_config('app.camera_id',%s,true),set_config('statement_timeout',%s,true)",
+                    (str(home) if home is not None else '',str(user) if user is not None else '',str(camera) if camera is not None else '',os.getenv('DATABASE_STATEMENT_TIMEOUT_MS','10000')))
+                yield conn
 
 def audit(conn,home,user,action,target, camera=None):
     conn.execute('INSERT INTO annha.audit_logs(home_id,actor_type,user_id,camera_id,action,target_type,target_id) VALUES(%s,%s,%s,%s,%s,%s,%s)',

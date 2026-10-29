@@ -681,3 +681,11 @@ def snapshot(camera_id:str,current:Current):
         row=conn.execute("SELECT * FROM assets WHERE camera_id=? AND mime LIKE 'image/%' AND status='ready' ORDER BY created_at DESC LIMIT 1",(camera_id,)).fetchone()
         if not row: raise HTTPException(404,'Thiết bị chưa gửi hình ảnh.')
         return FileResponse(svc.asset_path(row),media_type=row['mime'],headers={'Cache-Control':'no-store','X-Captured-At':row['created_at']})
+
+
+@router.post('/cameras/{camera_id}/tts-preview')
+def tts_preview(camera_id:str,payload:m.TtsPreview,current:Current):
+    from .tts import preview_audio
+    with db.connect() as conn: camera_access(conn,camera_id,current['id'],'schedules')
+    throttle('tts-preview:'+current['id'],6,60)
+    return Response(content=preview_audio(payload.text),media_type='audio/wav',headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'})

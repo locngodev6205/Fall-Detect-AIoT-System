@@ -160,6 +160,13 @@ class Telemetry(Model):
     @classmethod
     def timestamp(cls,value): return EventInput.timestamp(value)
 
+    @model_validator(mode='after')
+    def metric_units(self):
+        units={'temperature':{'C'},'humidity':{'%'},'gas':{'ADC','ppm'},'light':{'lux'}}
+        if any(reading.unit not in units[metric] for metric,reading in self.readings.items()):
+            raise ValueError('Đơn vị đo không khớp loại cảm biến')
+        return self
+
 class CommandAck(Model):
     status: Literal['accepted','executing','executed','failed']
     detail: str = Field(default='',max_length=1000)
@@ -186,3 +193,11 @@ class Settings(Model):
     def thresholds(self):
         if self.temperature_low>=self.temperature_high: raise ValueError('Ngưỡng thấp phải nhỏ hơn ngưỡng cao')
         return self
+
+
+class DeleteHome(Model):
+    confirmation: str = Field(min_length=1,max_length=120)
+
+
+class TtsPreview(Model):
+    text: str = Field(min_length=1,max_length=3000)
