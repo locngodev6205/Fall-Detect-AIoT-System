@@ -1,0 +1,3 @@
+# host:port:database:user:password
+# Must match pg_service.conf. Escape literal ':' and '\' in password with '\'.
+REPLACE_DIRECT_HOST.neon.tech:5432:REPLACE_DATABASE:REPLACE_MIGRATION_OWNER:REPLACE_PASSWORD

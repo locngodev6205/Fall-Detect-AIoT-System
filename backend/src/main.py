@@ -97,6 +97,7 @@ def start_mqtt(loop):
 @asynccontextmanager
 async def lifespan(app):
     db.initialize()
+    services.retire_zone_configs()
     client=start_mqtt(asyncio.get_running_loop()) if MQTT_ENABLED else None
     worker=asyncio.create_task(services.worker()) if WORKER_ENABLED else None
     yield

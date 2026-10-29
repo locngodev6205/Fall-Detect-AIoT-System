@@ -1,15 +1,19 @@
 # KIẾN TRÚC HỆ THỐNG CAMERA GIÁM SÁT GIA ĐÌNH
 
 - **Dự án:** FALL-DETECT-AIOT-SYSTEM.
-- **Phiên bản:** 2.0 — ngày 28/10/2026.
-- **Tài liệu nghiệp vụ:** [PROJECT_SPECIFICATION_ANNHA.md](PROJECT_SPECIFICATION_ANNHA.md).
+- **Phiên bản:** 2.1 — ngày 29/10/2026.
+- **Tài liệu nghiệp vụ:** [PROJECT_SPECIFICATION.md](PROJECT_SPECIFICATION.md).
 - **Phạm vi:** Kiến trúc mục tiêu cho camera, cảnh báo an toàn, môi trường và hỗ trợ sinh hoạt. Phần hiện trạng bên dưới được đối chiếu mã nguồn; các phần còn lại là thiết kế cần triển khai, không phải xác nhận hệ thống đang hoạt động đầy đủ.
+
+**Cập nhật phạm vi 29/10/2026:** Tạm bỏ khoanh vùng và luật dựa trên vùng; định hướng camera servo bám một người. Panorama/ánh xạ vùng chỉ xem xét sau khi tracking ổn định. UI/API chỉnh vùng và quyền sửa vùng đã được gỡ. Backend giữ lịch sử và gửi revision vùng rỗng cho thiết bị; servo chưa được triển khai/kiểm chứng.
+
+Thiết kế dữ liệu cloud đích và kế hoạch chuyển đổi: [DATABASE_DESIGN_NEON.md](DATABASE_DESIGN_NEON.md). Backend hiện tại vẫn dùng SQLite; tài liệu này không xác nhận đã triển khai Neon/Cloudinary.
 
 ## 1. HIỆN TRẠNG TRIỂN KHAI
 
 | Thành phần | Đã triển khai trong nguồn | Giới hạn kiểm chứng/tích hợp |
 | :--- | :--- | :--- |
-| [Backend nghiệp vụ](../backend/src/api.py) | Auth/email/session/CSRF, nhà/phòng, quyền theo camera, lời mời, ghép nối, vùng phiên bản, sự kiện và xử lý, telemetry, lịch/lệnh, file và audit | Chưa chứng minh tất cả trên phần cứng Pi/cảm biến/loa thật |
+| [Backend nghiệp vụ](../backend/src/api.py) | Auth/email/session/CSRF, nhà/phòng, quyền theo camera, lời mời, ghép nối, cấu hình phiên bản (vùng đã tạm bỏ), sự kiện và xử lý, telemetry, lịch/lệnh, file và audit | Chưa chứng minh tất cả trên phần cứng Pi/cảm biến/loa thật |
 | [Lưu trữ](../backend/src/db.py) | SQLite có transaction/FK, metadata, queue bền vững, file trên volume; giữ nguyên bảng alerts legacy nếu có | Legacy alerts chưa gắn sở hữu không được công khai qua API mới |
 | [Worker nghiệp vụ](../backend/src/services.py) | SMTP retry, TTS tiếng Việt eSpeak NG, Telegram theo cấu hình, retention, luật môi trường hold/hysteresis | Telegram thực cần bot/người nhận; lịch offline cần scheduler tại thiết bị |
 | [Media](../backend/src/media.py) | Relay JPEG khoảng 5 FPS và audio một chiều có session/device auth, giới hạn kích thước/thời gian, thu hồi quyền | Cần thiết bị gửi JPEG hoặc giải mã/phát WebM/Ogg; chưa phải WebRTC/NVR |
@@ -39,7 +43,7 @@ Thiết bị → /api/device/* và WebSocket media → backend
 3. Phân biệt luồng điều khiển/telemetry với luồng video, ảnh và âm thanh.
 4. Phân biệt trạng thái quan sát của AI với trạng thái xử lý của người nhà.
 5. Kiểm tra quyền theo nhà và camera ở backend, WebSocket, media và lệnh thiết bị; không chỉ ẩn nút trên giao diện.
-6. Cấu hình vùng nghỉ ngơi điều chỉnh đánh giá bất động, không tự hủy nghi ngờ té ngã.
+6. Không áp dụng đa giác vùng cố định khi camera quay. Tracking cần phân biệt chuyển động người/camera; thiếu ngữ cảnh vị trí không được tự coi ít chuyển động là sự cố khẩn cấp.
 7. Không thay đổi hợp đồng mô hình/tiền xử lý khi mở rộng nghiệp vụ nếu chưa kiểm chứng tương thích artifact.
 8. Triển khai ban đầu bằng backend dạng một ứng dụng có các module rõ trách nhiệm; sơ đồ không yêu cầu tách thành nhiều microservice.
 
@@ -59,7 +63,7 @@ flowchart TB
 
     subgraph Edge[Thiết bị biên tại nhà]
         Camera[Camera]
-        Vision[Pose / mô hình ngã / ngữ cảnh vùng / bất động]
+        Vision[Pose / mô hình ngã / bất động / trạng thái camera]
         Sensors[Cảm biến môi trường]
         Rules[Luật cảnh báo cục bộ]
         Scheduler[Lịch và điều phối âm thanh]
@@ -104,7 +108,7 @@ Tài khoản ── Thành viên + vai trò + phạm vi quyền ── Nhà / c�
 - Một tài khoản có thể sở hữu hoặc tham gia nhiều nhà; một nhà chứa nhiều phòng và thiết bị.
 - “Nhà” trên giao diện là đơn vị quản lý một cụm camera, không phải nhóm camera công khai có thể truy cập bằng cách biết ID.
 - Thiết bị được đăng ký vào một nhà tại một thời điểm; cảm biến/loa được liên kết với thiết bị hoặc phòng để định tuyến dữ liệu và lệnh.
-- Vai trò: chủ hộ, người chăm sóc và người xem. Quyền gồm xem camera/media, nhận và xử lý sự kiện, phát loa, sửa vùng/lịch và quản lý thành viên/thiết bị.
+- Vai trò: chủ hộ, người chăm sóc và người xem. Quyền gồm xem camera/media, nhận và xử lý sự kiện, phát loa, sửa chính sách/lịch và quản lý thành viên/thiết bị.
 - Không đồng nhất tài khoản người xem với danh tính người xuất hiện trong video; nhận diện danh tính nằm ngoài phạm vi đầu.
 
 ### 4.2. Luồng truy cập
@@ -120,14 +124,15 @@ Tài khoản ── Thành viên + vai trò + phạm vi quyền ── Nhà / c�
 - Chủ hộ hoặc người được phép nhập mã ghép nối/QR còn hạn để đăng ký thiết bị vào nhà và phòng.
 - Mã ghép nối chỉ dùng một lần, tách khỏi định danh công khai và thông tin xác thực dài hạn của thiết bị.
 - Backend kiểm tra quyền sở hữu và không cho ghi đè thiết bị đang thuộc nhà khác chỉ bằng ID hoặc mã cũ. Chuyển chủ cần quy trình riêng có xác minh, ngoài luồng ghép nối thông thường.
-- Sau ghép nối: kiểm tra hình ảnh/cảm biến/loa, khai báo vùng và xác nhận thiết bị đã áp dụng cấu hình.
+- Sau ghép nối: kiểm tra hình ảnh/cảm biến/loa, khả năng tracking nếu được hỗ trợ và xác nhận thiết bị đã áp dụng cấu hình; không có bước vẽ vùng trong phạm vi mới.
 
 ## 5. TRÁCH NHIỆM CÁC MODULE
 
 | Tầng | Module | Trách nhiệm |
 | :--- | :--- | :--- |
 | Thiết bị | Thu hình và sức khỏe camera | Cấp frame cho AI/media/bộ đệm; nhận biết lỗi và dữ liệu đứng/quá hạn |
-| Thiết bị | Vision và ngữ cảnh | Pose, phân loại ngã, chất lượng quan sát, gán vùng/tư thế và bộ đếm bất động |
+| Thiết bị | Vision và ngữ cảnh | Pose, phân loại ngã, chất lượng quan sát, tư thế và bộ đếm bất động; xét trạng thái camera khi có tracking |
+| Thiết bị | Tracking servo (cần triển khai) | Bám một người, giới hạn quay/tốc độ, xử lý mất dấu; cung cấp trạng thái chuyển động camera để đánh giá AI |
 | Thiết bị | Cảm biến và luật môi trường | Đọc giá trị, trạng thái sẵn sàng/lỗi, ngưỡng, khoảng duy trì và hysteresis |
 | Thiết bị | Điều phối âm thanh | Ưu tiên cảnh báo, chạy lịch, phát file, nhấn để nói; kết quả thực thi |
 | Thiết bị | Đồng bộ và lưu cục bộ | Cấu hình hiệu lực, file audio, outbox sự kiện, upload media, chống lặp lệnh |
@@ -136,7 +141,7 @@ Tài khoản ── Thành viên + vai trò + phạm vi quyền ── Nhà / c�
 | Backend | Sự kiện và thông báo | Lưu bền vững, khử trùng, vòng đời xử lý, gửi và nhắc lại có giới hạn |
 | Backend | Tài nguyên/media | Metadata file, cấp quyền upload/download và phiên live/nhấn để nói |
 | Backend | Công việc nền | TTS, retry thông báo/upload, dọn dữ liệu, theo dõi heartbeat; trạng thái công việc được lưu bền vững |
-| Web | UI công khai và ứng dụng | Landing, tài khoản, chọn nhà, camera, vùng, sự kiện, môi trường, âm thanh và quản trị |
+| Web | UI công khai và ứng dụng | Landing, tài khoản, chọn nhà, camera, trạng thái tracking khi được hỗ trợ, sự kiện, môi trường, âm thanh và quản trị |
 
 ThingsBoard là tùy chọn cho telemetry/biểu đồ, không là nguồn cấu hình hoặc vòng đời sự kiện thứ hai. Kiến trúc mục tiêu chuyển phân phối Telegram qua backend; thiết bị vẫn chịu trách nhiệm cảnh báo tại chỗ. Khi chuyển đổi phải tắt đường gửi Telegram trực tiếp cũ để tránh thông báo trùng.
 
@@ -152,33 +157,34 @@ ThingsBoard là tùy chọn cho telemetry/biểu đồ, không là nguồn cấu
 
 Bản hiện tại dùng relay WebSocket JPEG/audio qua backend và reverse proxy có xác thực; WebRTC/TURN là phương án tối ưu sau khi có số đo. Chưa xác nhận chất lượng hoặc khả năng truy cập từ Internet trên hệ thống thật.
 
-### 6.2. Khai báo vùng và đồng bộ cấu hình
+### 6.2. Đồng bộ chính sách và cấu hình
 
 ```mermaid
 sequenceDiagram
     participant W as Web
     participant B as Backend
     participant D as Thiết bị
-    W->>B: Lưu vùng và chính sách theo camera
-    B->>B: Kiểm tra quyền, đa giác và phiên bản nền
+    W->>B: Lưu chính sách theo camera
+    B->>B: Kiểm tra quyền, chính sách và phiên bản nền
     B-->>W: Đã lưu, chờ thiết bị áp dụng
-    B->>D: Cấu hình phiên bản mới qua MQTT
+    B->>D: Thiết bị lấy cấu hình phiên bản mới qua HTTPS
     D->>D: Kiểm tra và áp dụng nguyên khối
     D-->>B: Phiên bản đã áp dụng hoặc lý do lỗi
     B-->>W: Cập nhật trạng thái đồng bộ
 ```
 
-- Lưu tọa độ chuẩn hóa theo khung hình và thông tin crop/hướng ảnh tham chiếu. Không tự dùng lại vùng khi góc nhìn đã thay đổi.
+- Không yêu cầu đa giác vùng trong cấu hình hiện tại. Các trường tương thích luôn là `zones: []`, `reference: {}` để xóa vùng đã cache; không áp dụng vùng vào luật giám sát.
 - Cập nhật đồng thời được phát hiện bằng phiên bản nền; không âm thầm ghi đè chỉnh sửa của người khác.
 - Bản cấu hình lỗi giữ nguyên phiên bản hợp lệ trước đó. Thiết bị offline tiếp tục dùng bản cục bộ.
 - Sự kiện ghi phiên bản thực sự đang áp dụng, không gắn phiên bản mới chỉ vì backend đã lưu.
-- Vùng mơ hồ hoặc chồng lấn không được tự chọn chính sách nghỉ ngơi dễ dãi nhất; không tự loại bỏ người đang giao cả vùng giám sát và vùng bỏ qua.
+- Khi khởi động, backend thêm revision mới nếu bản mới nhất còn vùng/ảnh tham chiếu, giữ nguyên lịch sử và applied version, ghi audit hệ thống; khởi động lại không thêm revision lặp. Thiết bị offline cần nối lại và áp dụng bản mới để xóa vùng cũ.
+- Khi triển khai tracking, bổ sung cấu hình giới hạn quay, tốc độ và mất dấu sau thiết kế phần cứng/giao thức; không giả định API hiện tại đã hỗ trợ servo.
 
 ### 6.3. Té ngã, bất động và vòng đời sự kiện
 
-1. Thiết bị phân tích chuỗi hình, chất lượng quan sát và ngữ cảnh. Chỉ tích lũy bất động khi đủ quan sát; không cộng thời gian mất dấu hoặc vector đặc trưng rỗng.
+1. Thiết bị phân tích chuỗi hình, tư thế, chất lượng quan sát và trạng thái camera. Chỉ tích lũy bất động khi đủ quan sát; không cộng thời gian mất dấu, vector rỗng hoặc camera quay/ảnh chưa ổn định khi chưa có bù chuyển động được kiểm chứng. Không dùng chuyển động ảnh do servo để kết luận người phục hồi.
 2. Khi nghi ngờ, cấp mã sự kiện ổn định, lưu bản ghi vào outbox và giữ ảnh/bộ đệm clip trước-sau.
-3. Áp dụng luật xác nhận và cảnh báo tại chỗ; gửi metadata ngay, không đợi clip tải lên.
+3. Áp dụng luật xác nhận và cảnh báo tại chỗ; gửi metadata ngay, không đợi clip tải lên. Nếu chỉ ít chuyển động và chưa đủ bằng chứng bất thường, dùng mức cần chú ý thay vì tự nâng khẩn cấp theo thời gian.
 4. Backend xác thực thiết bị, suy ra nhà từ đăng ký thiết bị, khử trùng và lưu dữ liệu. Không tin `home_id` do bên gửi tự khai.
 5. WebSocket chỉ gửi đến người có quyền trên camera; worker gửi Telegram theo danh sách nhận và quyền/chính sách chia sẻ media đã cấu hình.
 6. Người nhà tiếp nhận, xác nhận an toàn/đã xử lý hoặc đánh dấu báo giả. Backend lưu lịch sử và phát lệnh tắt âm có hạn nếu người dùng yêu cầu riêng.
@@ -213,7 +219,7 @@ Trạng thái xử lý: `OPEN → ACKNOWLEDGED → RESOLVED` hoặc `FALSE_ALARM
 | :--- | :--- |
 | Identity | User, session, home, membership, invitation, quyền theo camera |
 | Thiết bị | Room, device, camera, capability, đăng ký sở hữu, heartbeat |
-| Cấu hình | Zone/policy/schedule revision, phiên bản mong muốn và đã áp dụng |
+| Cấu hình | Policy/schedule revision, phiên bản mong muốn và đã áp dụng; dữ liệu zone cũ không còn là yêu cầu triển khai |
 | Sự kiện | Event, diễn biến, incident action, delivery status, metadata bằng chứng |
 | Môi trường | Telemetry, đơn vị, chất lượng và thời gian đo |
 | Audio | Audio asset, TTS job, download readiness, occurrence/execution, command result |
@@ -227,7 +233,7 @@ Thiết bị có lưu trữ cục bộ bền vững cho cấu hình, file sẵn 
 
 | Kênh | Nội dung và quy tắc |
 | :--- | :--- |
-| HTTPS API | Tài khoản, nhà, thiết bị, vùng, lịch, truy vấn/xử lý sự kiện; kiểm tra quyền ở mỗi thao tác |
+| HTTPS API | Tài khoản, nhà, thiết bị, chính sách, lịch, truy vấn/xử lý sự kiện; kiểm tra quyền ở mỗi thao tác |
 | WebSocket | Cập nhật sự kiện, trạng thái và tiến độ; xác thực và lọc theo quyền, kiểm tra lại khi thay đổi thành viên |
 | MQTT | Telemetry, heartbeat, cấu hình, sự kiện, lệnh và phản hồi; credential/ACL riêng cho từng thiết bị |
 | HTTPS file | Upload bằng chứng, download audio/media bằng quyền có hạn; không phát tán đường dẫn công khai vĩnh viễn |
@@ -262,17 +268,18 @@ Bản tin cần có `schema_version`, `message_id`, `device_id`, thời gian ngu
 ### 9.1. Thứ tự
 
 1. Identity, nhà/phòng, ghép nối, quyền và lưu trữ bền vững; giữ adapter cho dữ liệu AI hiện tại.
-2. Live camera, chất lượng quan sát, editor vùng và cấu hình phiên bản.
-3. Bất động theo ngữ cảnh, vòng đời sự kiện, bằng chứng và cảnh báo có phân quyền.
+2. Live camera, chất lượng quan sát, cấu hình phiên bản và thử nghiệm servo bám một người; tạm bỏ editor vùng.
+3. Bất động có xét tư thế/chuyển động camera, vòng đời sự kiện, bằng chứng và cảnh báo có phân quyền.
 4. Cảm biến, Telegram, outbox offline, TTS/lịch nhắc và lời nhắn thoại.
 5. Nhấn để nói, điều phối loa, kiểm tra truy cập từ xa và đo hệ thống dài giờ.
 
 ### 9.2. Cần chốt bằng thiết kế/đo thực tế
 
-- Pi, camera, loa, cảm biến, mạch đọc và vị trí lắp cụ thể.
+- Pi, camera, loa, cảm biến, mạch đọc và vị trí lắp cụ thể; servo, số trục, phản hồi góc, giới hạn quay/tốc độ và chính sách mất dấu.
+- Đánh giá AI khi camera quay; panorama/ánh xạ vùng chưa thuộc phạm vi, điều kiện đưa lại theo mục 9.5 của specification.
 - Công nghệ media, signaling và phương án relay khi truy cập ngoài mạng nhà.
 - DB, kho file, công cụ TTS và cách triển khai tác vụ nền.
 - Schema/topic/API chi tiết và kế hoạch chuyển đổi payload hiện tại.
 - Thời gian chờ cảnh báo, FPS, độ trễ, ngưỡng chất lượng AI và dung lượng/thời hạn lưu.
 
-Phần hiện trạng đã được cập nhật theo backend nghiệp vụ và giao diện dùng API thật; các mục tiêu edge và kiểm chứng phần cứng còn lại không được coi là đã hoàn thành. Kiểm chứng theo [các kịch bản nghiệm thu trong specification](PROJECT_SPECIFICATION_ANNHA.md#7-kịch-bản-nghiệm-thu-nghiệp-vụ), có phân biệt kiểm tra nguồn, mô phỏng và chạy thiết bị thật.
+Phần hiện trạng đã được cập nhật theo backend nghiệp vụ và giao diện dùng API thật; các mục tiêu edge và kiểm chứng phần cứng còn lại không được coi là đã hoàn thành. Kiểm chứng theo [các kịch bản nghiệm thu trong specification](PROJECT_SPECIFICATION.md#7-kịch-bản-nghiệm-thu-nghiệp-vụ), có phân biệt kiểm tra nguồn, mô phỏng và chạy thiết bị thật.

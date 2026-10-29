@@ -2,6 +2,8 @@
 
 Tài liệu cho firmware/agent tại Pi; đây là giao thức đã có ở backend, không khẳng định mã AI/thiết bị hiện tại đã thực thi tất cả chức năng.
 
+**Phạm vi cập nhật 29/10/2026:** Khoanh vùng đã tạm hoãn theo [đặc tả](PROJECT_SPECIFICATION.md). API chỉnh vùng đã gỡ; trường vùng chỉ còn là giá trị rỗng tương thích để xóa cấu hình cũ tại thiết bị. Servo tracking là hướng triển khai, chưa có hợp đồng điều khiển/trạng thái servo được xác nhận trong API này.
+
 ## 1. Cấp và ghép nối
 
 Quản trị chạy `docker compose exec backend python -m src.provision --name "Camera phòng khách"`. Giữ `device_token` tại thiết bị; mã ghép nối dùng một lần, hết hạn sau 30 phút. Chủ nhà đăng nhập web, tạo phòng và nhập mã. Trước khi được claim, credential không truy cập được device API.
@@ -25,7 +27,7 @@ Observation hỗ trợ: `unknown`, `clear`, `no_person`, `occluded`, `camera_err
 3. Lưu cấu hình bền vững. Chỉ phản hồi thành công khi các module liên quan thực sự sử dụng được cấu hình.
 4. `POST /api/device/config/ack` với `{"version":2,"success":true}`; lỗi dùng `success:false,error:"..."`. Backend không tự tăng applied version theo thời gian.
 
-Vùng dùng đa giác tọa độ 0–1 theo khung hình, loại `bed/sofa/chair/floor/ignore`, ngưỡng trong/ngoài lịch. Thiết bị phải kiểm tra góc nhìn, tư thế, chất lượng quan sát và tính liên tục; không tự coi vùng nghỉ là miễn phát hiện ngã.
+`zones` luôn là `[]`, `reference` luôn là `{}` ở cả bản đọc và revision mới. Khi backend khởi động, camera còn cấu hình vùng được thêm revision rỗng một lần; thiết bị phải xóa vùng đã cache, áp dụng các phần cấu hình còn lại rồi ACK đúng phiên bản. Không tự xác nhận ACK khi chưa xóa vùng tại thiết bị. Revision cũ giữ nguyên trong DB để truy vết; thiết bị offline sẽ nhận bản mới sau khi nối lại.
 
 ## 3. Sự kiện và bằng chứng
 
@@ -36,13 +38,12 @@ Vùng dùng đa giác tọa độ 0–1 theo khung hình, loại `bed/sofa/chair
   "event_id":"edge-unique-001",
   "sequence":1,
   "kind":"immobility",
-  "severity":"critical",
+  "severity":"warning",
   "observed_at":"2026-10-28T10:00:00+07:00",
   "observation":"abnormal",
-  "reason":"Nằm trên sàn vượt ngưỡng cấu hình",
+  "reason":"Ít chuyển động vượt thời gian cấu hình, cần người nhà kiểm tra",
   "duration_s":120,
-  "config_version":2,
-  "zone_id":"floor-1"
+  "config_version":2
 }
 ```
 

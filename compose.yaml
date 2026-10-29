@@ -11,10 +11,13 @@ services:
   backend:
     build: ./backend
     environment:
-      MQTT_ENABLED: "true"
-      MQTT_BROKER: mqtt
-      MQTT_PORT: "1883"
-      MQTT_TOPIC_FALL_ALERT: smartfall/alerts
+      MQTT_ENABLED: "${MQTT_ENABLED:-true}"
+      WORKER_ENABLED: "${WORKER_ENABLED:-true}"
+      MQTT_BROKER: "${MQTT_BROKER:-mqtt}"
+      MQTT_PORT: "${MQTT_PORT:-1883}"
+      MQTT_TOPIC_FALL_ALERT: "${MQTT_TOPIC_FALL_ALERT:-smartfall/alerts}"
+      MQTT_USER: "${MQTT_USER:-}"
+      MQTT_PASSWORD: "${MQTT_PASSWORD:-}"
       PUBLIC_URL: "${PUBLIC_URL:-http://localhost:8188}"
       APP_ORIGINS: "${APP_ORIGINS:-http://localhost:8188,http://127.0.0.1:8188,http://localhost:5188,http://127.0.0.1:5188}"
       COOKIE_SECURE: "${COOKIE_SECURE:-false}"
@@ -25,8 +28,14 @@ services:
       SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
       SMTP_FROM: "${SMTP_FROM:-AnNha <noreply@annha.local>}"
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
-      MEDIA_ROOT: /app/data/media
-      DATABASE_PATH: /app/data/annha.sqlite3
+      MEDIA_ROOT: "${MEDIA_ROOT:-/app/data/media}"
+      MAX_HOME_MEDIA_BYTES: "${MAX_HOME_MEDIA_BYTES:-536870912}"
+      TB_HOST: "${TB_HOST:-127.0.0.1}"
+      TB_HTTP_PORT: "${TB_HTTP_PORT:-8080}"
+      TB_USERNAME: "${TB_USERNAME:-}"
+      TB_PASSWORD: "${TB_PASSWORD:-}"
+      DEVICE_ID: "${DEVICE_ID:-RASPI_ROOM_101}"
+      DATABASE_PATH: "${DATABASE_PATH:-/app/data/annha.sqlite3}"
     volumes:
       - backend-data:/app/data
     depends_on:

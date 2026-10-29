@@ -1,0 +1,114 @@
+name: annha-db-lab
+
+x-db-tool: &db-tool
+  image: annha-db-tools:pg16
+  build:
+    context: .
+    dockerfile: docker/database/Dockerfile
+  read_only: true
+  tmpfs:
+    - /tmp:mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop: [ALL]
+
+x-local-tool: &local-tool
+  <<: *db-tool
+  profiles: [tools]
+  environment:
+    ANNHA_DB_TARGET: local
+    PGHOST: postgres
+    PGPORT: "5432"
+    PGDATABASE: annha_design
+    PGUSER: annha_migration
+    PGSSLMODE: disable
+    ANNHA_PASSWORD_FILE: /run/secrets/postgres_password
+  secrets: [postgres_password]
+  networks: [localdb]
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+x-neon-tool: &neon-tool
+  <<: *db-tool
+  profiles: [cloud]
+  environment:
+    ANNHA_DB_TARGET: neon
+    PGSERVICE: annha_neon_migration
+    PGSERVICEFILE: /run/secrets/pg_service.conf
+    ANNHA_PGPASS_FILE: /run/secrets/pgpass
+  secrets:
+    - source: neon_service
+      target: pg_service.conf
+    - source: neon_password
+      target: pgpass
+  networks: [cloud]
+
+services:
+  postgres:
+    image: postgres:16.14-bookworm
+    environment:
+      POSTGRES_DB: annha_design
+      POSTGRES_USER: annha_migration
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=trust
+    secrets: [postgres_password]
+    volumes:
+      - design-postgres:/var/lib/postgresql/data
+    networks: [localdb]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U annha_migration -d annha_design"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+    # No host port. Admin psql is available through docker compose exec.
+
+  db-init:
+    <<: *local-tool
+    command: [bootstrap]
+  db-check:
+    <<: *local-tool
+    command: [verify]
+  db-inspect:
+    <<: *local-tool
+    command: [inspect]
+  neon-init:
+    <<: *neon-tool
+    command: [bootstrap]
+  neon-inspect:
+    <<: *neon-tool
+    command: [inspect]
+
+  cloudinary-check:
+    profiles: [cloud]
+    image: annha-cloudinary-tools:1
+    build:
+      context: .
+      dockerfile: docker/cloudinary/Dockerfile
+    command: [--validate-only]
+    read_only: true
+    tmpfs: [/tmp:mode=1777]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    secrets:
+      - source: cloudinary_config
+        target: cloudinary.env
+    networks: [cloud]
+
+volumes:
+  design-postgres:
+networks:
+  localdb:
+    internal: true
+  cloud: {}
+secrets:
+  postgres_password:
+    file: ./.secrets/postgres_password
+  neon_service:
+    file: ${NEON_SERVICE_FILE:-./.secrets/pg_service.conf}
+  neon_password:
+    file: ${NEON_PGPASS_FILE:-./.secrets/pgpass}
+  cloudinary_config:
+    file: ${CLOUDINARY_CONFIG_FILE:-./.secrets/cloudinary.env}

@@ -78,7 +78,7 @@ class BusinessTests(unittest.TestCase):
         self.assertEqual(owner.post(f'/api/invitations/{token}/accept',json={}).status_code,400)
         self.assertEqual(viewer.post(f'/api/invitations/{token}/accept',json={}).status_code,200)
         self.assertEqual(len(viewer.get(f"/api/homes/{home['id']}/cameras").json()),1)
-        self.assertEqual(viewer.put(f"/api/cameras/{camera['id']}/zones",json={'base_version':1,'zones':[]}).status_code,403)
+        self.assertEqual(viewer.put(f"/api/cameras/{camera['id']}/zones",json={'base_version':1,'zones':[]}).status_code,404)
         self.assertEqual(owner.post(f"/api/homes/{home['id']}/cameras/claim",json={'code':provision['pairing_code'],'name':'Again','room_id':room['id']}).status_code,400)
         with viewer.websocket_connect(f"/ws/alerts?home_id={home['id']}") as ws:
             response=owner.delete(f"/api/homes/{home['id']}/members/{viewer_user['id']}")
@@ -89,10 +89,8 @@ class BusinessTests(unittest.TestCase):
     def test_config_version_event_realtime_and_persistence(self):
         owner,_=self.account('owner@example.com')
         home,room,camera,provision=self.home_camera(owner);device=self.device(provision)
-        zones={'base_version':1,'zones':[{'id':'sofa','name':'Sofa','kind':'sofa','points':[[.1,.1],[.8,.1],[.8,.8],[.1,.8]]}]}
-        response=owner.put(f"/api/cameras/{camera['id']}/zones",json=zones)
+        response=owner.put(f"/api/homes/{home['id']}/settings",json={'temperature_high':34})
         self.assertEqual(response.status_code,200,response.text)
-        self.assertEqual(owner.put(f"/api/cameras/{camera['id']}/zones",json=zones).status_code,409)
         config=owner.get(f"/api/cameras/{camera['id']}/config").json()
         self.assertEqual(config['applied_version'],0)
         self.assertEqual(device.post('/api/device/config/ack',json={'version':2,'success':True}).status_code,200)
@@ -111,6 +109,45 @@ class BusinessTests(unittest.TestCase):
         self.assertEqual(owner.post(f'/api/events/{event_id}/actions',json={'action':'safe','note':'Đã kiểm tra','confirm_abnormal':True}).json()['status'],'RESOLVED')
         db.initialize()
         self.assertEqual(len(owner.get(f"/api/homes/{home['id']}/events").json()),1)
+
+    def test_zones_disabled_and_legacy_config_retired_once(self):
+        owner,user=self.account('owner@example.com')
+        home,room,camera,provision=self.home_camera(owner);device=self.device(provision)
+        legacy={'version':1,'camera_id':camera['id'],'zones':[{'id':'old-sofa'}],'reference':{'width':640},'reminders':[]}
+        with db.connect() as conn:
+            conn.execute('UPDATE configurations SET payload=? WHERE camera_id=? AND version=1',(db.dumps(legacy),camera['id']))
+            conn.execute('UPDATE cameras SET applied_version=1 WHERE id=?',(camera['id'],))
+            conn.execute('UPDATE memberships SET rights=? WHERE home_id=? AND user_id=?',(db.dumps({'zones':True,'audio':True}),home['id'],user['id']))
+        # Both read paths must filter old data even before retirement runs.
+        self.assertEqual(device.get('/api/device/config').json()['zones'],[])
+        self.assertEqual(owner.get(f"/api/cameras/{camera['id']}/config").json()['payload']['reference'],{})
+        self.assertNotIn('zones',owner.get('/api/homes').json()[0]['rights'])
+        self.assertNotIn('zones',owner.get(f"/api/homes/{home['id']}/members").json()[0]['rights'])
+        for client in (owner,self.client):
+            self.assertEqual(client.put(f"/api/cameras/{camera['id']}/zones",json={'base_version':1,'zones':[]}).status_code,404)
+        paths=main.app.openapi()['paths']
+        self.assertNotIn('/api/cameras/{camera_id}/zones',paths)
+        self.assertNotIn('Zones',main.app.openapi()['components']['schemas'])
+        self.assertEqual(owner.post(f"/api/homes/{home['id']}/invitations",json={'email':'other@example.com','role':'caregiver','scopes':[camera['id']],'rights':{'zones':True}}).status_code,422)
+        with TestClient(main.app):
+            pass
+        services.retire_zone_configs()
+        config=owner.get(f"/api/cameras/{camera['id']}/config").json()
+        self.assertEqual(config['desired_version'],2)
+        self.assertEqual(config['applied_version'],1)
+        self.assertEqual(config['payload']['zones'],[])
+        self.assertEqual(config['payload']['reference'],{})
+        self.assertIn('environment',config['payload'])
+        self.assertEqual(device.post('/api/device/config/ack',json={'version':2,'success':True}).status_code,200)
+        # A restart must not revive zones or create another revision.
+        with TestClient(main.app):
+            self.assertEqual(device.get('/api/device/config').json()['version'],2)
+        with db.connect() as conn:
+            stored=json.loads(conn.execute('SELECT payload FROM configurations WHERE camera_id=? AND version=1',(camera['id'],)).fetchone()[0])
+            self.assertEqual(stored,legacy)
+            self.assertEqual(conn.execute("SELECT count(*) FROM audit WHERE action='zones.retire'").fetchone()[0],1)
+            services.revision(conn,camera['id'])
+        self.assertEqual(device.get('/api/device/config').json()['zones'],[])
 
     def test_reminder_commands_assets_and_telemetry(self):
         owner,_=self.account('owner@example.com');home,room,camera,provision=self.home_camera(owner);device=self.device(provision)
@@ -194,7 +231,7 @@ class BusinessTests(unittest.TestCase):
         self.assertEqual(self.device(second).get(f"/api/device/assets/{asset['id']}").status_code,404)
         self.assertEqual(device.post('/api/device/config/ack',json={'version':100,'success':True}).status_code,422)
         invalid={'base_version':1,'zones':[{'id':'bad','name':'Bad','kind':'sofa','points':[[0,0],[1,1],[1,0],[0,1]]}]}
-        self.assertEqual(owner.put(f"/api/cameras/{camera['id']}/zones",json=invalid).status_code,422)
+        self.assertEqual(owner.put(f"/api/cameras/{camera['id']}/zones",json=invalid).status_code,404)
 
 
 if __name__=='__main__': unittest.main()

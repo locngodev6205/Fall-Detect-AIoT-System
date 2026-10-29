@@ -34,7 +34,7 @@ export function Setup() {
   return <><Heading title="Kết nối camera với nhà" text="Mã ghép nối chỉ dùng một lần và có thời hạn. Thiết bị đang thuộc nhà khác không thể được nhận lại bằng mã cũ."/>
     <div className="two-grid"><form className="panel" onSubmit={room}><h2>1. Tạo phòng</h2><Field label="Tên phòng" name="name" required maxLength={120}/><Button type="submit">Thêm phòng</Button><p>{rooms.map(r => r.name).join(' · ') || 'Chưa có phòng'}</p></form>
     <form className="panel" onSubmit={claim}><h2>2. Ghép nối thiết bị</h2><Field label="Mã ghép nối từ thiết bị" name="code" required minLength={8} autoComplete="off"/><Field label="Tên camera" name="name" required maxLength={120}/><Field label="Phòng"><select name="room_id" required defaultValue=""><option value="" disabled>Chọn phòng</option>{rooms.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}</select></Field><Button type="submit" disabled={busy || !rooms.length}>{busy ? 'Đang ghép nối…' : 'Đăng ký camera'}</Button></form></div>
-    <div className="notice">Sau khi ghép nối, kiểm tra hình ảnh và thiết lập vùng nghỉ ngơi trong trang camera. Chưa kết nối không có nghĩa là đang giám sát.</div>
+    <div className="notice">Sau khi ghép nối, kiểm tra hình ảnh và tình trạng kết nối trong trang camera. Chưa kết nối không có nghĩa là đang giám sát.</div>
   </>;
 }
 
@@ -61,7 +61,7 @@ export function Cameras() {
 export function CameraDetail({ id }) {
   const { cameras, home, can, notify } = useApp();const camera = cameras.find(c => c.id === id);
   if (!camera) return <Empty title="Camera không tồn tại hoặc ngoài phạm vi quyền"/>;
-  return <><Heading title={camera.name} text={`Kết nối cuối: ${dateTime(camera.last_seen)}`} action={can(camera, 'zones') && <Button onClick={() => go('/zones/' + id)}>Thiết lập vùng</Button>}/><CameraImage camera={camera}/>
+  return <><Heading title={camera.name} text={`Kết nối cuối: ${dateTime(camera.last_seen)}`}/><CameraImage camera={camera}/>
     <div className="notice">Luồng hình chỉ hiển thị trực tiếp khi đang nhận frame mới từ thiết bị. Khi luồng gián đoạn, giao diện chuyển sang ảnh gần nhất và giữ thời điểm nhận để tránh nhầm với tình hình hiện tại.</div>
     <div className="two-grid"><section className="panel"><h2>Tình trạng giám sát</h2><p>Quan sát: {camera.observation}</p><p>Cấu hình: {camera.applied_version}/{camera.desired_version} · {statusNames[camera.sync_status]}</p>{camera.config_error && <p role="alert">{camera.config_error}</p>}</section><section className="panel"><h2>Kết nối với người thân</h2><p>Lệnh phát âm thanh chỉ được ghi nhận hoàn thành khi thiết bị phản hồi.</p>{can(camera, 'audio') && <Button onClick={() => go('/reminders/send?camera=' + id)}><SpeakerHigh/>Gửi âm thanh</Button>}<a className="button secondary-btn" href="#/environment">Xem môi trường</a></section></div>
   </>;

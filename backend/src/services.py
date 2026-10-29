@@ -50,12 +50,28 @@ def reminder_public(row):
     return result
 
 
-def revision(conn, camera_id, zones=None, reference=None):
+def config_without_zones(payload):
+    # Empty compatibility fields explicitly clear old device-side regions.
+    return {**payload,'zones':[],'reference':{}}
+
+
+def retire_zone_configs():
+    # Append a revision once; preserve old configurations and applied_version.
+    with db.connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        cameras=conn.execute('SELECT * FROM cameras WHERE claimed=1').fetchall()
+        for camera in cameras:
+            row=conn.execute('SELECT payload FROM configurations WHERE camera_id=? ORDER BY version DESC LIMIT 1',(camera['id'],)).fetchone()
+            payload=json.loads(row['payload']) if row else {}
+            if payload.get('zones') or payload.get('reference'):
+                revision(conn,camera['id'])
+                db.audit(conn,camera['home_id'],'system','zones.retire',camera['id'])
+
+
+def revision(conn, camera_id):
     camera=conn.execute('SELECT * FROM cameras WHERE id=?',(camera_id,)).fetchone()
     previous=conn.execute('SELECT payload FROM configurations WHERE camera_id=? ORDER BY version DESC LIMIT 1',(camera_id,)).fetchone()
-    payload=json.loads(previous['payload']) if previous else {'zones':[],'reference':{}}
-    if zones is not None: payload['zones']=zones
-    if reference is not None: payload['reference']=reference
+    payload=config_without_zones(json.loads(previous['payload']) if previous else {})
     version=camera['desired_version']+1
     payload.update(version=version,camera_id=camera_id)
     payload['reminders']=[reminder_public(r) for r in conn.execute('SELECT * FROM reminders WHERE camera_id=?',(camera_id,))]

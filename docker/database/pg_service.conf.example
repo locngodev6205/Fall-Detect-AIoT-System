@@ -1,0 +1,10 @@
+# Copy to .secrets/pg_service.conf, never put a password in this file.
+# Use the DIRECT Neon hostname (no -pooler) for migration.
+[annha_neon_migration]
+host=REPLACE_DIRECT_HOST.neon.tech
+port=5432
+dbname=REPLACE_DATABASE
+user=REPLACE_MIGRATION_OWNER
+sslmode=verify-full
+sslrootcert=/etc/ssl/certs/ca-certificates.crt
+connect_timeout=10

@@ -13,7 +13,7 @@
 .auth-visual > div { position:absolute;inset:auto 40px 60px;background:#ffffffdd;padding:30px;border-radius:16px; }
 .auth-visual h2 { font-size:42px;line-height:1.25; }
 .camera-empty { display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px;color:#fff;min-height:320px;padding:60px 24px; }
-.real-camera { min-height:320px;cursor:default; }
+.real-camera { width:100%;min-height:320px;cursor:default; }
 .real-camera .photo-bottom { display:flex;justify-content:space-between;gap:12px; }
 .real-camera .photo-bottom span { font-size:12px; }
 .zone-live-layout { display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:24px;align-items:start; }

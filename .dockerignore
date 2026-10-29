@@ -1,0 +1,16 @@
+.git
+.secrets
+.env
+.env.*
+**/.env
+**/.env.*
+**/node_modules
+**/dist
+**/__pycache__
+**/*.pyc
+backend/data
+fall_detect
+archives
+.codex
+.agents
+.aws

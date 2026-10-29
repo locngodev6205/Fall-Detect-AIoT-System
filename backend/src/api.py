@@ -10,7 +10,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from . import db, models as m, services as svc
-from .security import COOKIE, SESSION_SECONDS, camera_access, device, digest, membership, password_hash, password_matches, public_user, throttle, user
+from .security import COOKIE, SESSION_SECONDS, active_rights, camera_access, device, digest, membership, password_hash, password_matches, public_user, throttle, user
 
 router=APIRouter(prefix='/api')
 Current=Annotated[dict,Depends(user)]
@@ -126,7 +126,7 @@ def profile(payload:m.Name,current:Current):
 def homes(current:Current):
     with db.connect() as conn:
         rows=conn.execute('SELECT h.*,m.role,m.scopes,m.rights FROM homes h JOIN memberships m ON m.home_id=h.id WHERE m.user_id=? ORDER BY h.name',(current['id'],)).fetchall()
-    return [{**dict(r),'settings':json.loads(r['settings']) if r['role']=='owner' else {},'scopes':json.loads(r['scopes']),'rights':json.loads(r['rights'])} for r in rows]
+    return [{**dict(r),'settings':json.loads(r['settings']) if r['role']=='owner' else {},'scopes':json.loads(r['scopes']),'rights':active_rights(r['rights'])} for r in rows]
 
 
 @router.post('/homes',status_code=201)
@@ -219,7 +219,7 @@ async def remove_camera(camera_id:str,current:Current):
 def members(home_id:str,current:Current):
     with db.connect() as conn:
         membership(conn,home_id,current['id'],owner=True)
-        return [{**dict(r),'scopes':json.loads(r['scopes']),'rights':json.loads(r['rights'])} for r in conn.execute('SELECT u.id,u.name,u.email,m.role,m.scopes,m.rights FROM users u JOIN memberships m ON m.user_id=u.id WHERE m.home_id=?',(home_id,))]
+        return [{**dict(r),'scopes':json.loads(r['scopes']),'rights':active_rights(r['rights'])} for r in conn.execute('SELECT u.id,u.name,u.email,m.role,m.scopes,m.rights FROM users u JOIN memberships m ON m.user_id=u.id WHERE m.home_id=?',(home_id,))]
 
 
 @router.patch('/homes/{home_id}/members/{user_id}')
@@ -276,7 +276,7 @@ def invitation(token:str,current:Current):
     with db.connect() as conn:
         row=conn.execute('SELECT i.*,h.name AS home_name FROM invitations i JOIN homes h ON h.id=i.home_id WHERE token_hash=?',(digest(token),)).fetchone()
         if not row or row['email']!=current['email']: raise HTTPException(404,'Không tìm thấy lời mời cho tài khoản này.')
-        return {k:row[k] for k in ('id','home_id','home_name','role','scopes','rights','expires','status')}
+        return {**{k:row[k] for k in ('id','home_id','home_name','role','scopes','expires','status')},'rights':db.dumps(active_rights(row['rights']))}
 
 
 @router.post('/invitations/{token}/accept')
@@ -318,19 +318,7 @@ def config(camera_id:str,current:Current):
     with db.connect() as conn:
         camera=camera_access(conn,camera_id,current['id'])
         row=conn.execute('SELECT * FROM configurations WHERE camera_id=? ORDER BY version DESC LIMIT 1',(camera_id,)).fetchone()
-        return {'desired_version':camera['desired_version'],'applied_version':camera['applied_version'],'error':camera['config_error'],'payload':json.loads(row['payload']) if row else {'zones':[],'reference':{}}}
-
-
-@router.put('/cameras/{camera_id}/zones')
-def zones(camera_id:str,payload:m.Zones,current:Current):
-    with db.connect() as conn:
-        conn.execute('BEGIN IMMEDIATE')
-        camera=camera_access(conn,camera_id,current['id'],'zones')
-        if camera['desired_version']!=payload.base_version: raise HTTPException(409,'Cấu hình đã thay đổi. Hãy tải lại trước khi lưu.')
-        if len(db.dumps(payload.reference))>4000: raise HTTPException(422,'Dữ liệu ảnh tham chiếu quá lớn.')
-        result=svc.revision(conn,camera_id,[z.model_dump() for z in payload.zones],payload.reference)
-        db.audit(conn,camera['home_id'],current['id'],'zones.update',camera_id)
-    return {'version':result['version'],'status':'pending'}
+        return {'desired_version':camera['desired_version'],'applied_version':camera['applied_version'],'error':camera['config_error'],'payload':svc.config_without_zones(json.loads(row['payload']) if row else {})}
 
 
 @router.get('/homes/{home_id}/events')
@@ -604,7 +592,7 @@ def heartbeat(payload:m.Heartbeat,current:Device):
 def device_config(current:Device):
     with db.connect() as conn:
         row=conn.execute('SELECT payload FROM configurations WHERE camera_id=? ORDER BY version DESC LIMIT 1',(current['id'],)).fetchone()
-    return json.loads(row[0]) if row else {'version':0,'zones':[],'reminders':[]}
+    return svc.config_without_zones(json.loads(row[0]) if row else {'version':0,'reminders':[]})
 
 
 @router.post('/device/config/ack')

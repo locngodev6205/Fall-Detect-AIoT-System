@@ -1,4 +1,3 @@
-import math
 import re
 from datetime import date
 from typing import Literal
@@ -62,7 +61,7 @@ class Name(Model):
 class Access(Model):
     role: Literal['caregiver','viewer']
     scopes: list[str] = Field(max_length=100)
-    rights: dict[Literal['audio','zones','schedules'],bool] = Field(default_factory=dict)
+    rights: dict[Literal['audio','schedules'],bool] = Field(default_factory=dict)
     @model_validator(mode='after')
     def viewer_rights(self):
         if self.role=='viewer' and any(self.rights.values()): raise ValueError('Người xem không có quyền điều khiển')
@@ -75,47 +74,6 @@ class Claim(Model):
     code: str = Field(min_length=8,max_length=128)
     name: str = Field(min_length=1,max_length=120)
     room_id: str
-
-class Zone(Model):
-    id: str = Field(min_length=1,max_length=128)
-    name: str = Field(min_length=1,max_length=120)
-    kind: Literal['bed','sofa','chair','floor','ignore']
-    points: list[tuple[float,float]] = Field(min_length=3,max_length=30)
-    enabled: bool = True
-    immobile_seconds: int = Field(default=120,ge=10,le=86400)
-    active_start: str | None = None
-    active_end: str | None = None
-    outside_seconds: int = Field(default=120,ge=10,le=86400)
-    @model_validator(mode='after')
-    def polygon(self):
-        if any(not (0<=x<=1 and 0<=y<=1) for x,y in self.points): raise ValueError('Tọa độ phải trong khoảng 0–1')
-        if len(set(self.points)) != len(self.points): raise ValueError('Điểm đa giác bị trùng')
-        area=sum(a[0]*b[1]-b[0]*a[1] for a,b in zip(self.points,self.points[1:]+self.points[:1]))
-        if abs(area)<0.0001: raise ValueError('Vùng có diện tích quá nhỏ')
-        # Reject self-intersections, including overlapping edges.
-        def cross(a,b,c): return (b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0])
-        def on(a,b,c): return min(a[0],b[0])<=c[0]<=max(a[0],b[0]) and min(a[1],b[1])<=c[1]<=max(a[1],b[1])
-        edges=list(zip(self.points,self.points[1:]+self.points[:1]))
-        for i,(a,b) in enumerate(edges):
-            for j,(c,d) in enumerate(edges):
-                if j<=i or j==i+1 or (i==0 and j==len(edges)-1): continue
-                x,y,z,w=cross(a,b,c),cross(a,b,d),cross(c,d,a),cross(c,d,b)
-                if (x*y<0 and z*w<0) or any(abs(v)<1e-10 and on(*args) for v,args in [(x,(a,b,c)),(y,(a,b,d)),(z,(c,d,a)),(w,(c,d,b))]):
-                    raise ValueError('Đa giác tự cắt')
-        for value in (self.active_start,self.active_end):
-            if value and not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d',value): raise ValueError('Giờ không hợp lệ')
-        if bool(self.active_start)!=bool(self.active_end): raise ValueError('Cần đủ giờ bắt đầu và kết thúc')
-        return self
-
-class Zones(Model):
-    base_version: int = Field(ge=0)
-    zones: list[Zone] = Field(max_length=30)
-    reference: dict = Field(default_factory=dict)
-    @field_validator('zones')
-    @classmethod
-    def unique(cls,value):
-        if len({x.id for x in value})!=len(value): raise ValueError('Mã vùng bị trùng')
-        return value
 
 class Action(Model):
     action: Literal['acknowledge','resolve','safe','false_alarm','note','silence']

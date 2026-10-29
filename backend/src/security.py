@@ -71,6 +71,12 @@ def throttle(key, maximum=10, seconds=900):
         raise HTTPException(429, 'Quá nhiều lần thử. Vui lòng thử lại sau.')
 
 
+def active_rights(value):
+    # Retain legacy values in storage, but never expose or grant zone permissions.
+    import json
+    return {key:enabled for key,enabled in json.loads(value).items() if key in ('audio','schedules')}
+
+
 def membership(conn, home_id, user_id, owner=False):
     row = conn.execute('SELECT * FROM memberships WHERE home_id=? AND user_id=?',(home_id,user_id)).fetchone()
     if not row:
@@ -78,13 +84,15 @@ def membership(conn, home_id, user_id, owner=False):
     result = dict(row)
     import json
     result['scopes'] = json.loads(result['scopes'])
-    result['rights'] = json.loads(result['rights'])
+    result['rights'] = active_rights(result['rights'])
     if owner and result['role'] != 'owner':
         raise HTTPException(403, 'Thao tác này cần quyền chủ nhà.')
     return result
 
 
 def camera_access(conn, camera_id, user_id, action='view', historical=False):
+    if action == 'zones':
+        raise HTTPException(404, 'Không tìm thấy chức năng.')
     camera = conn.execute('SELECT * FROM cameras WHERE id=? AND (claimed=1 OR ?)',(camera_id,int(historical))).fetchone()
     if not camera or not camera['home_id']:
         raise HTTPException(404, 'Không tìm thấy camera.')
