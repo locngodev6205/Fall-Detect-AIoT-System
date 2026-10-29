@@ -1,6 +1,6 @@
 # AnNhà — Camera giám sát gia đình
 
-Ứng dụng React/Vite theo giao diện Calm Home từ `AnNha-website.zip`, kết nối với backend FastAPI và SQLite. Dữ liệu tài khoản, quyền, nhà/phòng, camera, sự kiện, cảm biến, lịch nhắc và lệnh âm thanh được quản lý tại backend; không dùng localStorage để giả lập nghiệp vụ.
+Ứng dụng React/Vite theo giao diện Calm Home từ `AnNha-website.zip`, kết nối với backend FastAPI và Neon PostgreSQL. Adapter SQLite được giữ cho môi trường local/rollback. Dữ liệu tài khoản, quyền, nhà/phòng, camera, sự kiện, cảm biến, lịch nhắc và lệnh âm thanh được quản lý tại backend; không dùng localStorage để giả lập nghiệp vụ.
 
 ## Chạy nhanh bằng menu
 
@@ -31,7 +31,7 @@ docker compose up --build -d
 - Backend, MQTT và SMTP chỉ nằm trong mạng Docker, không publish cổng máy chủ.
 - Không sử dụng cổng **5173** hoặc **8080** của dự án khác.
 
-Đăng ký tài khoản → mở thư xác minh trong Mailpit → xác minh → đăng nhập → tạo nhà/phòng. Không có tài khoản hoặc camera mẫu tự động được cấp quyền.
+Đăng ký tài khoản → mở thư xác minh trong Mailpit → xác minh → đăng nhập → tạo nhà/phòng. Bộ dữ liệu DEMO đã được seed trên Neon theo yêu cầu; xem `.secrets/demo-credentials.json` để đăng nhập và [hướng dẫn Neon](docs/NEON_SETUP.md).
 
 Mailpit chỉ giữ thư trong môi trường cục bộ, không gửi đến email bên ngoài. Khi triển khai thật, thay SMTP bằng máy chủ thư của bạn; bật HTTPS, `COOKIE_SECURE=true`, đặt `APP_ORIGINS`/`PUBLIC_URL` đúng địa chỉ. Đổi cổng qua `.env` dựa trên `.env.example`.
 
@@ -41,7 +41,7 @@ docker compose logs -f backend
 docker compose down
 ```
 
-Named volumes giữ SQLite/media, broker và hộp thư qua restart. `docker compose down -v` sẽ xóa dữ liệu; không dùng để cập nhật ứng dụng. Build mới: `docker compose up --build -d`.
+Named volumes giữ backup SQLite/media, broker và hộp thư qua restart. `docker compose down -v` sẽ xóa dữ liệu; không dùng để cập nhật ứng dụng. Build mới: `docker compose up --build -d`.
 
 ## Đăng ký camera thật
 
@@ -115,8 +115,8 @@ Các test dùng DB/media tạm; không sửa dữ liệu ứng dụng. Test back
 
 ZIP gốc giữ tại `archives/source-imports/AnNha-website.zip` và đã gitignore. Tài liệu: [Specification](docs/PROJECT_SPECIFICATION.md), [Architecture](docs/ARCHITECTURE.md), [Device API](docs/DEVICE_API.md).
 
-Thiết kế database đích: [Neon/PostgreSQL và Cloudinary](docs/DATABASE_DESIGN_NEON.md); backend hiện vẫn chạy SQLite.
+Thiết kế database đích: [Neon/PostgreSQL và Cloudinary](docs/DATABASE_DESIGN_NEON.md); backend đã tích hợp Neon; media vẫn lưu local.
 
-Bộ Docker database/cloud tools: [compose.database.yaml](compose.database.yaml). Hướng dẫn tạo Neon, cấp role, setup Cloudinary và phân biệt các biến có hiệu lực trong [DATABASE_DESIGN_NEON.md](docs/DATABASE_DESIGN_NEON.md). Chạy `python3 scripts/cloud/prepare_secrets.py` để tạo mẫu cấu hình một lần; file hiện hữu được giữ nguyên. Backend ứng dụng hiện tại vẫn dùng SQLite/local media.
+Bộ Docker database/cloud tools: [compose.database.yaml](compose.database.yaml). Hướng dẫn tạo Neon, cấp role, setup Cloudinary và phân biệt các biến có hiệu lực trong [DATABASE_DESIGN_NEON.md](docs/DATABASE_DESIGN_NEON.md). Chạy `python3 scripts/cloud/prepare_secrets.py` để tạo mẫu cấu hình một lần; file hiện hữu được giữ nguyên. Backend chọn PostgreSQL bằng `DATABASE_BACKEND=postgres`; `.env` hiện tại đã cấu hình Neon.
 
-Ưu tiên tích hợp Neon và email/Telegram, Cloudinary để sau: làm theo [NEON_SETUP.md](docs/NEON_SETUP.md). Có thể lưu direct URI qua lời nhắc ẩn bằng `python3 scripts/cloud/configure_neon.py`; không gửi mật khẩu trong chat.
+Neon đã được tích hợp; email xác nhận/reset và cảnh báo qua Mailpit đã kiểm thử. Cloudinary để sau: làm theo [NEON_SETUP.md](docs/NEON_SETUP.md). Có thể lưu direct URI qua lời nhắc ẩn bằng `python3 scripts/cloud/configure_neon.py`; không gửi mật khẩu trong chat.

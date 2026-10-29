@@ -36,3 +36,5 @@ dist/
 # Local cloud/database credentials
 /.secrets/
 .neon
+
+.env.local

@@ -210,7 +210,7 @@ def process_notifications():
             event=conn.execute('SELECT e.*,c.name FROM annha.events e JOIN annha.cameras c ON c.id=e.camera_id WHERE e.id=%s',(job['event_id'],)).fetchone()
             destination=conn.execute('SELECT destination_ciphertext FROM annha_private.notification_secrets WHERE channel_id=%s',(channel['id'],)).fetchone() if channel['kind']=='telegram' else None
             conn.execute("UPDATE annha.notification_deliveries SET status='sending',attempt_count=attempt_count+1,next_attempt_at=now()+interval '2 minutes' WHERE id=%s",(job['id'],))
-        text=f"AnNhà: {event['kind']} tại {event['name']}\nThời điểm: {event['first_observed_at'].isoformat()}\nVui lòng mở ứng dụng để kiểm tra."
+        text=f"AnNhà: {event['kind']} tại {event['name']}\nThời điểm: {event['first_observed_at'].isoformat()}\nMã sự kiện: {event['id']}\nVui lòng mở ứng dụng để kiểm tra."
         state='accepted';error=None;provider_id=None
         try:
             if channel['kind']=='email':
@@ -232,4 +232,91 @@ def process_notifications():
                 (home,job['id'],count,state,'smtp' if channel['kind']=='email' else 'telegram',provider_id,error))
             conn.execute('''UPDATE annha.notification_deliveries SET status=%s,last_error_code=%s,sent_count=sent_count+%s,
                accepted_at=CASE WHEN %s THEN now() ELSE accepted_at END,next_attempt_at=now()+interval '2 minutes' WHERE id=%s''',
-                ('accepted' if state=='accepted' else ('failed' if count>=5 else 'pending'),error,1 if state=='accepted' else 0,state=='accepted',job['id']))
+                ('pending' if count<5 else ('accepted' if state=='accepted' else 'failed'),error,1 if state=='accepted' else 0,state=='accepted',job['id']))
+
+# These monitors persist their state so a restart cannot reset the hold timer.
+def evaluate_environment(camera,telemetry):
+    stamp=datetime.fromisoformat(telemetry.observed_at)
+    if abs((db.now()-stamp).total_seconds())>120: return []
+    emissions=[]
+    with db.connect('worker',camera['home_id'],camera=camera['id']) as conn:
+        conn.execute('SELECT id FROM annha.cameras WHERE id=%s FOR UPDATE',(camera['id'],))
+        settings=conn.execute('SELECT * FROM annha.home_settings WHERE home_id=%s',(camera['home_id'],)).fetchone()
+        policies=[('temperature_high','temperature','C',1),('temperature_low','temperature','C',-1),('humidity_high','humidity','%',1),('gas_high','gas',settings['gas_unit'],1)]
+        for key,metric,unit,direction in policies:
+            old=conn.execute('SELECT * FROM annha.monitor_states WHERE camera_id=%s AND monitor_key=%s',(camera['id'],key)).fetchone()
+            state=old['state'] if old else {};since=old['since_at'] if old else None;active=bool(old and old['active']);source=state.get('source_id')
+            if state.get('last_observed') and stamp<=datetime.fromisoformat(state['last_observed']): continue
+            reading=telemetry.readings.get(metric)
+            if not reading or reading.quality!='valid' or reading.unit!=unit:
+                if not active: since=None
+            else:
+                delta=(reading.value-settings[key])*direction
+                if active and delta<=-settings['hysteresis']:
+                    emissions.append(models.EventInput(event_id=source,sequence=2,kind='environment',severity='critical' if metric=='gas' else 'warning',observation='recovered',observed_at=stamp.isoformat(),reason=f'{metric} đã trở về ngưỡng cấu hình'))
+                    active=False;since=None;source=None
+                elif delta>0:
+                    since=since or stamp
+                    if not active and (stamp-since).total_seconds()>=settings['environment_hold_seconds']:
+                        active=True;source='environment:'+key+':'+db.uid()
+                        emissions.append(models.EventInput(event_id=source,kind='environment',severity='critical' if metric=='gas' else 'warning',observation='abnormal',observed_at=stamp.isoformat(),reason=f'{metric}: {reading.value} {unit}; ngưỡng {settings[key]}',duration_s=(stamp-since).total_seconds()))
+                elif not active: since=None
+            conn.execute('''INSERT INTO annha.monitor_states(home_id,camera_id,monitor_key,active,since_at,state) VALUES(%s,%s,%s,%s,%s,%s)
+              ON CONFLICT(camera_id,monitor_key) DO UPDATE SET active=excluded.active,since_at=excluded.since_at,state=excluded.state,updated_at=now()''',(camera['home_id'],camera['id'],key,active,since,db.J({'source_id':source,'last_observed':stamp.isoformat()})))
+    events=[ingest_event(camera,payload)[0] for payload in emissions]
+    for event in events: pending_broadcasts.append(event)
+    return events
+
+pending_broadcasts=[]
+
+def maintenance():
+    with db.connect('auth') as conn:
+        homes=[str(r['id']) for r in conn.execute('SELECT id FROM annha.homes WHERE archived_at IS NULL')]
+        conn.execute('DELETE FROM annha_private.sessions WHERE expires_at<now()-interval \'7 days\'')
+        conn.execute('DELETE FROM annha_private.email_tokens WHERE expires_at<now()-interval \'7 days\'')
+        conn.execute('DELETE FROM annha_private.rate_limits WHERE window_end<now()')
+    for home in homes:
+        emissions=[]
+        with db.connect('worker',home) as conn:
+            conn.execute("UPDATE annha.commands SET status='expired' WHERE expires_at<now() AND status IN ('pending','accepted')")
+            # A crash after a provider accepted a send is ambiguous; do not blindly resend.
+            conn.execute("UPDATE annha.notification_deliveries SET status='unknown',last_error_code='LeaseExpired' WHERE status='sending' AND next_attempt_at<now()")
+            for camera in conn.execute('SELECT * FROM annha.cameras WHERE retired_at IS NULL AND last_seen_at IS NOT NULL').fetchall():
+                camera={**dict(camera),'id':str(camera['id']),'home_id':home}
+                old=conn.execute("SELECT * FROM annha.monitor_states WHERE camera_id=%s AND monitor_key='offline' FOR UPDATE",(camera['id'],)).fetchone()
+                offline=(db.now()-camera['last_seen_at']).total_seconds()>45;active=bool(old and old['active'])
+                if offline==active: continue
+                source=old['state']['source_id'] if active else 'offline:'+db.uid()
+                conn.execute("INSERT INTO annha.monitor_states(home_id,camera_id,monitor_key,active,state) VALUES(%s,%s,'offline',%s,%s) ON CONFLICT(camera_id,monitor_key) DO UPDATE SET active=excluded.active,state=excluded.state,updated_at=now()",(home,camera['id'],offline,db.J({'source_id':source})))
+                emissions.append((camera,models.EventInput(event_id=source,sequence=1 if offline else 2,kind='device',severity='warning',observation='abnormal' if offline else 'recovered',observed_at=db.now().isoformat(),reason='Quá hạn heartbeat; chưa rõ mất mạng hay mất nguồn' if offline else 'Đã nhận heartbeat trở lại')))
+            for asset in conn.execute("SELECT * FROM annha.media_assets WHERE status='ready' AND (expires_at<now() OR (kind IN ('snapshot','event_image','event_clip') AND created_at<now()-(SELECT retention_days FROM annha.home_settings WHERE home_id=current_setting('app.home_id')::uuid)*interval '1 day')) FOR UPDATE").fetchall():
+                if asset['provider']!='local': continue
+                if asset['local_object_key'] and Path(asset['local_object_key']).name==asset['local_object_key']: (db.MEDIA_ROOT/asset['local_object_key']).unlink(missing_ok=True)
+                conn.execute('UPDATE annha.home_storage SET used_bytes=used_bytes-%s WHERE home_id=%s',(asset['size_bytes'],home))
+                conn.execute("UPDATE annha.media_assets SET status='expired',deleted_at=now() WHERE id=%s",(asset['id'],))
+            conn.execute('DELETE FROM annha.telemetry_batches WHERE received_at<now()-(SELECT telemetry_retention_days FROM annha.home_settings WHERE home_id=%s)*interval \'1 day\'',(home,))
+        for camera,payload in emissions:
+            event,changed=ingest_event(camera,payload)
+            if changed: pending_broadcasts.append(event)
+
+async def close_home_connections(home):
+    for socket,(_,tenant) in tuple(connections.items()):
+        if str(tenant)==str(home):
+            connections.pop(socket,None)
+            with suppress(Exception): await socket.close(code=1008)
+    await revalidate_connections()
+
+async def worker():
+    import logging
+    last=0
+    while True:
+        try:
+            await asyncio.to_thread(process_job)
+            await asyncio.to_thread(process_notifications)
+            if time.monotonic()-last>=15:
+                await asyncio.to_thread(maintenance);last=time.monotonic()
+            while pending_broadcasts: await broadcast(pending_broadcasts.pop(0))
+            await revalidate_connections()
+        except Exception as error:
+            logging.getLogger(__name__).warning('PostgreSQL worker operation failed: %s',type(error).__name__)
+        await asyncio.sleep(2)

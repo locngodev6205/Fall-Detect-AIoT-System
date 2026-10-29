@@ -1,6 +1,6 @@
 # Thiết kế database và hướng dẫn triển khai AnNhà: Neon, Cloudinary, Docker
 
-Phiên bản 1.2 — 29/10/2026. Thiết kế theo [đặc tả hiện hành](PROJECT_SPECIFICATION.md) và mã FastAPI/SQLite đang có. Đây là thiết kế đích kèm DDL có thể chạy trên database mới; **chưa chuyển backend sang PostgreSQL, chưa tạo Neon project, chưa upload Cloudinary**.
+Phiên bản 1.3 — 29/10/2026. Thiết kế theo [đặc tả hiện hành](PROJECT_SPECIFICATION.md). **Backend đã tích hợp Neon PostgreSQL, nhập dữ liệu SQLite và seed demo; media vẫn lưu local. Cloudinary chưa được nối vào runtime.** Xem [thiết lập/vận hành hiện tại](NEON_SETUP.md) và [bằng chứng kiểm thử](NEON_INTEGRATION_REPORT.md).
 
 **Ưu tiên hiện tại:** Neon và email/Telegram; Cloudinary để giai đoạn sau. Bắt đầu bằng [NEON_SETUP.md](NEON_SETUP.md); không cần Cloudinary credential để migrate/tích hợp Neon.
 
@@ -175,7 +175,7 @@ Neon pooler dùng transaction pooling; không dựa vào SET/session state sốn
 
 ### 5.3. Các kiểm tra vẫn thuộc backend
 
-DDL chặn cấu trúc/quyền dữ liệu nhưng chưa phải toàn bộ nghiệp vụ. Khi port backend phải triển khai:
+DDL chặn cấu trúc/quyền dữ liệu. Adapter `pg*` hiện triển khai các bước dưới đây; các phần Cloudinary/receipt được đánh dấu là giai đoạn sau:
 
 - Hash mật khẩu bằng hàm chuyên dụng có salt/chi phí; giữ tương thích PBKDF2 hiện có, có thể nâng Argon2id khi đăng nhập thành công. Không SHA-256 trực tiếp mật khẩu; SHA-256 trong schema chỉ dành cho token ngẫu nhiên entropy cao.
 - Cookie HttpOnly/Secure/SameSite, HTTPS, kiểm tra Origin và CSRF; xác minh email, hạn session, `auth_version`, thu hồi sau reset/logout. Hash CSRF khác SQLite cũ: phát lại raw CSRF đã ký hoặc xoay raw token và cập nhật hash ở `/auth/me`; không cố giải hash để trả lại.
@@ -243,7 +243,7 @@ Không có hàng trả về thì từ chối upload. `$2` phải là số dươn
 | Worker jobs | Claim hàng đến hạn bằng `FOR UPDATE SKIP LOCKED`, ghi lease rồi COMMIT; gọi cloud/email ngoài giao dịch. Reclaim lease hết hạn, retry có backoff và giới hạn |
 | Quota | Giữ chỗ và ghi asset nguyên tử; chuyển reservation/usage và cập nhật asset nguyên tử; định kỳ đối soát totals với Cloudinary, tránh quota âm/rò reservation |
 
-Các cột/unique/check/RLS đã có trong DDL; orchestration và state machine nêu trên cần được viết khi đổi adapter. Không khẳng định chỉ chạy các file SQL là mọi luồng backend đã chuyển đổi.
+Các cột/unique/check/RLS và orchestration PostgreSQL nằm trong DDL cùng các module `pg*`. Worker đang chạy cho mail, TTS, delivery, thiết bị offline và retention. Phần Cloudinary và provider receipt còn chờ tích hợp.
 
 ## 8. Lưu trữ, hiệu năng và vận hành
 
@@ -307,7 +307,7 @@ GRANT annha_app TO annha_api_login;
 | `mail_jobs`, `rate_limits` | Di trú công việc còn hạn sang queue an toàn; không gửi lại email/token hết hạn |
 | `device_health`, `environment_states`, `audit` | Map monitor states/audit; actor `system` không ép thành user UUID giả |
 
-Backend hiện dùng `sqlite3`, dấu `?`, `BEGIN IMMEDIATE`, `INSERT OR IGNORE`, `lastrowid` và SQL theo cột cũ. Cần adapter PostgreSQL/psycopg hoặc SQLAlchemy, migrations được quản lý và mapping API; không đổi mỗi DATABASE_URL rồi coi đã chuyển xong.
+Adapter SQLite cũ được giữ nguyên. `src.entrypoint` chọn adapter `pg*` khi `DATABASE_BACKEND=postgres`; adapter dùng Psycopg 3, SQL PostgreSQL tham số `%s`, native UUID/timestamptz/JSONB, bốn pool và transaction-local RLS. Công cụ `scripts/cloud/deploy_postgres.py` quản lý checksum migration; `import_sqlite.py` nhập snapshot atomically và giữ nguồn nguyên vẹn.
 
 Cutover: snapshot/backup → dừng ghi ngắn → import có mapping/đếm/checksum → kiểm tra quyền/idempotency/quan hệ → cấu hình backend mới → thử với thiết bị kiểm thử → mới mở ghi production. Tránh dual-write nếu chưa có thiết kế xử lý lệch. Giữ SQLite/media gốc chỉ đọc trong cửa sổ rollback; nếu đã có ghi mới ở Neon, rollback phải xử lý delta trước khi quay lại, không chép đè DB cũ.
 
@@ -315,7 +315,7 @@ Cutover: snapshot/backup → dừng ghi ngắn → import có mapping/đếm/che
 
 Thiết kế hiện có **40 bảng: 25 nghiệp vụ và 15 nội bộ**, sau migration email 005. **73 kiểm tra SQL/bảo mật (46 nền + 27 email)** đã chạy trên PostgreSQL 16.14 Docker lab bằng fixture rollback, không dùng dữ liệu dự án. Bản nền trước đây cũng đã được kiểm tra trên cluster tạm trong `/tmp`. Kiểm tra bao gồm cách ly nhà/camera, quyền viewer/caregiver/owner, thu hồi membership, bí mật token, device scope, chống trùng, liên kết media khác nhà, quota, revision/audit và cấu hình vùng bị loại bỏ.
 
-Chưa kiểm chứng trên Neon, chưa áp dụng driver/pool vào backend, chưa kiểm thử upload/delivery/delete Cloudinary, chưa chạy camera/Pi thật. Trước production cần hoàn tất các giao dịch mục 7, migration dữ liệu, kiểm tra credential thực, RLS qua login runtime và pool Neon, thu hồi media/socket, quota upload đồng thời, timeout/retry và restore.
+Đã kiểm chứng schema và API trên Neon, driver/pool trong Docker, import snapshot, quyền runtime, thu hồi socket, media local, email Mailpit và TTS. Chưa kiểm thử Cloudinary, camera/Pi thật, tải đồng thời quy mô lớn và restore diễn tập. Không suy từ kiểm thử tổng hợp sang hiệu năng phần cứng thật.
 
 
 ## 12. Docker có sẵn và cách chạy trên máy của bạn
@@ -324,7 +324,7 @@ Chưa kiểm chứng trên Neon, chưa áp dụng driver/pool vào backend, chư
 
 | Thành phần | Vai trò |
 |---|---|
-| `compose.yaml` | Web/frontend, backend SQLite, MQTT và Mailpit của ứng dụng hiện có |
+| `compose.yaml` | Web/frontend, backend PostgreSQL hoặc SQLite theo env, MQTT và Mailpit |
 | `compose.database.yaml` | Project riêng `annha-db-lab`, không dùng volume của ứng dụng |
 | `postgres` | PostgreSQL 16.14 lab, volume bền vững, healthcheck; không publish cổng ra máy host |
 | `db-init` | Tạo schema/security/email trong một transaction; gặp schema/role tồn tại thì dừng, không reset |
@@ -394,7 +394,7 @@ docker compose config --quiet
 docker compose up --build -d --wait --wait-timeout 120
 ```
 
-Web mặc định `http://localhost:8188`, Mailpit `http://localhost:8125`. Stack này vẫn dùng SQLite và file local, dù PostgreSQL lab đã chạy. `.env` hiện hữu được giữ; thêm các biến mới cần dùng từ `.env.example` bằng tay. Sau khi đổi env, dùng `up -d --force-recreate` để container nhận lại, không chỉ restart.
+Web mặc định `http://localhost:8188`, Mailpit `http://localhost:8125`. Stack chọn PostgreSQL khi `DATABASE_BACKEND=postgres`; file media vẫn local. Root `.env` hiện dùng Neon. `.env` hiện hữu được giữ; thêm các biến mới cần dùng từ `.env.example` bằng tay. Sau khi đổi env, dùng `up -d --force-recreate` để container nhận lại, không chỉ restart.
 
 ## 13. Đưa schema lên Neon từng bước
 
@@ -476,9 +476,9 @@ GRANT annha_worker TO annha_worker_login;
 
 Không cấp `neon_superuser` hoặc group migration cho bốn login này. Role tạo qua Console/API có thể nhận quyền quản trị; dùng SQL như trên và inspect lại membership. [Neon roles](https://neon.com/docs/manage/roles).
 
-Lấy pooled URL riêng cho mỗi login và chuẩn bị `DATABASE_URL_APP`, `DATABASE_URL_AUTH`, `DATABASE_URL_DEVICE`, `DATABASE_URL_WORKER` trong secret manager/env của backend tương lai. Password trong URL cần percent-encode. Migration URL dùng direct host và không được đưa vào runtime.
+Lấy pooled URL riêng cho mỗi login và chuẩn bị `DATABASE_URL_APP`, `DATABASE_URL_AUTH`, `DATABASE_URL_DEVICE`, `DATABASE_URL_WORKER` trong secret manager/env của backend PostgreSQL. Password trong URL cần percent-encode. Migration URL dùng direct host và không được đưa vào runtime.
 
-**Bước còn thiếu trước khi web dùng Neon:** port adapter/giao dịch theo mục 7/10, dùng bốn pool có giới hạn và context LOCAL. Không thay SQLite bằng cách chỉ dán URL vào `.env`. Các pool settings trong mẫu env là hợp đồng cấu hình dự kiến, chưa được backend đọc.
+**Triển khai hiện tại:** công cụ `deploy_postgres.py` tạo bốn LOGIN NOINHERIT có quyền tối thiểu và xuất URL riêng; backend đã đọc pool/timeouts và context LOCAL. Làm theo [NEON_SETUP.md](NEON_SETUP.md) để dùng migration ledger, không chạy lại bootstrap thủ công trên database đã triển khai.
 
 ## 14. Setup và liên kết Cloudinary
 
@@ -560,12 +560,13 @@ Trước production phải thử: người ngoài nhà không xem được file 
 | `MQTT_*`, `WORKER_ENABLED`, `SMTP_*`, `TELEGRAM_BOT_TOKEN` | Backend hiện tại; Compose đã truyền các biến này vào container |
 | `TB_*`, `DEVICE_ID` | Tuỳ chọn legacy ThingsBoard; không cần để chạy Neon/Cloudinary |
 | `NEON_SERVICE_FILE`, `NEON_PGPASS_FILE`, `CLOUDINARY_CONFIG_FILE` | Đường dẫn secret file cho `compose.database.yaml`, có thể đặt ngoài repo |
-| `DATABASE_URL_*`, `DATABASE_POOL_*`, database timeouts | Dự kiến cho adapter PostgreSQL; backend hiện chưa đọc |
-| `CLOUDINARY_*`, `DATA_ENCRYPTION_KEY*` trong root env | Dự kiến cho media/encryption adapter; cloud tool dùng file secret riêng |
+| `DATABASE_BACKEND`, `DATABASE_URL_APP/AUTH/DEVICE/WORKER`, pool/timeouts | Có hiệu lực trong adapter PostgreSQL; owner URL chỉ cho công cụ triển khai |
+| `DATA_ENCRYPTION_KEY*`, `SESSION_CSRF_KEY` | Bắt buộc cho PostgreSQL; mã hoá secret queue/Telegram và bảo vệ CSRF |
+| `CLOUDINARY_*` | Dự kiến cho media cloud; checker dùng file secret riêng |
 
 Root `.env.example` dùng mặc định Docker. `backend/.env.example` dùng khi chạy standalone **từ repository root**, MQTT tắt mặc định và đường dẫn lưu trữ nằm tại `backend/data`. Backend không tự đọc file này; đưa qua process manager/`uvicorn --env-file` khi phát triển.
 
-Không commit file `.env`, `.secrets`, DB URL, bot token hay API secret. Sau khi sửa env cho Docker phải recreate container. Không trỏ container backend hiện tại sang Neon URL chưa có adapter, không đổi `DATABASE_PATH` thành một URL PostgreSQL.
+Không commit file `.env`, `.secrets`, DB URL, bot token hay API secret. Sau khi sửa env cho Docker phải recreate container. Không dùng owner URL cho runtime, không đổi `DATABASE_PATH` thành URL PostgreSQL.
 
 ### 15.2. Lỗi thường gặp
 
@@ -579,7 +580,7 @@ Không commit file `.env`, `.secrets`, DB URL, bot token hay API secret. Sau khi
 | Cloudinary validate thành công nhưng ping thất bại | Validate không kiểm tra credential; đối chiếu đúng cloud/environment/API key/quyền |
 | Cloudinary 401/403 | Kiểm tra credential hoặc quyền Admin API; checker chỉ in HTTP code, không log secret/body |
 | Preset unsigned/public | Dừng dùng cho media gia đình; kiểm tra cấu hình trong Console hoặc tạo preset tên khác rồi kiểm tra lại |
-| Điền URL/preset nhưng web vẫn lưu file local | Đúng với phiên bản hiện tại: adapter Neon/Cloudinary chưa được port; đọc mục 7/10/14.3 |
+| Điền URL/preset nhưng web vẫn lưu file local | Đúng với media hiện tại: Neon đã nối nhưng Cloudinary chưa tích hợp; đọc mục 14.3 |
 | DB lab healthy nhưng không kết nối được localhost:5432 | Lab không publish cổng; dùng compose exec/tool trong mạng riêng |
 | Đổi password file lab rồi client không đăng nhập | File mới không tự ALTER ROLE đã init; đồng bộ mật khẩu qua console quản trị |
 
@@ -595,7 +596,7 @@ Không commit file `.env`, `.secrets`, DB URL, bot token hay API secret. Sau khi
 - Script prepare chạy lại giữ nguyên nội dung `.env` và secret hiện hữu; `.secrets/` được gitignore và không vào build context.
 - Frontend/backend đã rebuild và chạy healthy cùng MQTT/Mailpit, giữ volume SQLite/media. Web `http://localhost:8188`, Mailpit `http://localhost:8125`.
 
-Neon project/credential và Cloudinary environment/credential phải do bạn cung cấp theo mục 13–14. Backend ứng dụng vẫn dùng SQLite/local media; các adapter, webhook và giao dịch mục 7/10/14.3 chưa được triển khai. Bộ Docker không tự biến thiết kế cloud thành luồng ứng dụng đầu-cuối đã hoạt động.
+Phần kiểm chứng local phía trên ghi lại giai đoạn thiết kế. Sau đó Neon đã được cung cấp và tích hợp; kết quả mới tại [NEON_INTEGRATION_REPORT.md](NEON_INTEGRATION_REPORT.md). Cloudinary chưa tích hợp runtime; không suy kết quả checker thành upload/delivery cloud thành công.
 
 
 ## 17. Mở rộng cảnh báo email — 005
@@ -604,10 +605,33 @@ Neon project/credential và Cloudinary environment/credential phải do bạn cu
 - Email cảnh báo chỉ dùng địa chỉ tài khoản thành viên đã xác minh. Chưa mở địa chỉ tuỳ ý bên ngoài; không lưu lặp email plaintext trong channel hoặc receipt. Backend/worker đọc địa chỉ từ bảng users riêng tư khi gửi.
 - `users.email_version`, `email_tokens.email_version` và phiên bản trên channel/delivery ràng buộc đúng địa chỉ. Đổi email tự tăng phiên bản, xoá xác minh, thu hồi token/phiên cũ, tắt kênh email và huỷ mail cảnh báo pending. Chờ xác minh email mới rồi cập nhật kênh/phiên bản trước khi bật lại.
 - Channel chọn các loại `fall/immobility/environment/device`, mức tối thiểu `info/warning/critical` và bật/tắt từng kênh. Cờ suppression không cho app tự xoá; worker/auth service đã kiểm tra yêu cầu người dùng mới xử lý bỏ chặn hoặc unsubscribe.
-- `can_dispatch_notification()` chỉ cho worker gọi, có tenant context; kiểm tra lại user/membership, quyền xem camera, sự kiện còn OPEN, filter, email version và suppression ngay trước gửi. Backend phải gọi helper và kiểm tra job/lease; có helper trong DB không đồng nghĩa worker SQLite hiện tại đã sử dụng nó.
+- `can_dispatch_notification()` chỉ cho worker gọi, có tenant context; kiểm tra lại user/membership, quyền xem camera, sự kiện còn OPEN, filter, email version và suppression ngay trước gửi. Worker PostgreSQL đã gọi helper trước gửi và xử lý attempt/lease; worker SQLite cũ không dùng schema này.
 - `accepted` chỉ có nghĩa SMTP/API đã nhận. `delivered` cần receipt được nhà cung cấp xác nhận, không có nghĩa người dùng đã đọc. Telegram thành công vẫn là accepted, không tự ghi delivered.
 - `delivery_receipts` thêm một bảng nghiệp vụ; callback được khử trùng và buộc đúng provider/account/attempt/nhà. Backend phải xác minh chữ ký hoặc cơ chế xác thực webhook của nhà cung cấp trước khi ghi bằng role worker. Browser không được tự tạo receipt.
 - Worker sẽ giảm trạng thái theo thời gian nguồn/loại receipt, không để webhook trễ tự ghi đè complaint/hard bounce thành delivered. Hard bounce/complaint: đặt suppressed + disabled cho kênh, ngừng retry; SMTP thuần chưa có receipt thì giữ accepted/unknown. Xử lý này thuộc adapter/worker cần tích hợp, không tự chạy chỉ do INSERT receipt.
 - Email xác minh/reset/lời mời vẫn qua `email_tokens`/`job_queue(kind=email)` và SMTP, độc lập với tuỳ chọn cảnh báo. `EMAIL_ALERTS_ENABLED=false` không được tắt mail xác minh tài khoản.
 
 Bản 39 bảng cũ nâng cấp một lần bằng `db-inspect upgrade-email`; bootstrap mới đã bao gồm 005. Cloudinary không phải điều kiện tiên quyết: `media_assets.provider='local'` được giữ trong đợt tích hợp Neon sắp tới.
+
+
+## 18. Ánh xạ runtime đã thực hiện
+
+| Module/công cụ | Trách nhiệm |
+|---|---|
+| `backend/src/entrypoint.py` | Chọn adapter theo `DATABASE_BACKEND` khi khởi động |
+| `pgdb.py` | Pool theo quyền, TLS xác minh CA/host, SET LOCAL ROLE và context tenant/session/device, statement timeout; rollback/commit và trả pool tự động |
+| `pgsecurity.py` | Tra session/token hash, auth_version, HMAC CSRF, membership/grant camera; thiết bị được xác định từ token registry |
+| `pgapi.py` | Hợp đồng REST hiện có: tài khoản, nhà/phòng, camera, mời/quyền, event/action, telemetry, file local, lịch/version, command/ACK |
+| `pgservices.py` | Compile cấu hình bất biến, ingest sự kiện idempotent/sequence, queue mã hoá, SMTP/TTS, delivery, hysteresis, offline và retention |
+| `pgmain.py`, `pgmedia.py` | Lifespan, origin/headers, health kiểm tra DB, MQTT credential, WebSocket cảnh báo/ảnh/âm thanh có xác thực và kiểm tra lại quyền |
+| `deploy_postgres.py` | Atomic migration/checksum, tạo LOGIN SQL hạn quyền, sinh env runtime giữ private |
+| `import_sqlite.py` | Import snapshot vào DB trống; giữ hash mật khẩu/token thiết bị và local media key, không copy session thô |
+| `seed_demo.py` | Fixtures DEMO có nhãn, UUID ổn định, không reset dữ liệu; 4 vai trò, 2 nhà độc lập |
+
+Database có thêm bảng kỹ thuật `annha_private.schema_migrations` chỉ owner sử dụng. Bảng này ngoài 40 bảng ứng dụng, không được cấp cho runtime. Bốn LOGIN chỉ được SET ROLE sang group tương ứng; không có `neon_superuser`, CREATE ROLE/DB, BYPASSRLS hoặc quyền sở hữu bảng.
+
+Luồng API kiểm tra quyền trước khi đưa home/camera vào transaction. Các thao tác thiết bị cần tổng hợp nhiều bảng (heartbeat, event summary, telemetry dedupe, config ACK, quota/media) dùng worker với tenant/camera đã xác thực; thiết bị không nhận worker credential. Pool device dùng cho đọc config/file, execution và command ACK. Pool auth là trust boundary phía server; không được cung cấp endpoint nhận SQL tùy ý.
+
+`DATA_ENCRYPTION_KEY` là Fernet key bên ngoài DB; queue mail/TTS và đích Telegram chỉ lưu ciphertext. Token xác nhận/reset/pair/device/session dùng SHA-256; password dùng PBKDF2 với salt và 600.000 vòng. CSRF được suy ra bằng HMAC từ session token cùng khoá riêng, chỉ hash CSRF được lưu. Khoá hiện chưa có cơ chế tự động rotation/keyring nhiều khoá; rotation cần drain/re-encrypt queue và thu hồi session theo kế hoạch.
+
+Retention hiện thực thi cho telemetry và file bằng chứng/snapshot local; giữ metadata và audit. Tự động purge event/audit, Cloudinary reconciliation/receipts, provider delivery webhook, live_session analytics và nhật ký security_events đầy đủ còn là phần mở rộng. Bảng có sẵn không đồng nghĩa mọi luồng ghi/retention của bảng đã bật.

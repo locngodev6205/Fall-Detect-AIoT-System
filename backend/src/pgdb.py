@@ -6,6 +6,7 @@ from pathlib import Path
 import ssl
 import uuid
 from psycopg_pool import ConnectionPool
+from cryptography.fernet import Fernet
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -20,12 +21,16 @@ def now(): return datetime.now(timezone.utc)
 def open_pools():
     if POOLS: return
     try:
+        if len(os.getenv('SESSION_CSRF_KEY',''))<32: raise ValueError('SESSION_CSRF_KEY must have at least 32 characters')
+        Fernet(os.environ['DATA_ENCRYPTION_KEY'].encode())
         for name in ROLES:
             url=os.getenv('DATABASE_URL_'+name.upper())
             if not url: raise RuntimeError('Missing least-privilege PostgreSQL runtime configuration.')
-            POOLS[name]=ConnectionPool(url,min_size=0,max_size=int(os.getenv('DATABASE_POOL_MAX','3')),open=True,
-                kwargs={'row_factory':dict_row,'prepare_threshold':None,'connect_timeout':15,
+            POOLS[name]=ConnectionPool(url,min_size=int(os.getenv('DATABASE_POOL_MIN','0')),max_size=int(os.getenv('DATABASE_POOL_MAX','3')),open=True,
+                kwargs={'row_factory':dict_row,'prepare_threshold':None,'connect_timeout':int(os.getenv('DATABASE_CONNECT_TIMEOUT_SECONDS','15')),
                         'sslmode':'verify-full','sslrootcert':ssl.get_default_verify_paths().cafile},timeout=20)
+        for name in ROLES:
+            with connect(name) as conn: conn.execute('SELECT 1')
         with connect('auth') as conn:
             conn.execute('SELECT 1 FROM annha_private.users LIMIT 0')
         MEDIA_ROOT.mkdir(parents=True,exist_ok=True)

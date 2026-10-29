@@ -1,8 +1,8 @@
 # AnNhà Business API
 
-Thiết kế chuyển sang Neon/PostgreSQL và Cloudinary: [DATABASE_DESIGN_NEON.md](../docs/DATABASE_DESIGN_NEON.md), [SQL schema](database/postgresql/README.md). Đây là thiết kế đích, chưa thay adapter SQLite hiện tại.
+Thiết kế chuyển sang Neon/PostgreSQL và Cloudinary: [DATABASE_DESIGN_NEON.md](../docs/DATABASE_DESIGN_NEON.md), [SQL schema](database/postgresql/README.md). Adapter PostgreSQL đã chạy với Neon; hướng dẫn vận hành và demo tại [NEON_SETUP.md](../docs/NEON_SETUP.md).
 
-Backend FastAPI/SQLite gồm các module:
+Backend FastAPI có `src.entrypoint:app` chọn PostgreSQL hoặc SQLite qua `DATABASE_BACKEND`. Các module `pgdb`, `pgsecurity`, `pgapi`, `pgservices`, `pgmedia`, `pgmain` dùng schema chuẩn hoá và RLS; adapter SQLite cũ gồm:
 
 - `db.py`: schema, transaction và lưu trữ; giữ nguyên bảng legacy `alerts` nếu tồn tại, không công khai dữ liệu legacy chưa có sở hữu.
 - `security.py`: password PBKDF2, session cookie, CSRF, rate limit, membership, camera permission và device credential.

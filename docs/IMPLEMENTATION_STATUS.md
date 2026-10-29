@@ -59,3 +59,10 @@ Xem [README](../README.md), [Architecture](ARCHITECTURE.md), [Device API](DEVICE
 - Thêm receipt nhà cung cấp, phân biệt accepted/delivered/bounced/complained/rejected; app không được tạo receipt hoặc tự bỏ suppression.
 - 73 kiểm tra SQL đạt trên Docker lab sau nâng cấp; bootstrap nguyên tử từ database mới cũng được kiểm tra. Công cụ cấu hình Neon có 5 unit test, nhập URI qua lời nhắc ẩn và không ghi đè secret đã tuỳ chỉnh.
 - Hướng dẫn người dùng chuẩn bị Neon: [NEON_SETUP.md](NEON_SETUP.md). Cloudinary để giai đoạn sau, chưa cần credential. Chưa migrate dữ liệu thật hoặc port adapter SQLite sang PostgreSQL trong lần mở rộng schema này.
+
+
+## Neon runtime đã tích hợp — 29/10/2026
+
+Các mục cloud tools phía trên là lịch sử trước cutover. Backend Docker hiện dùng Neon PostgreSQL với Psycopg 3, bốn login/pool riêng, TLS verify-full và RLS context trong transaction. Đã nhập snapshot SQLite; giữ backup và media local. Đã seed 4 tài khoản/2 nhà/3 camera mô phỏng để thử quyền; credentials ở `.secrets/demo-credentials.json`. Không có khoanh vùng trên API/UI.
+
+73 kiểm tra SQL qua trên branch Neon sạch; kiểm thử API/WebSocket, email qua Mailpit và TTS thực thi được ghi ở [báo cáo tích hợp](NEON_INTEGRATION_REPORT.md). Cloudinary, email provider receipt, Pi/servo/camera thật vẫn chưa kiểm thử hoặc triển khai.

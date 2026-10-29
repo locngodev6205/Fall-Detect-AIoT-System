@@ -1,96 +1,120 @@
-# Chuẩn bị Neon để migrate và tích hợp AnNhà
+# AnNhà: Neon đang chạy, thiết lập và vận hành
 
-Cập nhật 29/10/2026. Phạm vi hiện tại: **Neon + email xác nhận/reset + cảnh báo email/Telegram**. Cloudinary để giai đoạn sau; ảnh, video và audio vẫn lưu cục bộ. Không cần tạo Cloudinary account/key cho bước này.
+Cập nhật 29/10/2026. Ứng dụng tại **http://localhost:8188** đã dùng Neon PostgreSQL; ảnh, video, audio/TTS vẫn ở volume `backend-data`. Mailpit tại **http://localhost:8125** nhận email thử, không chuyển thư ra Internet. Cloudinary chưa được tích hợp vào runtime.
 
-Schema đích hiện có 40 bảng, hỗ trợ hai kênh cảnh báo độc lập, email tài khoản đã xác minh, bộ lọc sự cố/mức độ, theo dõi phản hồi gửi và vô hiệu địa chỉ/token cũ khi đổi email. Xem [thiết kế đầy đủ](DATABASE_DESIGN_NEON.md).
+## Trạng thái đã triển khai
 
-## 1. Bạn chỉ cần chuẩn bị những gì?
+- Project `weathered-river-25273807`, organization `org-wild-boat-73403801`, branch `production`, database `neondb`, region Singapore. Đã chạy Neon CLI init/deploy; chỉ bật Postgres, giữ nguyên cơ chế đăng nhập của AnNhà.
+- Schema gồm **40 bảng nghiệp vụ/hệ thống và 1 bảng migration ledger**. Migration `001`, `002`, `005` có checksum, chạy trong transaction và advisory lock.
+- Psycopg 3 sử dụng bốn pool và bốn LOGIN SQL riêng: app/auth/device/worker. URL runtime dùng pooler; migration dùng direct endpoint. TLS `verify-full`; context RLS và role chỉ có hiệu lực trong transaction. Owner URL không được truyền vào container backend.
+- Dữ liệu SQLite cũ đã nhập: tài khoản/hash mật khẩu, nhà/phòng, camera/hash device token, cấu hình, sự kiện, media metadata, lịch nhắc, telemetry, audit. Media vẫn cùng đường dẫn trong volume. Phiên đăng nhập cũ không chuyển sang: đăng nhập lại. Liên kết email cũ cần gửi lại.
+- Backup tại `/app/data/annha-before-neon.sqlite3` trong volume và `.secrets/annha-before-neon.sqlite3` trên host; không xoá DB cũ.
+- Seed có nhãn `DEMO`: 4 tài khoản đã xác minh, 2 nhà, 3 camera mô phỏng, 9 sự kiện, 144 batch cảm biến, 3 lịch nhắc, ảnh PNG minh hoạ phòng và audio WAV. Camera demo chưa kết nối Pi thật; không giả trạng thái online lâu dài.
 
-- Một project Neon dành cho AnNhà và một database **mới, trống** để tôi đưa schema lên.
-- Direct connection URI của migration owner, lưu tại máy bạn bằng bước 3 bên dưới; không gửi mật khẩu trong chat.
-- Chưa chạy file SQL thủ công, chưa tạo bốn runtime login, chưa sửa cấu hình backend đang chạy. Tôi sẽ thực hiện migration, tạo quyền tối thiểu và tích hợp sau khi kết nối sẵn sàng.
+## Đăng nhập demo
 
-## 2. Tạo project trong Neon Console
+Mở file riêng **`.secrets/demo-credentials.json`** để lấy email/mật khẩu. File không được commit. Bốn email:
 
-1. Đăng nhập [Neon Console](https://console.neon.tech/), tạo project mới, ví dụ `annha`.
-2. Chọn PostgreSQL 16 trở lên; schema đã được thử trên 16.14. Chọn region gần nơi sẽ chạy backend; không cần bật dịch vụ Auth khác để thay luồng email/mật khẩu hiện tại.
-3. Chuẩn bị database mới tên `annha` hoặc dùng database mặc định nếu còn trống. Ghi nhớ đúng tên project, branch và database.
-4. Mở **Connect**, chọn đúng branch/database và role owner mà Neon tạo cho project, thường dạng `neondb_owner`.
-5. **Tắt Connection pooling** ở hộp Connect và copy URI PostgreSQL. Host migration phải là direct host, không có `-pooler`. Runtime sẽ dùng pooled connection sau khi tôi tạo các login riêng.
+| Email | Phạm vi |
+|---|---|
+| `owner@demo.annha.test` | Chủ nhà DEMO AnNhà, cả 2 camera |
+| `caregiver@demo.annha.test` | Chăm sóc, xử lý sự kiện/âm thanh/lịch của cả 2 camera |
+| `viewer@demo.annha.test` | Chỉ xem camera phòng khách, không điều khiển |
+| `outsider@demo.annha.test` | Chủ nhà DEMO độc lập, không vào được nhà AnNhà |
 
-Tên/menu có thể khác theo phiên bản Console; thông tin cần đối chiếu là project, branch, database, role và direct connection. [Neon Console](https://neon.com/docs/get-started/signing-up), [pooling](https://neon.com/docs/connect/connection-pooling).
-
-Nếu bạn đã có project/database chứa dữ liệu, giữ nguyên và báo tên database/branch cùng việc có dữ liệu hay chưa; không xoá bảng hoặc chạy bootstrap vào đó. Không cần gửi connection URI qua chat.
-
-## 3. Lưu kết nối tại máy, không lộ mật khẩu
-
-Mở Terminal tại thư mục repository:
+Đây là tên miền thử nghiệm. Email gửi vào Mailpit. Password sinh ngẫu nhiên riêng từng tài khoản. Seed giữ password/quyền đã tồn tại, không reset dữ liệu. Lưu file credentials nếu cần chạy seed lại.
 
 ```bash
-cd /Users/coding/CN_IOT
-python3 scripts/cloud/prepare_secrets.py
-python3 scripts/cloud/configure_neon.py
+# Seed lại có kiểm soát, giữ dữ liệu ngoài bộ demo:
+docker compose exec backend python -m src.seed_demo
+# Lấy file credentials từ volume sau lần seed đầu:
+docker cp annha-backend-1:/app/data/demo-credentials.json .secrets/demo-credentials.json
+chmod 600 .secrets/demo-credentials.json
 ```
 
-Windows dùng đường dẫn clone trên máy bạn và có thể dùng `py -3` thay `python3`.
+## Chạy lại ứng dụng trên máy hiện tại
 
-Script thứ hai hỏi `Paste DIRECT Neon connection URI (hidden):`. Dán URI từ Neon rồi Enter; màn hình không hiển thị URI. Công cụ:
+Root `.env` đã có đủ cấu hình runtime; giữ file này và `.secrets` ngoài Git.
 
-- Chỉ nhận direct host Neon, không nhận pooler hoặc host ngoài Neon.
-- Tạo `.secrets/pg_service.conf` và `.secrets/pgpass`, bật TLS `verify-full`.
-- Giải mã password từ URL rồi escape đúng định dạng pgpass.
-- Chỉ thay file mẫu/placeholder; từ chối ghi đè nếu file đã được bạn chỉnh trước đó.
-- Không kết nối cloud và không chạy migration.
-
-Thành công sẽ báo đã lưu hai file. `.secrets/` đã gitignore và không vào Docker image. Không chụp/gửi nội dung secret hoặc commit các file này.
-
-Nếu bạn đã tự điền file secret, bỏ qua configure script. Kiểm tra cấu trúc thủ công:
-
-`.secrets/pg_service.conf`:
-
-```ini
-[annha_neon_migration]
-host=YOUR_DIRECT_HOST.neon.tech
-port=5432
-dbname=annha
-user=YOUR_MIGRATION_OWNER
-sslmode=verify-full
-sslrootcert=/etc/ssl/certs/ca-certificates.crt
-connect_timeout=10
+```bash
+npm run build
+docker compose up -d --build --wait --wait-timeout 120
+curl --fail http://localhost:8188/api/health
 ```
 
-`.secrets/pgpass`:
+Health phải có `"database":"postgres","database_connected":true`. Thay env thì **recreate** container; chỉ `restart` không nạp env mới. `DATABASE_BACKEND=sqlite` chọn adapter cũ, `postgres` chọn adapter Neon. Không đổi `DATABASE_PATH` thành URL.
 
-```text
-YOUR_DIRECT_HOST.neon.tech:5432:annha:YOUR_MIGRATION_OWNER:YOUR_PASSWORD
+## Thiết lập từ đầu trên một database/branch trống
+
+Giữ đúng project hiện có; không tạo project khác. Cần Node/npm, Python 3.11+ và Docker.
+
+```bash
+npm i -g neon@latest
+# Nếu global install lỗi quyền, dùng npx --yes neon@latest thay neon.
+neon init -y --org-id org-wild-boat-73403801 --project-id weathered-river-25273807 --branch production --services postgres
+neon deploy
 ```
 
-Thay các giá trị YOUR_ bằng thông tin thật; trong pgpass, ký tự `:` và `\` của password cần escape bằng `\`. Không URL-encode password trong pgpass. Nếu dùng đường dẫn secret khác, cập nhật `NEON_SERVICE_FILE`/`NEON_PGPASS_FILE` trong `.env`.
+Nếu CLI mở trình duyệt, hoàn tất đăng nhập tại đó. CLI kéo `DATABASE_URL`, `DATABASE_URL_UNPOOLED`, `NEON_BRANCH` vào `.env` hiện hữu. Các URL này là credentials quản trị cho công cụ triển khai; frontend/Pi không dùng chúng. Đừng chạy deploy để trỏ môi trường test sang production nhầm.
 
-## 4. Báo lại để tôi migrate
+Tạo môi trường công cụ Python nếu chưa có:
 
-Sau khi lưu xong, nhắn: **“Đã tạo Neon và lưu cấu hình”**, kèm các thông tin không bí mật:
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r backend/requirements.txt
+# Công cụ dùng direct URL trong file --env:
+.venv/bin/python scripts/cloud/deploy_postgres.py --env .env --output .secrets/neon-runtime.env
+```
 
-- Tên database/branch, và database có trống hay không.
-- Bạn muốn giữ dữ liệu SQLite hiện có hay chỉ dùng database mới cho thử nghiệm. Mặc định tôi sẽ chuẩn bị phương án giữ dữ liệu, không xoá SQLite/media gốc.
+Script áp migration mới, xác minh checksum cũ và tạo login có quyền tối thiểu bằng SQL. Chạy lại với cùng output giữ nguyên password và khoá mã hoá. Nếu schema/role tồn tại nhưng không có ledger/credential tương ứng, script từ chối thay vì ghi đè. **Không chạy bootstrap Docker thủ công trước script này** trên cùng DB. Giữ database owner URL ở secret manager/máy quản trị.
 
-Bạn chưa cần chạy các lệnh dưới; đây là quy trình tôi sẽ làm sau khi cấu hình sẵn sàng:
+Merge các biến trong `.secrets/neon-runtime.env` vào root `.env` bằng trình soạn thảo hoặc `dotenv.set_key`, giữ nguyên cấu hình khác. Đặt `DATABASE_BACKEND=postgres`; các khoá bắt buộc là `DATABASE_URL_APP/AUTH/DEVICE/WORKER`, `SESSION_CSRF_KEY`, `DATA_ENCRYPTION_KEY`, `DATA_ENCRYPTION_KEY_ID`. Khoá Fernet và CSRF do script sinh. Mất khoá Fernet sẽ không đọc được secret của Telegram/mail/TTS còn trong queue; sao lưu an toàn cùng env.
 
-1. Kiểm tra kết nối/TLS và catalog, xác nhận đúng database/owner và trạng thái dữ liệu.
-2. Backup SQLite theo cách nhất quán và lập bảng ánh xạ dữ liệu.
-3. Áp `001_schema.sql` + `002_security.sql` + `005_email_notifications.sql` trong một transaction nếu database mới.
-4. Tạo bốn login runtime tách quyền bằng SQL và lưu credential vào secret, không dùng owner làm runtime. Role tạo qua Console có thể nhận quyền quản trị, vì vậy không tạo bốn runtime login bằng Console. [Neon roles](https://neon.com/docs/manage/roles).
-5. Port adapter/giao dịch FastAPI sang PostgreSQL; áp RLS bằng context user/home/camera trong từng transaction.
-6. Import dữ liệu cần giữ, kiểm tra số lượng/quan hệ, token/phiên/lệnh hết hạn và quyền truy cập.
-7. Tích hợp SMTP email xác nhận/reset và cảnh báo email/Telegram; kiểm thử bằng Mailpit trước khi gửi thư bên ngoài.
-8. Giữ media local; không yêu cầu Cloudinary ở giai đoạn này. Rebuild Docker, kiểm tra và chỉ đổi sang DB mới sau khi đường chạy đã được xác minh.
+```bash
+docker compose up -d --build --wait
+```
 
-Nếu kết nối có sẵn schema phiên bản cũ, dùng migration nâng cấp một lần, không bootstrap lại và không DROP schema. Các thay đổi quyền/adapter/data sẽ được kiểm tra trước khi đổi hệ thống đang dùng.
+Không chia sẻ `.env`, `.secrets`, output `docker compose config` hoặc `docker inspect` chứa environment. `.env.example` chỉ có mẫu, không có credentials thật.
 
-## 5. Email cần chuẩn bị ở thời điểm nào?
+## Chuyển dữ liệu SQLite
 
-Neon không phải dịch vụ gửi mail. Để kiểm tra cục bộ, Mailpit hiện có là đủ; nó nhận thư thử nhưng không gửi ra hộp thư Internet.
+Script nhập hiện hỗ trợ snapshot của phiên bản này. Chỉ chạy vào **application tables còn trống**, sau migration và trước seed; không ghi đè dữ liệu hiện có. Kiểm tra trên branch riêng trước.
 
-Khi cần gửi mail thật, chuẩn bị dịch vụ SMTP và điền `SMTP_HOST`, `SMTP_PORT`, `SMTP_STARTTLS`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` trong `.env`/secret theo nhà cung cấp. Chưa cần chọn nhà cung cấp ngay để migrate database. Không gửi SMTP password trong chat.
+```bash
+python3 scripts/cloud/import_sqlite.py --source .secrets/annha-before-neon.sqlite3 --env .env
+```
 
-Cảnh báo email mặc định dùng email tài khoản đã xác minh, không cho nhập một địa chỉ ngoài bất kỳ. Xác nhận/reset/lời mời không bị tắt theo tuỳ chọn nhận cảnh báo. SMTP chấp nhận thư không có nghĩa thư đã vào inbox; chỉ có phản hồi nhà cung cấp đã xác minh mới ghi delivered/bounced/complained. Với SMTP thuần không có webhook, hệ thống giữ trạng thái accepted/unknown phù hợp, không bịa kết quả giao thư.
+Import có transaction, checksum snapshot và marker trong migration ledger; cùng snapshot chạy lại là no-op. Dữ liệu nguồn không bị sửa. Nếu gặp bảng executions/commands/deliveries/invitations cũ có dữ liệu, script dừng để bổ sung mapping, không âm thầm bỏ dữ liệu đó. Session/email token được cấp lại; queues mail cũ còn trong SQLite để kiểm tra khi cần. Đây là cutover một lần, không đồng bộ hai DB.
+
+Trước cutover thực tế cần dừng ghi SQLite trong cửa sổ chuyển đổi. Trên máy này đã sao lưu trước khi thay backend. Nếu quay lại SQLite sau khi Neon có ghi mới, cần xử lý phần dữ liệu phát sinh; không chỉ bật SQLite rồi coi hai nơi đồng nhất.
+
+## Email và Telegram
+
+- Verify/reset/invitation: worker lấy job mã hoá trong `annha_private.job_queue`, gửi qua `SMTP_*`, retry có lease. Token lưu SHA-256, dùng một lần, có thời hạn và phiên bản địa chỉ email. Reset password tăng `auth_version` và thu hồi session.
+- Cảnh báo: `EMAIL_ALERTS_ENABLED=true` cho phép worker SMTP; chủ nhà bật thêm ở **Cài đặt nhà → Thông báo email**. Recipient phải có email đã xác minh. App đang dùng SMTP Mailpit để thử; muốn gửi thư thật phải thay `SMTP_*` và bật STARTTLS theo nhà cung cấp.
+- Telegram: cần `TELEGRAM_BOT_TOKEN` và Chat ID/opt-in của nhà. Không tự gửi thử đến người nhận ngoài hệ thống. Chat ID trong DB mã hoá; quyền/sự kiện/recipient được kiểm tra lại trước gửi.
+- SMTP chấp nhận thư chỉ ghi `accepted`, không có nghĩa hộp thư ngoài đã nhận. Chưa có webhook receipt cho delivered/bounce/complaint; schema đã có bảng để mở rộng.
+- Worker ngừng nhắc khi sự kiện được xác nhận/đóng hoặc quyền bị thu hồi; retry có giới hạn. Nếu mất tiến trình trong lúc gửi, trạng thái `unknown` cần kiểm tra thay vì gửi lại mù quáng.
+
+## Media và Cloudinary
+
+Hiện ảnh, video, audio/TTS giữ trong `/app/data/media`. PostgreSQL chỉ lưu metadata, quota và quyền truy cập. URL lấy file đi qua FastAPI kiểm tra quyền; không có public Cloudinary URL. Hãy backup **cả Neon lẫn volume media**.
+
+Phần [Cloudinary trong thiết kế database](DATABASE_DESIGN_NEON.md#14-setup-cloudinary) có hướng dẫn tài khoản/key/preset signed + authenticated và Docker checker. Đây là chuẩn bị cho giai đoạn sau. Chỉ điền Cloudinary env hoặc tạo preset không tự chuyển media lên cloud; chưa có upload/delivery webhook runtime.
+
+## Kiểm tra
+
+Các branch `annha-integration-20261029` và `annha-schema-20261029` có hạn đến 30/10/2026, không dùng thay production. Bộ SQL fixture yêu cầu database riêng trống và rollback; không chạy nó lên database demo/production.
+
+```bash
+# Regression SQLite, không truy cập cloud:
+python3 -m unittest backend.tests.test_business -v
+# Native PostgreSQL API tests: chỉ dùng credentials branch thử có thời hạn:
+ANNHA_TEST_ENV=.secrets/neon-test-runtime.env python3 -m unittest backend.tests.test_postgres -v
+# Qua web/Docker đang chạy, dùng demo credentials và Mailpit local:
+python3 scripts/cloud/smoke_neon.py
+```
+
+Smoke tạo dữ liệu `SMOKE` có chủ đích: sự kiện/lệnh/lịch sử nhắc và tài khoản verify/reset dùng `example.test`. Không xoá dữ liệu hay gửi email ra Internet. Nó kiểm tra đăng nhập, quyền, config/ACK, command/ACK, file local, event/WebSocket, email alert, TTS và verify/reset/session revocation.
+
+Thông tin kiểm chứng và các giới hạn còn lại được ghi tại [NEON_INTEGRATION_REPORT.md](NEON_INTEGRATION_REPORT.md).

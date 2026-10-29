@@ -172,7 +172,7 @@ async def remove_camera(camera_id:str,current:Current):
         conn.execute('UPDATE annha_private.device_credentials SET revoked_at=now() WHERE camera_id=%s',(camera_id,));db.audit(conn,home,current['id'],'camera.remove',camera_id)
     with db.connect('worker',home) as conn:
         conn.execute("UPDATE annha.commands SET status='expired' WHERE camera_id=%s AND status IN ('pending','accepted')",(camera_id,))
-    await svc.revalidate_connections();return {'message':'Đã gỡ thiết bị, giữ lịch sử và thu hồi credential.'}
+    await svc.close_home_connections(camera['home_id']);return {'message':'Đã gỡ thiết bị, giữ lịch sử và thu hồi credential.'}
 
 @router.get('/homes/{home_id}/members')
 def members(home_id:str,current:Current):
@@ -188,7 +188,7 @@ async def update_member(home_id:str,user_id:str,payload:m.Access,current:Current
     with db.connect('auth',home_id,current['id']) as conn:
         grant_rows(conn,home_id,user_id,payload)
         conn.execute('UPDATE annha_private.home_memberships SET role=%s,version=version+1 WHERE home_id=%s AND user_id=%s',(payload.role,home_id,user_id));db.audit(conn,home_id,current['id'],'member.update',user_id)
-    await svc.revalidate_connections();return {'message':'Đã cập nhật quyền.'}
+    await svc.close_home_connections(home_id);return {'message':'Đã cập nhật quyền.'}
 
 @router.delete('/homes/{home_id}/members/{user_id}')
 async def remove_member(home_id:str,user_id:str,current:Current):
@@ -197,7 +197,7 @@ async def remove_member(home_id:str,user_id:str,current:Current):
     with db.connect('auth',home_id,current['id']) as conn:
         conn.execute('UPDATE annha_private.home_memberships SET revoked_at=now(),version=version+1 WHERE home_id=%s AND user_id=%s',(home_id,user_id))
         conn.execute("UPDATE annha_private.invitations SET status='revoked' WHERE home_id=%s AND email=(SELECT email FROM annha_private.users WHERE id=%s) AND status='pending'",(home_id,user_id));db.audit(conn,home_id,current['id'],'member.revoke',user_id)
-    await svc.revalidate_connections();return {'message':'Đã thu hồi quyền.'}
+    await svc.close_home_connections(home_id);return {'message':'Đã thu hồi quyền.'}
 
 @router.get('/homes/{home_id}/invitations')
 def invitations(home_id:str,current:Current):
@@ -329,7 +329,7 @@ def settings(home_id:str,current:Current):
     membership(home_id,current['id'],True)
     with db.connect('worker',home_id) as conn:
         base=dict(conn.execute('SELECT * FROM annha.home_settings WHERE home_id=%s',(home_id,)).fetchone())
-        base.pop('home_id');base.pop('updated_at')
+        base.pop('home_id');base.pop('updated_at');base.pop('telemetry_retention_days');base.pop('event_retention_days')
         channels=conn.execute('SELECT * FROM annha.notification_channels WHERE revoked_at IS NULL AND recipient_user_id=%s',(current['id'],)).fetchall()
         base.update(telegram_enabled=False,telegram_chat_id='',telegram_photos=False,email_enabled=False)
         for channel in channels:
@@ -344,7 +344,7 @@ def save_settings(home_id:str,payload:Settings,current:Current):
     membership(home_id,current['id'],True);values=payload.model_dump()
     columns=['retention_days','temperature_high','temperature_low','humidity_high','gas_high','gas_unit','environment_hold_seconds','hysteresis']
     with db.connect('app',home_id,current['id']) as conn:
-        conn.execute('UPDATE annha.home_settings SET '+','.join(key+'=%s' for key in columns)+',updated_at=now() WHERE home_id=%s',[values[key] for key in columns]+[home_id])
+        conn.execute('UPDATE annha.home_settings SET '+','.join(key+'=%s' for key in columns)+',telemetry_retention_days=%s,updated_at=now() WHERE home_id=%s',[values[key] for key in columns]+[payload.retention_days,home_id])
         for kind,enabled in [('email',payload.email_enabled),('telegram',payload.telegram_enabled)]:
             row=conn.execute('SELECT * FROM annha.notification_channels WHERE recipient_user_id=%s AND kind=%s AND revoked_at IS NULL FOR UPDATE',(current['id'],kind)).fetchone()
             version=current['email_version'] if kind=='email' else None
@@ -396,10 +396,11 @@ async def write_asset(request,home,camera,event=None,current=None):
         if not valid.get(mime): raise HTTPException(415,'Nội dung không khớp định dạng.')
         kind='audio' if mime.startswith('audio/') else ('event_clip' if mime.startswith('video/') else ('event_image' if event else 'snapshot'))
         with db.connect('worker',home,camera=camera) as conn:
-            conn.execute('UPDATE annha.home_storage SET used_bytes=used_bytes+%s WHERE home_id=%s',(size,home))
+            if not conn.execute('UPDATE annha.home_storage SET used_bytes=used_bytes+%s WHERE home_id=%s AND used_bytes+reserved_bytes+%s<=quota_bytes RETURNING home_id',(size,home,size)).fetchone(): raise HTTPException(413,'Dung lượng lưu trữ của nhà đã hết.')
+            retention=conn.execute('SELECT retention_days FROM annha.home_settings WHERE home_id=%s',(home,)).fetchone()['retention_days']
             conn.execute('''INSERT INTO annha.media_assets(id,home_id,camera_id,event_id,kind,name,mime_type,size_bytes,status,provider,local_object_key,ready_at,expires_at,upload_key,created_by,sha256)
               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'ready','local',%s,now(),%s,%s,%s,%s)''',
-                (asset,home,camera,event,kind,name,mime,size,path.name,db.now()+timedelta(days=14) if event or kind=='snapshot' else None,db.uid(),current['id'] if current else None,hashlib.sha256(path.read_bytes()).digest()))
+                (asset,home,camera,event,kind,name,mime,size,path.name,db.now()+timedelta(days=retention) if event or kind=='snapshot' else None,db.uid(),current['id'] if current else None,hashlib.sha256(path.read_bytes()).digest()))
         return {'id':asset,'mime':mime,'size':size,'name':name,'status':'ready'}
     except Exception:
         path.unlink(missing_ok=True);raise
@@ -516,3 +517,93 @@ def audit(home_id:str,current:Current):
 def deliveries(home_id:str,current:Current):
     membership(home_id,current['id'],True)
     with db.connect('app',home_id,current['id']) as conn: return conn.execute('SELECT *,attempt_count AS attempts,last_error_code AS error FROM annha.notification_deliveries ORDER BY created_at DESC LIMIT 200').fetchall()
+
+# Device identity comes from the registered token, never from a supplied tenant ID.
+@router.post('/device/heartbeat')
+def heartbeat(payload:m.Heartbeat,current:Device):
+    with db.connect('worker',current['home_id'],camera=current['id']) as conn:
+        conn.execute('UPDATE annha.cameras SET last_seen_at=now(),observation=%s,capabilities=%s WHERE id=%s',(payload.observation,db.J(payload.capabilities),current['id']))
+        state=conn.execute('SELECT desired_version FROM annha.camera_config_state WHERE camera_id=%s',(current['id'],)).fetchone()
+    return {'server_time':db.now(),'desired_version':state['desired_version'] if state else 0}
+
+@router.get('/device/config')
+def device_config(current:Device):
+    with db.connect('device',current['home_id'],camera=current['id']) as conn:
+        row=conn.execute('SELECT payload FROM annha.camera_configurations WHERE camera_id=%s ORDER BY version DESC LIMIT 1',(current['id'],)).fetchone()
+    return row['payload'] if row else {'version':0,'reminders':[],'zones':[],'reference':{}}
+
+@router.post('/device/config/ack')
+def config_ack(payload:m.ConfigAck,current:Device):
+    with db.connect('worker',current['home_id'],camera=current['id']) as conn:
+        state=conn.execute('SELECT * FROM annha.camera_config_state WHERE camera_id=%s FOR UPDATE',(current['id'],)).fetchone()
+        if not state or not conn.execute('SELECT 1 FROM annha.camera_configurations WHERE camera_id=%s AND version=%s',(current['id'],payload.version)).fetchone(): raise HTTPException(422,'Không có phiên bản cấu hình này.')
+        if payload.version<(state['applied_version'] or 0): raise HTTPException(409,'Phản hồi cấu hình cũ.')
+        conn.execute('INSERT INTO annha.config_acknowledgements(home_id,camera_id,message_id,version,success,error) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING',(current['home_id'],current['id'],f'{payload.version}:{payload.success}:{hashlib.sha256(payload.error.encode()).hexdigest()}',payload.version,payload.success,payload.error))
+        if payload.success: conn.execute('UPDATE annha.camera_config_state SET applied_version=%s,applied_at=now(),error=NULL WHERE camera_id=%s',(payload.version,current['id']))
+        else: conn.execute('UPDATE annha.camera_config_state SET error=%s WHERE camera_id=%s',(payload.error or 'Thiết bị từ chối cấu hình',current['id']))
+    return {'message':'Đã ghi nhận phản hồi.'}
+
+@router.post('/device/events')
+async def device_event(payload:m.EventInput,current:Device):
+    import asyncio
+    event,changed=await asyncio.to_thread(svc.ingest_event,current,payload)
+    if changed: await svc.broadcast(event)
+    return {'id':event['id'],'event_id':payload.event_id,'sequence':event['sequence'],'stored':True}
+
+@router.post('/device/telemetry')
+def device_telemetry(payload:m.Telemetry,current:Device):
+    with db.connect('worker',current['home_id'],camera=current['id']) as conn:
+        batch=conn.execute('INSERT INTO annha.telemetry_batches(home_id,camera_id,message_id,observed_at) VALUES(%s,%s,%s,%s) ON CONFLICT(camera_id,message_id) DO NOTHING RETURNING id',(current['home_id'],current['id'],payload.message_id,datetime.fromisoformat(payload.observed_at))).fetchone()
+        if batch:
+            for metric,value in payload.readings.items():
+                conn.execute('INSERT INTO annha.sensor_readings(home_id,camera_id,batch_id,metric,value,unit,quality) VALUES(%s,%s,%s,%s,%s,%s,%s)',(current['home_id'],current['id'],batch['id'],metric,value.value,value.unit,value.quality))
+    if batch: svc.evaluate_environment(current,payload)
+    return {'stored':True,'message_id':payload.message_id}
+
+@router.get('/device/commands')
+def device_commands(current:Device):
+    with db.connect('worker',current['home_id'],camera=current['id']) as conn:
+        conn.execute("UPDATE annha.commands SET status='expired' WHERE camera_id=%s AND expires_at<now() AND status IN ('pending','accepted')",(current['id'],))
+        return [{**dict(row),'expires':row['expires_at'].timestamp()} for row in conn.execute("SELECT * FROM annha.commands WHERE camera_id=%s AND status IN ('pending','accepted') AND expires_at>now() ORDER BY created_at",(current['id'],))]
+
+@router.post('/device/commands/{command_id}/ack')
+def command_ack(command_id:str,payload:m.CommandAck,current:Device):
+    with db.connect('device',current['home_id'],camera=current['id']) as conn:
+        row=fail_if_missing(conn.execute('SELECT * FROM annha.commands WHERE id=%s AND camera_id=%s FOR UPDATE',(command_id,current['id'])).fetchone())
+        if row['status'] in ('executed','failed','expired'):
+            if row['status']==payload.status: return {'status':row['status']}
+            raise HTTPException(409,'Lệnh đã kết thúc.')
+        if row['expires_at']<db.now() and row['status']!='executing': raise HTTPException(409,'Lệnh đã hết hạn.')
+        stages={'pending':0,'accepted':1,'executing':2,'executed':3,'failed':3}
+        if stages.get(row['status'],0)>stages[payload.status]: raise HTTPException(409,'Không được lùi trạng thái lệnh.')
+        conn.execute('UPDATE annha.commands SET status=%s,result=%s,accepted_at=COALESCE(accepted_at,now()),completed_at=CASE WHEN %s THEN now() ELSE completed_at END WHERE id=%s',(payload.status,db.J({'detail':payload.detail}),payload.status in ('executed','failed'),command_id))
+    return {'status':payload.status}
+
+@router.post('/device/executions')
+def execution(payload:m.Execution,current:Device):
+    with db.connect('device',current['home_id'],camera=current['id']) as conn:
+        reminder=fail_if_missing(conn.execute('SELECT * FROM annha.reminders WHERE id=%s AND camera_id=%s',(payload.reminder_id,current['id'])).fetchone())
+        conn.execute('''INSERT INTO annha.reminder_executions(home_id,camera_id,reminder_id,reminder_version,occurrence_key,scheduled_at,executed_at,status,detail)
+            VALUES(%s,%s,%s,%s,%s,now(),now(),%s,%s) ON CONFLICT(camera_id,reminder_id,occurrence_key) DO NOTHING''',(current['home_id'],current['id'],payload.reminder_id,reminder['current_version'],payload.occurrence,payload.status,payload.detail))
+    return {'stored':True}
+
+@router.get('/device/assets/{asset_id}')
+def device_asset(asset_id:str,current:Device):
+    with db.connect('device',current['home_id'],camera=current['id']) as conn:
+        row=fail_if_missing(conn.execute('SELECT * FROM annha.media_assets WHERE id=%s AND camera_id=%s',(asset_id,current['id'])).fetchone())
+        return FileResponse(svc.asset_path(row),media_type=row['mime_type'],headers={'Cache-Control':'no-store'})
+
+@router.post('/device/evidence',status_code=201)
+async def evidence(request:Request,current:Device,event_id:str|None=None):
+    if event_id:
+        with db.connect('worker',current['home_id'],camera=current['id']) as conn:
+            fail_if_missing(conn.execute('SELECT id FROM annha.events WHERE id=%s AND camera_id=%s',(event_id,current['id'])).fetchone())
+    elif not request.headers.get('content-type','').startswith('image/'): raise HTTPException(422,'Cần sự kiện đích cho clip bằng chứng.')
+    return await write_asset(request,current['home_id'],current['id'],event_id)
+
+@router.get('/cameras/{camera_id}/snapshot')
+def snapshot(camera_id:str,current:Current):
+    camera=camera_access(camera_id,current['id'])
+    with db.connect('app',camera['home_id'],current['id']) as conn:
+        row=fail_if_missing(conn.execute("SELECT * FROM annha.media_assets WHERE camera_id=%s AND mime_type LIKE 'image/%%' AND status='ready' ORDER BY created_at DESC LIMIT 1",(camera_id,)).fetchone(),'Thiết bị chưa gửi hình ảnh.')
+        return FileResponse(svc.asset_path(row),media_type=row['mime_type'],headers={'Cache-Control':'no-store','X-Captured-At':row['created_at'].isoformat()})

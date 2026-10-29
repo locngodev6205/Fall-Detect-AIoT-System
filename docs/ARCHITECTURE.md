@@ -7,24 +7,24 @@
 
 **Cập nhật phạm vi 29/10/2026:** Tạm bỏ khoanh vùng và luật dựa trên vùng; định hướng camera servo bám một người. Panorama/ánh xạ vùng chỉ xem xét sau khi tracking ổn định. UI/API chỉnh vùng và quyền sửa vùng đã được gỡ. Backend giữ lịch sử và gửi revision vùng rỗng cho thiết bị; servo chưa được triển khai/kiểm chứng.
 
-Thiết kế dữ liệu cloud đích và kế hoạch chuyển đổi: [DATABASE_DESIGN_NEON.md](DATABASE_DESIGN_NEON.md). Backend hiện tại vẫn dùng SQLite; tài liệu này không xác nhận đã triển khai Neon/Cloudinary.
+Thiết kế dữ liệu cloud đích và kế hoạch chuyển đổi: [DATABASE_DESIGN_NEON.md](DATABASE_DESIGN_NEON.md). Backend Docker hiện dùng Neon PostgreSQL với adapter Psycopg 3; SQLite giữ để rollback/local. Media vẫn local, Cloudinary chưa tích hợp. Bằng chứng tại [NEON_INTEGRATION_REPORT.md](NEON_INTEGRATION_REPORT.md).
 
 ## 1. HIỆN TRẠNG TRIỂN KHAI
 
 | Thành phần | Đã triển khai trong nguồn | Giới hạn kiểm chứng/tích hợp |
 | :--- | :--- | :--- |
-| [Backend nghiệp vụ](../backend/src/api.py) | Auth/email/session/CSRF, nhà/phòng, quyền theo camera, lời mời, ghép nối, cấu hình phiên bản (vùng đã tạm bỏ), sự kiện và xử lý, telemetry, lịch/lệnh, file và audit | Chưa chứng minh tất cả trên phần cứng Pi/cảm biến/loa thật |
-| [Lưu trữ](../backend/src/db.py) | SQLite có transaction/FK, metadata, queue bền vững, file trên volume; giữ nguyên bảng alerts legacy nếu có | Legacy alerts chưa gắn sở hữu không được công khai qua API mới |
-| [Worker nghiệp vụ](../backend/src/services.py) | SMTP retry, TTS tiếng Việt eSpeak NG, Telegram theo cấu hình, retention, luật môi trường hold/hysteresis | Telegram thực cần bot/người nhận; lịch offline cần scheduler tại thiết bị |
-| [Media](../backend/src/media.py) | Relay JPEG khoảng 5 FPS và audio một chiều có session/device auth, giới hạn kích thước/thời gian, thu hồi quyền | Cần thiết bị gửi JPEG hoặc giải mã/phát WebM/Ogg; chưa phải WebRTC/NVR |
-| [Frontend](../frontend/src/App.jsx) | Landing/font/CSS từ ZIP; các trang nghiệp vụ dùng API thật; phân biệt file sẵn sàng với thiết bị áp dụng/thực thi | Không dùng ảnh minh họa hoặc timer giả làm phản hồi thiết bị |
+| [Backend nghiệp vụ](../backend/src/pgapi.py) | Auth/email/session/CSRF, nhà/phòng, quyền theo camera, lời mời, ghép nối, cấu hình phiên bản (vùng đã tạm bỏ), sự kiện và xử lý, telemetry, lịch/lệnh, file và audit | Chưa chứng minh tất cả trên phần cứng Pi/cảm biến/loa thật |
+| [Lưu trữ](../backend/src/pgdb.py) | Neon với transaction/FK/RLS, bốn pool theo quyền; metadata/queue trên PostgreSQL, file trên volume và backup SQLite | Legacy alerts chưa gắn sở hữu không được công khai qua API mới |
+| [Worker nghiệp vụ](../backend/src/pgservices.py) | SMTP retry, TTS tiếng Việt eSpeak NG, Telegram theo cấu hình, retention, luật môi trường hold/hysteresis | Telegram thực cần bot/người nhận; lịch offline cần scheduler tại thiết bị |
+| [Media](../backend/src/pgmedia.py) | Relay JPEG khoảng 5 FPS và audio một chiều có session/device auth, giới hạn kích thước/thời gian, thu hồi quyền | Cần thiết bị gửi JPEG hoặc giải mã/phát WebM/Ogg; chưa phải WebRTC/NVR |
+| [Frontend](../frontend/src/App.jsx) | Landing/font/CSS từ ZIP; các trang nghiệp vụ dùng API thật; phân biệt file sẵn sàng với thiết bị áp dụng/thực thi | Dữ liệu DEMO có nhãn, ảnh phòng là minh hoạ; không dùng timer giả làm phản hồi thiết bị |
 | [AI tại biên](../fall_detect/detect.py) | Pose/chuỗi TFLite, MQTT ngã/bất động; thêm credential và UUID trong payload | Luật bất động vẫn so sánh vector, chưa tiêu thụ vùng; mất pose có thể tạo vector zero. Không coi cảnh báo theo ngữ cảnh đã chạy đầu-cuối |
 | [Docker](../compose.yaml) | nginx/frontend, backend, MQTT và Mailpit; named volumes; web 8188, hộp thư 8125 | Không publish broker/backend; kết nối Pi LAN cần cấu hình truy cập an toàn riêng |
 
 Hợp đồng AI đang thấy trong nguồn là `(1, 30, 51)`, 17 khớp được chọn từ pose, sắp theo `SORTED_YOUR_KEYPOINT_NAMES`; mỗi khớp gồm x, y, visibility trước chuẩn hóa. Ngưỡng/mặc định nằm trong config và có thể bị env ghi đè. Đợt triển khai backend không thay mô hình, tiền xử lý, ngưỡng hoặc xác nhận chất lượng AI trên Pi.
 
 ```text
-Web AnNhà :8188 → nginx → FastAPI nghiệp vụ → SQLite/media trên volume
+Web AnNhà :8188 → nginx → FastAPI nghiệp vụ → Neon PostgreSQL + media local trên volume
                             ├─ MQTT gateway có device credential
                             ├─ SMTP → Mailpit :8125 (thử cục bộ)
                             ├─ Worker TTS / Telegram / retention
