@@ -1,7 +1,9 @@
 import asyncio
+import base64
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -9,30 +11,38 @@ from pathlib import Path
 import secrets
 import shutil
 import smtplib
+import ssl
 import subprocess
 import time
 import urllib.request
 
 from fastapi import HTTPException
+from cryptography.fernet import Fernet
 from . import db, models
-from .security import digest, membership, camera_access, session_user
+from .email_templates import render_email
+from .security import digest, verification_code_digest, reset_code_digest, membership, camera_access, effective_camera_permissions, session_user
 
 logger = logging.getLogger(__name__)
 connections = {}  # WebSocket -> (session token, home id)
 
 
-def camera_public(row):
+OWNER_CAMERA_PERMISSIONS={'view':True,'events':True,'audio':True,'schedules':True,'manage':True}
+
+
+def camera_public(row,permissions=None):
     result = {k:row[k] for k in ('id','home_id','room_id','name','last_seen','observation','desired_version','applied_version','config_error')}
     result['capabilities'] = json.loads(row['capabilities'])
     result['online'] = bool(row['last_seen'] and (datetime.now(timezone.utc)-datetime.fromisoformat(row['last_seen'])).total_seconds()<45)
     result['sync_status'] = 'applied' if row['desired_version']>0 and row['applied_version']==row['desired_version'] else 'pending'
+    result['permissions'] = dict(permissions or OWNER_CAMERA_PERMISSIONS)
     return result
 
 
 def visible_cameras(conn, home_id, user_id):
     member = membership(conn,home_id,user_id)
     rows = conn.execute('SELECT * FROM cameras WHERE home_id=? AND claimed=1 ORDER BY name',(home_id,)).fetchall()
-    return [camera_public(row) for row in rows if member['role']=='owner' or row['id'] in member['scopes']]
+    permissions=effective_camera_permissions(conn,home_id,user_id,[row['id'] for row in rows])
+    return [camera_public(row,permissions[row['id']]) for row in rows if row['id'] in permissions]
 
 
 def event_public(conn, row):
@@ -50,9 +60,14 @@ def reminder_public(row):
     return result
 
 
-def config_without_zones(payload):
-    # Empty compatibility fields explicitly clear old device-side regions.
-    return {**payload,'zones':[],'reference':{}}
+def current_config_payload(payload):
+    # New business/API contract has no zone configuration; historical revisions are untouched.
+    return {key:value for key,value in payload.items() if key not in ('zones','reference')}
+
+
+def device_config_payload(payload):
+    # Legacy device compatibility: these empty tombstones clear any cached values.
+    return {**current_config_payload(payload),'zones':[],'reference':{}}
 
 
 def retire_zone_configs():
@@ -63,7 +78,7 @@ def retire_zone_configs():
         for camera in cameras:
             row=conn.execute('SELECT payload FROM configurations WHERE camera_id=? ORDER BY version DESC LIMIT 1',(camera['id'],)).fetchone()
             payload=json.loads(row['payload']) if row else {}
-            if payload.get('zones') or payload.get('reference'):
+            if 'zones' in payload or 'reference' in payload:
                 revision(conn,camera['id'])
                 db.audit(conn,camera['home_id'],'system','zones.retire',camera['id'])
 
@@ -71,7 +86,7 @@ def retire_zone_configs():
 def revision(conn, camera_id):
     camera=conn.execute('SELECT * FROM cameras WHERE id=?',(camera_id,)).fetchone()
     previous=conn.execute('SELECT payload FROM configurations WHERE camera_id=? ORDER BY version DESC LIMIT 1',(camera_id,)).fetchone()
-    payload=config_without_zones(json.loads(previous['payload']) if previous else {})
+    payload=current_config_payload(json.loads(previous['payload']) if previous else {})
     version=camera['desired_version']+1
     payload.update(version=version,camera_id=camera_id)
     payload['reminders']=[reminder_public(r) for r in conn.execute('SELECT * FROM reminders WHERE camera_id=?',(camera_id,))]
@@ -82,16 +97,25 @@ def revision(conn, camera_id):
     return payload
 
 
+def mail_cipher():
+    key=os.getenv('DATA_ENCRYPTION_KEY') or base64.urlsafe_b64encode(
+        hmac.new(os.environ['SESSION_CSRF_KEY'].encode(),b'annha:sqlite-mail-queue',hashlib.sha256).digest()).decode()
+    return Fernet(key.encode())
+
 def queue_email(conn, user, purpose):
-    token=secrets.token_urlsafe(32)
+    is_verification=purpose=='verify'
+    token=f'{secrets.randbelow(100_000_000):08d}'
     conn.execute('DELETE FROM email_tokens WHERE user_id=? AND purpose=?',(user['id'],purpose))
-    conn.execute('INSERT INTO email_tokens VALUES(?,?,?,?)',(digest(token),user['id'],purpose,time.time()+(3600 if purpose=='reset' else 86400)))
+    token_hash=verification_code_digest(token) if is_verification else reset_code_digest(user['email'],token)
+    conn.execute('INSERT INTO email_tokens VALUES(?,?,?,?)',(token_hash,user['id'],purpose,time.time()+(900 if purpose=='reset' else 86400)))
     base=os.getenv('PUBLIC_URL','http://localhost:8188').rstrip('/')
-    route='reset' if purpose=='reset' else 'verify'
-    link=f'{base}/#/{route}?token={token}'
-    subject='Đặt lại mật khẩu AnNhà' if purpose=='reset' else 'Xác minh tài khoản AnNhà'
-    conn.execute('INSERT INTO mail_jobs(id,recipient,subject,body,created_at) VALUES(?,?,?,?,?)',
-                 (db.uid(),user['email'],subject,f'{subject}\n\nMở liên kết sau để tiếp tục:\n{link}\n\nNếu bạn không yêu cầu, hãy bỏ qua thư này.',db.now()))
+    kind='verification' if is_verification else 'password_reset'
+    recipient_name=user['name'] if 'name' in user.keys() else None
+    rendered=render_email(kind,public_url=base,recipient_name=recipient_name,
+                          code=token)
+    encrypted=mail_cipher().encrypt(json.dumps({'body':rendered.text,'html_body':rendered.html},ensure_ascii=False).encode()) if not is_verification else None
+    conn.execute('INSERT INTO mail_jobs(id,recipient,subject,body,html_body,created_at,secret_ciphertext) VALUES(?,?,?,?,?,?,?)',
+                 (db.uid(),user['email'],rendered.subject,'' if encrypted else rendered.text,None if encrypted else rendered.html,db.now(),encrypted))
 
 
 def provision_device(name):
@@ -189,14 +213,16 @@ def deliver_mail():
         rows=conn.execute("SELECT * FROM mail_jobs WHERE status='pending' AND next_attempt<=? LIMIT 5",(time.time(),)).fetchall()
     for job in rows:
         try:
+            content=json.loads(mail_cipher().decrypt(job['secret_ciphertext'])) if job['secret_ciphertext'] else dict(job)
             msg=EmailMessage()
             msg['From']=os.getenv('SMTP_FROM','AnNhà <noreply@annha.local>')
-            msg['To']=job['recipient'];msg['Subject']=job['subject'];msg.set_content(job['body'])
+            msg['To']=job['recipient'];msg['Subject']=job['subject'];msg.set_content(content['body'])
+            if content['html_body']: msg.add_alternative(content['html_body'],subtype='html')
             with smtplib.SMTP(os.getenv('SMTP_HOST','localhost'),int(os.getenv('SMTP_PORT','1025')),timeout=5) as smtp:
-                if os.getenv('SMTP_STARTTLS','false')=='true': smtp.starttls()
+                if os.getenv('SMTP_STARTTLS','false')=='true': smtp.starttls(context=ssl.create_default_context())
                 if os.getenv('SMTP_USER'): smtp.login(os.environ['SMTP_USER'],os.environ['SMTP_PASSWORD'])
                 smtp.send_message(msg)
-            with db.connect() as conn: conn.execute("UPDATE mail_jobs SET status='sent',error=NULL,body='' WHERE id=?",(job['id'],))
+            with db.connect() as conn: conn.execute("UPDATE mail_jobs SET status='sent',error=NULL,body='',html_body=NULL,secret_ciphertext=NULL WHERE id=?",(job['id'],))
         except Exception as exc:
             attempt=job['attempts']+1
             with db.connect() as conn: conn.execute('UPDATE mail_jobs SET attempts=?,status=?,next_attempt=?,error=? WHERE id=?',

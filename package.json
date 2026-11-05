@@ -8,7 +8,7 @@
   "scripts": {
     "build": "npm --prefix frontend run build",
     "dev": "npm --prefix frontend run dev",
-    "test:ui": "node scripts/qa/frontend.mjs",
+    "test:ui": "node scripts/qa/frontend.mjs && node scripts/qa/recording-settings.mjs",
     "test:frontend": "node --test frontend/tests/*.test.mjs"
   },
   "devDependencies": {

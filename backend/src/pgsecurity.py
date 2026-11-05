@@ -9,6 +9,14 @@ from . import pgdb as db
 from .security import password_hash,password_matches,check_origin,COOKIE,SESSION_SECONDS
 
 def digest(value): return hashlib.sha256(value.encode()).digest()
+def verification_code_digest(value):
+    key=os.environ['SESSION_CSRF_KEY'].encode()
+    return hmac.new(key,b'annha:email-verification-code:'+value.encode(),hashlib.sha256).digest()
+
+def reset_code_digest(email,value):
+    return hmac.new(os.environ['SESSION_CSRF_KEY'].encode(),
+        b'annha:password-reset-code:'+email.encode()+b':'+value.encode(),hashlib.sha256).digest()
+
 def csrf_for(token): return hmac.new(os.environ['SESSION_CSRF_KEY'].encode(),token.encode(),hashlib.sha256).hexdigest()
 def public_user(row): return {**{key:row[key] for key in ('id','name','email')},'verified':bool(row.get('email_verified_at'))}
 
@@ -41,7 +49,29 @@ def membership(home,user_id,owner=False):
     if owner and row['role']!='owner': raise HTTPException(403,'Thao tác này cần quyền chủ nhà.')
     return dict(row)
 
+def effective_camera_permissions(home,user_id,camera_ids=None):
+    with db.connect('auth') as conn:
+        member=conn.execute('SELECT role FROM annha_private.home_memberships WHERE home_id=%s AND user_id=%s AND revoked_at IS NULL',(home,user_id)).fetchone()
+        if not member: raise HTTPException(404,'Không tìm thấy nhà hoặc chưa được cấp quyền.')
+        if member['role']=='owner':
+            return {str(camera):{'view':True,'events':True,'audio':True,'schedules':True,'manage':True} for camera in (camera_ids or [])}
+        if camera_ids is None:
+            rows=conn.execute('''SELECT camera_id,can_view,can_handle_events,can_play_audio,can_edit_reminders
+                FROM annha_private.camera_grants WHERE home_id=%s AND user_id=%s''',(home,user_id)).fetchall()
+        else:
+            rows=conn.execute('''SELECT camera_id,can_view,can_handle_events,can_play_audio,can_edit_reminders
+                FROM annha_private.camera_grants WHERE home_id=%s AND user_id=%s AND camera_id=ANY(%s::uuid[])''',(home,user_id,camera_ids)).fetchall()
+    result={}
+    for row in rows:
+        if not row['can_view']: continue
+        caregiver=member['role']=='caregiver'
+        result[str(row['camera_id'])]={'view':True,'events':caregiver and bool(row['can_handle_events']),
+            'audio':caregiver and bool(row['can_play_audio']),'schedules':caregiver and bool(row['can_edit_reminders']),'manage':False}
+    return result
+
 def camera_access(camera_id,user_id,action='view',historical=False):
+    if action not in ('view','events','audio','schedules','manage'):
+        raise HTTPException(404,'Không tìm thấy chức năng.')
     with db.connect('auth') as conn:
         row=conn.execute('SELECT * FROM annha.cameras WHERE id=%s',(camera_id,)).fetchone()
     if not row or (row['retired_at'] and not historical): raise HTTPException(404,'Không tìm thấy camera.')

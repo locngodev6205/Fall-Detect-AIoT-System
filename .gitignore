@@ -41,3 +41,34 @@ dist/
 
 # Generated browser review screenshots and reports
 /artifacts/ui-review/
+
+# Generated/local implementation reports (keep files locally)
+/docs/reports/
+
+# Private environment variants; templates remain shareable
+.env.*
+!.env.example
+!**/.env.example
+*.env
+!*.env.example
+
+# Local editor state and generated test/runtime artifacts
+.vscode/
+.idea/
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+playwright-report/
+test-results/
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db-wal
+*.db-shm
+
+# Private handoff bundles and database exports
+/AnNha_Teammate_Handoff_*.zip
+/handoff/
+/backups/
+*.dump

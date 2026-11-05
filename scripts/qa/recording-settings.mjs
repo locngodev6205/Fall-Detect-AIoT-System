@@ -1,6 +1,6 @@
 import {chromium} from 'playwright';import {readFile,writeFile} from 'node:fs/promises';import assert from 'node:assert/strict';
-const base=process.env.UI_BASE_URL||'http://localhost:8188',out='artifacts/ui-review';
-const account=JSON.parse(await readFile('.secrets/demo-credentials.json','utf8')).accounts.find(a=>a.role==='owner');
+const base=process.env.UI_BASE_URL||'http://localhost:8188',out=process.env.UI_OUTPUT_DIR||'artifacts/ui-review';
+const account=JSON.parse(await readFile(process.env.UI_CREDENTIALS_FILE||'.secrets/demo-credentials.json','utf8')).accounts.find(a=>a.role==='owner');
 const browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_EXECUTABLE||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',args:['--use-fake-ui-for-media-stream','--use-fake-device-for-media-stream']});
 const checks=[],errors=[];
 try{
@@ -25,6 +25,7 @@ try{
  await dialog.getByRole('button',{name:'Bắt đầu ghi âm',exact:true}).click();await dialog.getByRole('alert').filter({hasText:'Bạn chưa cho phép dùng microphone'}).waitFor();assert(await dialog.getByRole('button',{name:'Lưu lời nhắc',exact:true}).isDisabled());
  await dialog.getByRole('button',{name:'Đóng',exact:true}).click();checks.push('Denied microphone permission produces guidance and never enables saving an empty recording');
  await page.goto(base+'/#/settings');await page.getByRole('heading',{name:'Cài đặt nhà',exact:true}).waitFor();
+ await page.route('**/api/homes/*/delivery-status',route=>route.fulfill({json:[{id:'qa-delivery',event_id:'qa-event',camera_id:'qa-camera',camera_name:'Camera phòng khách',room_name:'Phòng khách',channel_kind:'email',event_kind:'fall',status:'delivered',created_at:new Date().toISOString()}]}));
  const history=page.locator('details.settings-history');assert.equal(await history.count(),2);assert.equal(await history.locator(':scope[open]').count(),0);
  await page.getByText('Hoạt động trong nhà',{exact:true}).click();await page.locator('.activity-history-row').first().waitFor();
  assert(!(await page.locator('.activity-history-row strong').allTextContents()).some(text=>/event\.|reminder\.|settings\./.test(text)));checks.push('Activity history is collapsed by default and uses human-readable Vietnamese descriptions');

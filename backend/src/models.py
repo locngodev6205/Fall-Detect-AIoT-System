@@ -41,7 +41,27 @@ class Register(Login):
 class Token(Model):
     token: str = Field(min_length=20,max_length=256)
 
-class Reset(Token):
+class VerifyEmail(Model):
+    token: str | None = Field(default=None,min_length=20,max_length=256)
+    code: str | None = Field(default=None,pattern=r'^\d{8}$')
+
+    @model_validator(mode='after')
+    def one_verification_credential(self):
+        if (self.token is None) == (self.code is None):
+            raise ValueError('Nhập mã xác minh hoặc sử dụng liên kết cũ.')
+        return self
+
+class ResetCredential(VerifyEmail):
+    email: str | None = Field(default=None,max_length=254)
+
+    @model_validator(mode='after')
+    def reset_email_required(self):
+        if self.code:
+            if not self.email: raise ValueError('Nhập email đã yêu cầu đặt lại mật khẩu.')
+            self.email=Email(email=self.email).email
+        return self
+
+class Reset(ResetCredential):
     password: str = Field(min_length=10,max_length=256)
     model_config = ConfigDict(extra='forbid',str_strip_whitespace=False)
 
@@ -58,17 +78,42 @@ class Home(Model):
 class Name(Model):
     name: str = Field(min_length=1,max_length=120)
 
+class CameraRights(Model):
+    audio: bool = False
+    schedules: bool = False
+
 class Access(Model):
-    role: Literal['caregiver','viewer']
+    role: Literal['caregiver','viewer','member']
     scopes: list[str] = Field(max_length=100)
     rights: dict[Literal['audio','schedules'],bool] = Field(default_factory=dict)
+    camera_permissions: dict[str,CameraRights] = Field(default_factory=dict)
     @model_validator(mode='after')
     def viewer_rights(self):
-        if self.role=='viewer' and any(self.rights.values()): raise ValueError('Người xem không có quyền điều khiển')
+        if not set(self.camera_permissions).issubset(self.scopes):
+            raise ValueError('Quyền từng camera phải nằm trong phạm vi camera được chọn')
+        if self.role!='caregiver' and (any(self.rights.values()) or any(any(rights.model_dump().values()) for rights in self.camera_permissions.values())):
+            raise ValueError('Người xem không có quyền điều khiển')
         return self
 
+    def rights_for_camera(self,camera_id:str):
+        if self.camera_permissions:
+            return self.camera_permissions.get(camera_id,CameraRights())
+        return CameraRights(**{key:bool(value) for key,value in self.rights.items()})
+
 class Invite(Email, Access):
-    pass
+    role: Literal['caregiver','viewer']
+
+class JoinInvitationCode(Model):
+    code: str = Field(min_length=16,max_length=40)
+
+    @field_validator('code')
+    @classmethod
+    def normalized_code(cls,value):
+        from .invitation_codes import normalize,ALPHABET
+        value=normalize(value)
+        if len(value)!=16 or any(char not in ALPHABET for char in value):
+            raise ValueError('Mã mời gồm 16 ký tự. Vui lòng sao chép đúng mã chủ nhà cung cấp.')
+        return value
 
 class Claim(Model):
     code: str = Field(min_length=8,max_length=128)
@@ -133,7 +178,6 @@ class EventInput(Model):
     reason: str = Field(default='',max_length=1000)
     duration_s: float | None = Field(default=None,ge=0,le=604800)
     config_version: int = Field(default=0,ge=0)
-    zone_id: str | None = Field(default=None,max_length=128)
     confidence: float | None = Field(default=None,ge=0,le=1)
     @field_validator('observed_at')
     @classmethod
@@ -193,6 +237,37 @@ class Settings(Model):
     def thresholds(self):
         if self.temperature_low>=self.temperature_high: raise ValueError('Ngưỡng thấp phải nhỏ hơn ngưỡng cao')
         return self
+
+EventKind = Literal['fall','immobility','environment','device']
+NotificationSeverity = Literal['info','warning','critical']
+
+class NotificationPolicyUpdate(Model):
+    reminder_interval_minutes: int = Field(default=15,ge=5,le=1440)
+    max_reminders: int = Field(default=3,ge=0,le=5)
+
+class NotificationChannelPolicy(Model):
+    enabled: bool = False
+    event_kinds: list[EventKind] = Field(default_factory=lambda:['fall','immobility','environment','device'],min_length=1,max_length=4)
+    minimum_severity: NotificationSeverity = 'warning'
+    camera_scope_all: bool = True
+    camera_ids: list[str] = Field(default_factory=list,max_length=32)
+    allow_media: bool = False
+    chat_id: str = Field(default='',max_length=64,pattern=r'^-?\d*$')
+    clear_destination: bool = False
+    @field_validator('event_kinds')
+    @classmethod
+    def unique_event_kinds(cls,value):
+        if len(set(value))!=len(value): raise ValueError('Loại sự kiện không được lặp')
+        return value
+    @field_validator('camera_ids')
+    @classmethod
+    def unique_cameras(cls,value):
+        if len(set(value))!=len(value): raise ValueError('Camera không được lặp')
+        return value
+
+class NotificationRecipientUpdate(Model):
+    telegram: NotificationChannelPolicy
+    email: NotificationChannelPolicy
 
 
 class DeleteHome(Model):

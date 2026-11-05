@@ -1,6 +1,6 @@
 # AnNhà Business API
 
-Thiết kế chuyển sang Neon/PostgreSQL và Cloudinary: [DATABASE_DESIGN_NEON.md](../docs/DATABASE_DESIGN_NEON.md), [SQL schema](database/postgresql/README.md). Adapter PostgreSQL đã chạy với Neon; hướng dẫn vận hành và demo tại [NEON_SETUP.md](../docs/NEON_SETUP.md).
+Thiết kế chuyển sang Neon/PostgreSQL và Cloudinary: [DATABASE_DESIGN_NEON.md](../docs/architecture/DATABASE_DESIGN_NEON.md), [SQL schema](database/postgresql/README.md). Adapter PostgreSQL đã chạy với Neon; hướng dẫn vận hành và demo tại [NEON_SETUP.md](../docs/setup/NEON_SETUP.md).
 
 Backend FastAPI có `src.entrypoint:app` chọn PostgreSQL hoặc SQLite qua `DATABASE_BACKEND`. Các module `pgdb`, `pgsecurity`, `pgapi`, `pgservices`, `pgmedia`, `pgmain` dùng schema chuẩn hoá và RLS; adapter SQLite cũ gồm:
 
@@ -18,7 +18,7 @@ Swagger: service nội bộ `/docs`; nginx mặc định chỉ proxy `/api/` và
 
 Chạy một Uvicorn worker: kết nối media/WebSocket nằm trong bộ nhớ của worker này. Muốn scale nhiều worker phải bổ sung pub/sub và media routing trước; không chỉ tăng `--workers`.
 
-Xem [README gốc](../README.md) để chạy Docker và [Device API](../docs/DEVICE_API.md) cho hợp đồng thiết bị. SQLite và media cần đặt trên volume riêng; `DATABASE_PATH` và `MEDIA_ROOT` được Compose cấu hình.
+Xem [README gốc](../README.md) để chạy Docker và [Device API](../docs/api/DEVICE_API.md) cho hợp đồng thiết bị. SQLite và media cần đặt trên volume riêng; `DATABASE_PATH` và `MEDIA_ROOT` được Compose cấu hình.
 
 Biến môi trường SMTP: `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`, `SMTP_STARTTLS`, `SMTP_USER`, `SMTP_PASSWORD`. Các biến ứng dụng: `PUBLIC_URL`, `APP_ORIGINS`, `COOKIE_SECURE`, `MQTT_ENABLED`, `MQTT_BROKER`, `MQTT_PORT`, `MQTT_USER`, `MQTT_PASSWORD`, `TELEGRAM_BOT_TOKEN`, `MAX_HOME_MEDIA_BYTES` (mặc định 512 MB). `WORKER_ENABLED=false` chỉ dùng khi test; bình thường phải bật để xử lý email/TTS/thông báo và retention.
 

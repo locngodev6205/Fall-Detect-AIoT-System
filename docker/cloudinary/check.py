@@ -22,12 +22,12 @@ def load_config(path):
         if key.strip() in result:
             raise ValueError('Duplicate configuration key.')
         result[key.strip()] = value.strip()
-    for key in ('CLOUDINARY_CLOUD_NAME','CLOUDINARY_API_KEY','CLOUDINARY_API_SECRET','CLOUDINARY_UPLOAD_PRESET'):
+    for key in ('CLOUDINARY_CLOUD_NAME','CLOUDINARY_API_KEY','CLOUDINARY_API_SECRET'):
         if not result.get(key) or 'REPLACE_' in result[key]:
             raise ValueError('Fill the ignored Cloudinary config before checking.')
-    for key in ('CLOUDINARY_CLOUD_NAME','CLOUDINARY_UPLOAD_PRESET'):
+    for key in ('CLOUDINARY_CLOUD_NAME',):
         if not re.fullmatch(r'[A-Za-z0-9_-]+', result[key]):
-            raise ValueError('Cloud name and preset must be safe path identifiers.')
+            raise ValueError('Cloud name must be a safe path identifier.')
     if result.get('CLOUDINARY_DELIVERY_TYPE') != 'authenticated':
         raise ValueError('Family media must use authenticated delivery.')
     if not 0 < int(result.get('CLOUDINARY_MAX_FILE_BYTES', '0')) <= 26214400:
@@ -61,7 +61,8 @@ def validate_preset(preset):
 
 
 def setup_preset(config):
-    resource = 'upload_presets/' + config['CLOUDINARY_UPLOAD_PRESET']
+    preset_name = config.get('CLOUDINARY_UPLOAD_PRESET', 'annha_private')
+    resource = 'upload_presets/' + preset_name
     try:
         existing = get_admin(config, resource)
     except urllib.error.HTTPError as error:
@@ -72,7 +73,7 @@ def setup_preset(config):
         print('PASS: existing secure preset kept unchanged.')
         return
     get_admin(config, 'upload_presets', data={
-        'name':config['CLOUDINARY_UPLOAD_PRESET'], 'unsigned':'false',
+        'name':preset_name, 'unsigned':'false',
         'type':'authenticated', 'overwrite':'false',
         'allowed_formats':'jpg,jpeg,png,mp4,webm,mp3,wav,ogg',
     })
@@ -97,6 +98,8 @@ def main(argv=None):
                 raise ValueError('Cloudinary did not return a successful ping.')
             print('PASS: Cloudinary credentials accepted (read-only ping).')
         if args.check_preset:
+            if not config.get('CLOUDINARY_UPLOAD_PRESET'):
+                raise ValueError('No optional preset is configured; the backend uses signed server uploads.')
             preset = get_admin(config, 'upload_presets/' + config['CLOUDINARY_UPLOAD_PRESET'])
             validate_preset(preset)
             print('PASS: preset is signed and authenticated. Upload limits still require server enforcement.')

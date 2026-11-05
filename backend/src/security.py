@@ -15,6 +15,14 @@ SESSION_SECONDS = 7 * 86400
 def digest(value):
     return hashlib.sha256(value.encode()).hexdigest()
 
+def verification_code_digest(value):
+    key = os.environ['SESSION_CSRF_KEY'].encode()
+    return hmac.new(key, b'annha:email-verification-code:' + value.encode(), hashlib.sha256).hexdigest()
+
+def reset_code_digest(email,value):
+    return hmac.new(os.environ['SESSION_CSRF_KEY'].encode(),
+        b'annha:password-reset-code:'+email.encode()+b':'+value.encode(),hashlib.sha256).hexdigest()
+
 
 def password_hash(password):
     salt = secrets.token_hex(16)
@@ -72,7 +80,7 @@ def throttle(key, maximum=10, seconds=900):
 
 
 def active_rights(value):
-    # Retain legacy values in storage, but never expose or grant zone permissions.
+    # Retain legacy values in storage, but expose only current camera rights.
     import json
     return {key:enabled for key,enabled in json.loads(value).items() if key in ('audio','schedules')}
 
@@ -91,22 +99,40 @@ def membership(conn, home_id, user_id, owner=False):
 
 
 def camera_access(conn, camera_id, user_id, action='view', historical=False):
-    if action == 'zones':
+    if action not in ('view','events','audio','schedules','manage'):
         raise HTTPException(404, 'Không tìm thấy chức năng.')
     camera = conn.execute('SELECT * FROM cameras WHERE id=? AND (claimed=1 OR ?)',(camera_id,int(historical))).fetchone()
     if not camera or not camera['home_id']:
         raise HTTPException(404, 'Không tìm thấy camera.')
     member = membership(conn,camera['home_id'],user_id)
-    if member['role'] != 'owner':
-        if camera_id not in member['scopes']:
-            raise HTTPException(404,'Camera ngoài phạm vi truy cập.')
-        if action == 'events' and member['role'] != 'caregiver':
-            raise HTTPException(403,'Bạn chưa có quyền xử lý sự kiện.')
-        if action in ('zones','audio','schedules') and (member['role'] != 'caregiver' or not member['rights'].get(action)):
-            raise HTTPException(403,'Bạn chưa được cấp quyền thực hiện thao tác này.')
-        if action == 'manage':
-            raise HTTPException(403,'Thao tác này cần quyền chủ nhà.')
+    if member['role'] == 'owner': return dict(camera)
+    grant=conn.execute('''SELECT can_view,can_handle_events,can_play_audio,can_edit_reminders
+        FROM camera_grants WHERE home_id=? AND camera_id=? AND user_id=?''',(camera['home_id'],camera_id,user_id)).fetchone()
+    if not grant or not grant['can_view']:
+        raise HTTPException(404,'Camera ngoài phạm vi truy cập.')
+    allowed={'view':True,'events':member['role']=='caregiver' and bool(grant['can_handle_events']),
+        'audio':member['role']=='caregiver' and bool(grant['can_play_audio']),
+        'schedules':member['role']=='caregiver' and bool(grant['can_edit_reminders'])}
+    if action=='manage': raise HTTPException(403,'Thao tác này cần quyền chủ nhà.')
+    if not allowed[action]: raise HTTPException(403,'Bạn chưa được cấp quyền thực hiện thao tác này.')
     return dict(camera)
+
+
+def effective_camera_permissions(conn,home_id,user_id,camera_ids=None):
+    member=membership(conn,home_id,user_id)
+    if member['role']=='owner':
+        ids=camera_ids if camera_ids is not None else [r['id'] for r in conn.execute('SELECT id FROM cameras WHERE home_id=? AND claimed=1',(home_id,))]
+        return {camera:{'view':True,'events':True,'audio':True,'schedules':True,'manage':True} for camera in ids}
+    rows=conn.execute('''SELECT camera_id,can_view,can_handle_events,can_play_audio,can_edit_reminders
+        FROM camera_grants WHERE home_id=? AND user_id=?''',(home_id,user_id)).fetchall()
+    result={}
+    for row in rows:
+        if camera_ids is not None and row['camera_id'] not in camera_ids: continue
+        if not row['can_view']: continue
+        caregiver=member['role']=='caregiver'
+        result[row['camera_id']]={'view':True,'events':caregiver and bool(row['can_handle_events']),
+            'audio':caregiver and bool(row['can_play_audio']),'schedules':caregiver and bool(row['can_edit_reminders']),'manage':False}
+    return result
 
 
 def device(request: Request):

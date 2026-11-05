@@ -22,4 +22,7 @@ test('settings use plain activity and notification-specific labels',()=>{
  assert.equal(deliveryLabel('accepted').label,'Dịch vụ đã tiếp nhận');
  assert(!deliveryLabel('accepted').label.includes('Thiết bị'));
  assert.equal(deliveryLabel('cancelled').tone,'gray');
+ const expected={pending:'Đang chờ gửi',sending:'Đang gửi',accepted:'Dịch vụ đã tiếp nhận',delivered:'Đã chuyển đến người nhận',bounced:'Không gửi được tới người nhận',complained:'Người nhận đã báo thư rác',rejected:'Yêu cầu gửi bị từ chối',failed:'Chưa gửi được',unknown:'Chưa xác nhận kết quả'};
+ for(const [status,label] of Object.entries(expected)) assert.equal(deliveryLabel(status).label,label,status);
+ assert.notEqual(deliveryLabel('accepted').label,deliveryLabel('delivered').label);
 });

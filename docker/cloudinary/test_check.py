@@ -14,7 +14,7 @@ class CloudCheckTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.path = Path(self.temp.name) / 'cloudinary.env'
-        self.path.write_text('CLOUDINARY_CLOUD_NAME=test-cloud\nCLOUDINARY_API_KEY=test-key\nCLOUDINARY_API_SECRET=secret-never-log\nCLOUDINARY_UPLOAD_PRESET=annha_private\nCLOUDINARY_DELIVERY_TYPE=authenticated\nCLOUDINARY_MAX_FILE_BYTES=26214400\n')
+        self.path.write_text('CLOUDINARY_CLOUD_NAME=test-cloud\nCLOUDINARY_API_KEY=test-key\nCLOUDINARY_API_SECRET=secret-never-log\nCLOUDINARY_ASSET_FOLDER=Fall Detection\nCLOUDINARY_DELIVERY_TYPE=authenticated\nCLOUDINARY_MAX_FILE_BYTES=26214400\n')
     def tearDown(self):
         self.temp.cleanup()
     def test_local_validation_does_not_connect_or_log_credentials(self):

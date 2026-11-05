@@ -3,10 +3,10 @@
 ## CAMERA GIÁM SÁT GIA ĐÌNH TÍCH HỢP CẢNH BÁO AN TOÀN VÀ HỖ TRỢ SINH HOẠT
 
 - **Mã dự án:** FALL-DETECT-AIOT-SYSTEM.
-- **Phiên bản đặc tả:** 2.3 — ngày 29/10/2026 (tạm bỏ khoanh vùng, định hướng servo tracking).
+- **Phiên bản đặc tả:** 2.3 — nền ngày 29/10/2026; phạm vi được làm rõ ngày 04/11/2026.
 - **Nguồn hợp nhất:** Bản AnNhà v2.1 là nền nghiệp vụ; nội dung riêng của bản thiết kế AIoT trước đây được đối chiếu tại mục 9. Đây là tài liệu đặc tả chính duy nhất.
-- **Quyết định phạm vi 29/10/2026:** Tạm bỏ chức năng khoanh vùng trên web và luật dựa trên vùng. Ưu tiên hướng camera quay bằng servo bám một người; panorama/ánh xạ vùng chỉ xem xét đưa lại khi tracking ổn định (mục 9.5). Giao diện/API chỉnh vùng đã được gỡ; dữ liệu lịch sử được giữ. Tracking servo chưa được triển khai/kiểm chứng.
-- **Trạng thái:** Phạm vi nghiệp vụ đã thống nhất để định hướng triển khai. Mức triển khai backend/frontend và giới hạn edge được cập nhật riêng tại [ARCHITECTURE.md](ARCHITECTURE.md); tài liệu yêu cầu không đồng nghĩa tất cả đã được nghiệm thu trên phần cứng.
+- **Quyết định phạm vi 04/11/2026:** Đã gỡ chức năng khoanh vùng khỏi hợp đồng sản phẩm hiện hành trên web/API và khỏi luật nghiệp vụ; không cấp quyền khoanh vùng. Hướng camera quay bằng servo bám người vẫn cần được teammate triển khai và kiểm chứng. Panorama/ánh xạ vùng có thể được xem xét như một phạm vi mới sau khi tracking ổn định (mục 9.5); lịch sử cấu hình/sự kiện được giữ.
+- **Trạng thái:** Phạm vi nghiệp vụ đã thống nhất để định hướng triển khai. Mức triển khai backend/frontend và giới hạn edge được cập nhật riêng tại [ARCHITECTURE.md](../architecture/ARCHITECTURE.md); tài liệu yêu cầu không đồng nghĩa tất cả đã được nghiệm thu trên phần cứng.
 
 ---
 
@@ -39,7 +39,7 @@ Hệ thống hỗ trợ phát hiện tình huống cần kiểm tra; không kế
 
 | Trong phạm vi nghiệp vụ | Ngoài phiên bản đầu / mở rộng sau |
 | :--- | :--- |
-| Tài khoản, nhà/cụm camera, phân quyền; xem camera, phát hiện té ngã và bất động; định hướng servo bám một người | Khoanh vùng trên ảnh, panorama/ánh xạ vùng; nhận diện danh tính, theo dõi một người xuyên nhiều camera |
+| Tài khoản, nhà/cụm camera, phân quyền; xem camera, phát hiện té ngã và bất động; định hướng servo bám một người | Khoanh vùng trên ảnh và panorama/ánh xạ vùng (chỉ xem xét như phạm vi mới sau tracking); nhận diện danh tính, theo dõi một người xuyên nhiều camera |
 | Nhiệt độ, độ ẩm, cảnh báo tín hiệu gas | Suy luận sàn ướt từ độ ẩm; đo mọi loại khí độc |
 | Lời nhắc TTS/audio, gửi lời nhắn thoại, phát giọng nói trực tiếp một chiều | Đàm thoại hai chiều, trợ lý hội thoại, nhận dạng giọng nói để xác nhận an toàn |
 | Cảnh báo web, âm thanh tại chỗ, thông báo Telegram | SMS, gọi điện tự động, tự động liên hệ cứu hộ |
@@ -99,7 +99,7 @@ Loa <────────────────┘   - Phân tích hình �
 - ThingsBoard, nếu sử dụng, phục vụ telemetry và biểu đồ môi trường. Không duy trì một quy trình xử lý cảnh báo hoặc nguồn cấu hình độc lập gây trùng với backend.
 - Định dạng mô hình, số khớp đầu vào, độ dài chuỗi và runtime phải theo artifact mô hình được chọn và kiểm chứng. Đặc tả nghiệp vụ không tự thay đổi hợp đồng tiền xử lý/đầu vào mô hình hiện có.
 
-Kiến trúc thành phần, hiện trạng mã nguồn và các luồng kỹ thuật được mô tả tại [ARCHITECTURE.md](ARCHITECTURE.md). Backend kiểm tra quyền trên API, WebSocket và media; không broadcast dữ liệu của mọi nhà đến mọi trình duyệt.
+Kiến trúc thành phần, hiện trạng mã nguồn và các luồng kỹ thuật được mô tả tại [ARCHITECTURE.md](../architecture/ARCHITECTURE.md). Backend kiểm tra quyền trên API, WebSocket và media; không broadcast dữ liệu của mọi nhà đến mọi trình duyệt.
 
 ### 3.1. Pipeline AI và hợp đồng mô hình
 
@@ -107,14 +107,14 @@ Thiết kế hai giai đoạn từ bản AIoT được giữ lại: MediaPipe Po
 
 | Thành phần | Hợp đồng tham chiếu trong mã nguồn |
 | :--- | :--- |
-| Trích xuất tư thế | Chọn 17 khớp từ MediaPipe Pose theo `SORTED_YOUR_KEYPOINT_NAMES` trong [skeleton.py](../fall_detect/modules/skeleton.py) |
+| Trích xuất tư thế | Chọn 17 khớp từ MediaPipe Pose theo `SORTED_YOUR_KEYPOINT_NAMES` trong [skeleton.py](../../fall_detect/modules/skeleton.py) |
 | Đặc trưng mỗi khớp | `x, y, visibility`; không phải `x, y, z` như bảng thiết kế cũ |
 | Chuẩn hóa | Dịch gốc về trung điểm hông, co giãn x/y theo chiều cao thân khi đủ điều kiện; giữ kênh visibility theo mã tiền xử lý |
 | Chuỗi đầu vào | 30 khung hình × 51 đặc trưng, dạng `(1, 30, 51)`; thời lượng thực phụ thuộc tốc độ lấy mẫu, không cố định 1–2 giây |
-| Artifact / runtime | [fall_detection_transformer.tflite](../fall_detect/models/fall_detection_transformer.tflite), `tflite-runtime`; cấu hình tham chiếu tại [config.py](../fall_detect/config.py) |
+| Artifact / runtime | [fall_detection_transformer.tflite](../../fall_detect/models/fall_detection_transformer.tflite), `tflite-runtime`; cấu hình tham chiếu tại [config.py](../../fall_detect/config.py) |
 | Kết quả | Điểm phân loại té ngã để kết hợp với luật theo dõi; không mặc định là xác suất đã hiệu chuẩn |
 
-Bảng này được đối chiếu nguồn khi hợp nhất, không phải kết quả chạy mô hình trên Pi. Số attention head, kích thước artifact và lựa chọn ONNX/NCNN/NPU không trở thành yêu cầu nghiệp vụ cố định. Khi thay artifact phải xác minh lại đầu vào, đầu ra, thứ tự khớp và chuẩn hóa. Chi tiết giao thức thiết bị theo [DEVICE_API.md](DEVICE_API.md); ví dụ telemetry ThingsBoard cũ không thay thế hợp đồng tích hợp hiện hành.
+Bảng này được đối chiếu nguồn khi hợp nhất, không phải kết quả chạy mô hình trên Pi. Số attention head, kích thước artifact và lựa chọn ONNX/NCNN/NPU không trở thành yêu cầu nghiệp vụ cố định. Khi thay artifact phải xác minh lại đầu vào, đầu ra, thứ tự khớp và chuẩn hóa. Chi tiết giao thức thiết bị theo [DEVICE_API.md](../api/DEVICE_API.md); ví dụ telemetry ThingsBoard cũ không thay thế hợp đồng tích hợp hiện hành.
 
 ## 4. ĐẶC TẢ NGHIỆP VỤ
 
@@ -145,7 +145,7 @@ Bảng này được đối chiếu nguồn khi hợp nhất, không phải kế
 
 ### 4.2. Camera bám một người bằng servo (hướng triển khai)
 
-Tạm bỏ thao tác vẽ vùng, đa giác vùng nghỉ ngơi/vùng bỏ qua và mọi luật phụ thuộc vùng khỏi phạm vi hiện tại. Các mã `ZONE-01`–`ZONE-07` được bảo lưu cho chức năng đã hoãn, không tái sử dụng cho tracking. Điều kiện đưa lại khoanh vùng được mô tả ở mục 9.5.
+Đã gỡ thao tác vẽ vùng, đa giác vùng nghỉ ngơi/vùng bỏ qua và mọi luật phụ thuộc vùng khỏi phạm vi hiện hành. Các mã `ZONE-01`–`ZONE-07` được bảo lưu để truy vết lịch sử, không tái sử dụng cho quyền hoặc API hiện hành. Mục 9.5 chỉ ghi hướng cân nhắc nếu sau này hình thành một phạm vi mới.
 
 | Mã | Yêu cầu mục tiêu |
 | :--- | :--- |
@@ -434,9 +434,9 @@ Các giá trị sau được lưu để không mất đề xuất thiết kế. 
 - Chốt FPS, độ trễ, recall/precision và giới hạn báo giả theo phép đo trên thiết bị thực tế.
 - Chỉ đưa từng mục EXT vào phạm vi khi đã xác định thiết kế, người dùng/quyền liên quan và kịch bản nghiệm thu tương ứng.
 
-### 9.5. Khoanh vùng và panorama — tạm hoãn, có thể đưa lại
+### 9.5. Khoanh vùng và panorama — ngoài phạm vi hiện hành
 
-Theo quyết định ngày 29/10/2026, khoanh vùng không còn là yêu cầu triển khai hay nghiệm thu hiện tại. Cơ chế cũ gồm vẽ đa giác giường/sofa/ghế/sàn/vùng bỏ qua trên ảnh, chính sách theo vùng/giờ, kiểm tra chồng lấn và đồng bộ phiên bản; các mã `ZONE-01`–`ZONE-07` chỉ được bảo lưu để truy vết.
+Theo quyết định ngày 04/11/2026, khoanh vùng không còn thuộc hợp đồng sản phẩm hiện hành và không phải yêu cầu triển khai/nghiệm thu. Mô tả cơ chế cũ dưới đây chỉ làm bối cảnh cho một đề xuất tương lai; các mã `ZONE-01`–`ZONE-07` không được tái sử dụng làm quyền hay API đang hoạt động.
 
 Có thể xem xét đưa lại sau khi servo tracking và AI chạy ổn định:
 
@@ -445,4 +445,4 @@ Có thể xem xét đưa lại sau khi servo tracking và AI chạy ổn định
 - Phân biệt được nghỉ trên giường/sofa với nằm trên sàn qua tư thế, vị trí và tính liên tục; vùng nghỉ không được tự hủy nghi ngờ té ngã.
 - Thiết kế lại quy tắc vùng bỏ qua, chồng lấn, thời gian theo vùng, phiên bản và phản hồi thiết bị; bổ sung kịch bản nghiệm thu trước khi kích hoạt.
 
-UI/API chỉnh vùng đã được gỡ, quyền sửa vùng không còn được cấp. Khi backend khởi động, camera còn vùng được cấp revision mới với `zones: []`, `reference: {}` và chờ thiết bị ACK; cả cấu hình đọc ra lẫn revision mới đều không chứa vùng hoạt động. Lịch sử cấu hình/sự kiện vẫn được giữ; thiết bị offline chỉ xóa vùng đã cache sau khi nhận và áp dụng cấu hình mới.
+UI/API chỉnh vùng đã được gỡ, quyền sửa vùng không còn được cấp. Cấu hình mới và API cấu hình dành cho chủ nhà không có `zones`/`reference`. Khi khởi động, backend thêm một revision đã làm sạch nếu bản gần nhất còn các khóa cũ, giữ nguyên revision lịch sử và trạng thái ACK trước đó. Riêng payload device API vẫn kèm `zones: []`, `reference: {}` để firmware cũ xóa cache sau khi áp dụng và ACK revision mới; đây là tín hiệu tương thích, không phải chức năng vùng đang hoạt động. Thiết bị offline chỉ xóa cache sau khi nối lại, áp dụng và ACK cấu hình.

@@ -15,9 +15,9 @@ from dotenv import dotenv_values
 from cryptography.fernet import Fernet
 
 ROOT=Path(__file__).resolve().parents[2]
-MIGRATIONS=['001_schema.sql','002_security.sql','005_email_notifications.sql','007_home_archiving.sql','008_archived_home_notifications.sql']
+MIGRATIONS=['001_schema.sql','002_security.sql','005_email_notifications.sql','007_home_archiving.sql','008_archived_home_notifications.sql','009_schedule_tts_permissions.sql','010_atomic_tts_enqueue.sql','011_notification_policies.sql','012_telegram_pairing.sql','013_invitation_codes.sql']
 
-def deploy(env_file,output):
+def deploy(env_file,output,migrations_only=False):
     settings=dotenv_values(env_file)
     url=settings.get('DATABASE_URL_UNPOOLED') or settings.get('DATABASE_URL')
     if not url: raise SystemExit('Direct owner DATABASE_URL_UNPOOLED is required.')
@@ -46,6 +46,9 @@ def deploy(env_file,output):
             print('Applied',name)
         # Baseline auth grants cover existing private tables; keep the deployment ledger owner-only.
         conn.execute('REVOKE ALL ON annha_private.schema_migrations FROM PUBLIC,annha_app,annha_auth,annha_device,annha_worker')
+        if migrations_only:
+            print('Migrations ready; runtime credentials unchanged.')
+            return
         owner=conn.execute('SELECT current_user').fetchone()[0]
         for group in ('app','auth','device','worker'):
             conn.execute(sql.SQL('GRANT {} TO {}').format(sql.Identifier('annha_'+group),sql.Identifier(owner)))
@@ -74,6 +77,6 @@ def deploy(env_file,output):
     print(f'PostgreSQL ready: {count} tables including migration ledger; 4 restricted logins. Runtime env saved privately.')
 
 if __name__=='__main__':
-    parser=argparse.ArgumentParser();parser.add_argument('--env',default='.env');parser.add_argument('--output',default='.secrets/neon-runtime.env');args=parser.parse_args()
-    try: deploy(args.env,args.output)
+    parser=argparse.ArgumentParser();parser.add_argument('--env',default='.env');parser.add_argument('--output',default='.secrets/neon-runtime.env');parser.add_argument('--migrations-only',action='store_true');args=parser.parse_args()
+    try: deploy(args.env,args.output,args.migrations_only)
     except psycopg.Error as error: raise SystemExit('Database setup failed: '+type(error).__name__+' (SQLSTATE '+str(error.sqlstate)+'). Credentials omitted.') from None

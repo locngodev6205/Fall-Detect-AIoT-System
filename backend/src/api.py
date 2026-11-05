@@ -10,7 +10,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from . import db, models as m, services as svc
-from .security import COOKIE, SESSION_SECONDS, active_rights, camera_access, device, digest, membership, password_hash, password_matches, public_user, throttle, user
+from .security import COOKIE, SESSION_SECONDS, active_rights, camera_access, device, digest, effective_camera_permissions, membership, password_hash, password_matches, public_user, throttle, user, verification_code_digest, reset_code_digest
 
 router=APIRouter(prefix='/api')
 Current=Annotated[dict,Depends(user)]
@@ -26,9 +26,43 @@ def check_scopes(conn,home_id,scopes):
     if not set(scopes)<=available: raise HTTPException(422,'Phạm vi chứa camera không thuộc nhà.')
 
 
+def payload_rights(payload,camera_id):
+    return payload.rights_for_camera(camera_id).model_dump()
+
+
+def aggregate_rights(payload):
+    if not payload.camera_permissions: return dict(payload.rights)
+    return {key:any(payload_rights(payload,camera).get(key,False) for camera in payload.scopes) for key in ('audio','schedules')}
+
+
+def store_camera_grants(conn,home_id,user_id,payload):
+    conn.execute('DELETE FROM camera_grants WHERE home_id=? AND user_id=?',(home_id,user_id))
+    for camera in payload.scopes:
+        rights=payload_rights(payload,camera) if payload.role=='caregiver' else {'audio':False,'schedules':False}
+        conn.execute('''INSERT INTO camera_grants(home_id,camera_id,user_id,can_view,can_handle_events,can_play_audio,can_edit_reminders)
+            VALUES(?,?,?,1,?,?,?)''',(home_id,camera,user_id,int(payload.role=='caregiver'),int(rights['audio']),int(rights['schedules'])))
+
+
+def store_invitation_grants(conn,home_id,invitation_id,payload):
+    for camera in payload.scopes:
+        rights=payload_rights(payload,camera) if payload.role=='caregiver' else {'audio':False,'schedules':False}
+        conn.execute('''INSERT INTO invitation_camera_grants(home_id,invitation_id,camera_id,can_handle_events,can_play_audio,can_edit_reminders)
+            VALUES(?,?,?,?,?,?)''',(home_id,invitation_id,camera,int(payload.role=='caregiver'),int(rights['audio']),int(rights['schedules'])))
+
+
 def close_sockets(home_id):
     # Any membership/permission change terminates current sessions on this home.
     return [(socket,token) for socket,(token,home) in tuple(svc.connections.items()) if home==home_id]
+
+
+def asset_camera_access(conn,row,user_id,action='view'):
+    if action=='manage' or not row['mime'].startswith('audio/'):
+        return camera_access(conn,row['camera_id'],user_id,action,historical=True)
+    try:
+        return camera_access(conn,row['camera_id'],user_id,'audio',historical=True)
+    except HTTPException as error:
+        if error.status_code!=403: raise
+        return camera_access(conn,row['camera_id'],user_id,'schedules',historical=True)
 
 
 @router.post('/auth/register',status_code=201)
@@ -39,18 +73,21 @@ def register(payload:m.Register,request:Request):
     with db.connect() as conn:
         if conn.execute('SELECT 1 FROM users WHERE email=?',(payload.email,)).fetchone(): raise HTTPException(409,'Email đã được đăng ký.')
         conn.execute('INSERT INTO users VALUES(?,?,?,?,0,?)',(user_id,payload.email,payload.name.strip(),hashed,db.now()))
-        svc.queue_email(conn,{'id':user_id,'email':payload.email},'verify')
+        svc.queue_email(conn,{'id':user_id,'email':payload.email,'name':payload.name},'verify')
     return {'message':'Đã tạo tài khoản. Vui lòng mở email để xác minh.'}
 
 
 @router.post('/auth/verify')
-def verify(payload:m.Token):
+def verify(payload:m.VerifyEmail,request:Request):
+    if payload.code:
+        throttle('verify-code:'+client_key(request),5,900)
+    token_hash=verification_code_digest(payload.code) if payload.code else digest(payload.token)
     with db.connect() as conn:
         conn.execute('BEGIN IMMEDIATE')
-        row=conn.execute("SELECT * FROM email_tokens WHERE token_hash=? AND purpose='verify' AND expires>?",(digest(payload.token),time.time())).fetchone()
-        if not row: raise HTTPException(400,'Liên kết không hợp lệ hoặc đã hết hạn.')
+        row=conn.execute("SELECT * FROM email_tokens WHERE token_hash=? AND purpose='verify' AND expires>?",(token_hash,time.time())).fetchone()
+        if not row: raise HTTPException(400,'Mã xác minh hoặc liên kết không hợp lệ, đã dùng hoặc hết hạn.')
         conn.execute('UPDATE users SET verified=1 WHERE id=?',(row['user_id'],))
-        conn.execute('DELETE FROM email_tokens WHERE token_hash=?',(digest(payload.token),))
+        conn.execute('DELETE FROM email_tokens WHERE token_hash=?',(token_hash,))
     return {'message':'Email đã được xác minh. Bạn có thể đăng nhập.'}
 
 
@@ -95,26 +132,39 @@ async def logout(current:Current,response:Response):
 @router.post('/auth/forgot')
 def forgot(payload:m.Email,request:Request):
     throttle('forgot:'+client_key(request),5,3600)
+    throttle('forgot-email:'+payload.email,3,900)
     with db.connect() as conn:
         row=conn.execute('SELECT * FROM users WHERE email=?',(payload.email,)).fetchone()
         if row: svc.queue_email(conn,row,'reset')
-    return {'message':'Nếu email đã đăng ký, hệ thống sẽ gửi liên kết khôi phục.'}
+    return {'message':'Nếu email đã đăng ký, hệ thống sẽ gửi mã đặt lại mật khẩu.'}
 
+def reset_limits(payload,request):
+    throttle('reset:'+client_key(request),20,900)
+    if payload.email: throttle('reset-email:'+payload.email,10,900)
+
+def reset_record(conn,payload):
+    hashed=reset_code_digest(payload.email,payload.code) if payload.code else digest(payload.token)
+    row=conn.execute("SELECT * FROM email_tokens WHERE token_hash=? AND purpose='reset' AND expires>?",(hashed,time.time())).fetchone()
+    if not row: raise HTTPException(400,'Mã hoặc yêu cầu đặt lại mật khẩu không hợp lệ, đã dùng hoặc hết hạn.')
+    return row
+
+@router.post('/auth/reset/check')
+def check_reset(payload:m.ResetCredential,request:Request):
+    reset_limits(payload,request)
+    with db.connect() as conn: reset_record(conn,payload)
+    return {'message':'Mã hợp lệ. Hãy nhập mật khẩu mới.'}
 
 @router.post('/auth/reset')
 async def reset(payload:m.Reset,request:Request):
-    throttle('reset:'+client_key(request),10,900)
+    reset_limits(payload,request)
     hashed=password_hash(payload.password)
     with db.connect() as conn:
-        conn.execute('BEGIN IMMEDIATE')
-        row=conn.execute("SELECT * FROM email_tokens WHERE token_hash=? AND purpose='reset' AND expires>?",(digest(payload.token),time.time())).fetchone()
-        if not row: raise HTTPException(400,'Liên kết không hợp lệ hoặc đã hết hạn.')
+        conn.execute('BEGIN IMMEDIATE');row=reset_record(conn,payload)
         conn.execute('UPDATE users SET password=? WHERE id=?',(hashed,row['user_id']))
         conn.execute('DELETE FROM sessions WHERE user_id=?',(row['user_id'],))
         conn.execute("DELETE FROM email_tokens WHERE user_id=? AND purpose='reset'",(row['user_id'],))
     await svc.revalidate_connections()
-    return {'message':'Đã đổi mật khẩu và kết thúc các phiên cũ.'}
-
+    return {'message':'Đã đổi mật khẩu và kết thúc các phiên cũ. Bạn có thể đăng nhập bằng mật khẩu mới.'}
 
 @router.patch('/account')
 def profile(payload:m.Name,current:Current):
@@ -219,7 +269,12 @@ async def remove_camera(camera_id:str,current:Current):
 def members(home_id:str,current:Current):
     with db.connect() as conn:
         membership(conn,home_id,current['id'],owner=True)
-        return [{**dict(r),'scopes':json.loads(r['scopes']),'rights':active_rights(r['rights'])} for r in conn.execute('SELECT u.id,u.name,u.email,m.role,m.scopes,m.rights FROM users u JOIN memberships m ON m.user_id=u.id WHERE m.home_id=?',(home_id,))]
+        result=[]
+        for row in conn.execute('SELECT u.id,u.name,u.email,m.role,m.scopes,m.rights FROM users u JOIN memberships m ON m.user_id=u.id WHERE m.home_id=?',(home_id,)):
+            item={**dict(row),'scopes':json.loads(row['scopes']),'rights':active_rights(row['rights'])}
+            item['camera_permissions']=effective_camera_permissions(conn,home_id,row['id'])
+            result.append(item)
+        return result
 
 
 @router.patch('/homes/{home_id}/members/{user_id}')
@@ -229,7 +284,8 @@ async def update_member(home_id:str,user_id:str,payload:m.Access,current:Current
         old=membership(conn,home_id,user_id)
         if old['role']=='owner': raise HTTPException(409,'Không thay đổi chủ nhà bằng thao tác này.')
         check_scopes(conn,home_id,payload.scopes)
-        conn.execute('UPDATE memberships SET role=?,scopes=?,rights=? WHERE home_id=? AND user_id=?',(payload.role,db.dumps(payload.scopes),db.dumps(payload.rights),home_id,user_id))
+        conn.execute('UPDATE memberships SET role=?,scopes=?,rights=? WHERE home_id=? AND user_id=?',(payload.role,db.dumps(payload.scopes),db.dumps(aggregate_rights(payload)),home_id,user_id))
+        store_camera_grants(conn,home_id,user_id,payload)
         db.audit(conn,home_id,current['id'],'member.update',user_id)
     for socket,_ in close_sockets(home_id):
         svc.connections.pop(socket,None);await socket.close(code=1008)
@@ -264,7 +320,8 @@ def invite(home_id:str,payload:m.Invite,current:Current):
         membership(conn,home_id,current['id'],owner=True)
         throttle('invite:'+current['id'],20,3600)
         check_scopes(conn,home_id,payload.scopes)
-        conn.execute('INSERT INTO invitations VALUES(?,?,?,?,?,?,?,?,?,?)',(inv_id,home_id,payload.email,payload.role,db.dumps(payload.scopes),db.dumps(payload.rights),digest(token),time.time()+7*86400,'pending',db.now()))
+        conn.execute('INSERT INTO invitations VALUES(?,?,?,?,?,?,?,?,?,?)',(inv_id,home_id,payload.email,payload.role,db.dumps(payload.scopes),db.dumps(aggregate_rights(payload)),digest(token),time.time()+7*86400,'pending',db.now()))
+        store_invitation_grants(conn,home_id,inv_id,payload)
         base=os.getenv('PUBLIC_URL','http://localhost:8188').rstrip('/')
         conn.execute('INSERT INTO mail_jobs(id,recipient,subject,body,created_at) VALUES(?,?,?,?,?)',(db.uid(),payload.email,'Lời mời tham gia AnNhà',f"Mở lời mời: {base}/#/invitation?token={token}",db.now()))
         db.audit(conn,home_id,current['id'],'invitation.create',inv_id)
@@ -276,7 +333,9 @@ def invitation(token:str,current:Current):
     with db.connect() as conn:
         row=conn.execute('SELECT i.*,h.name AS home_name FROM invitations i JOIN homes h ON h.id=i.home_id WHERE token_hash=?',(digest(token),)).fetchone()
         if not row or row['email']!=current['email']: raise HTTPException(404,'Không tìm thấy lời mời cho tài khoản này.')
-        return {**{k:row[k] for k in ('id','home_id','home_name','role','scopes','expires','status')},'rights':db.dumps(active_rights(row['rights']))}
+        grants=conn.execute('SELECT camera_id,can_play_audio,can_edit_reminders FROM invitation_camera_grants WHERE invitation_id=?',(row['id'],)).fetchall()
+        camera_permissions={g['camera_id']:{'audio':bool(g['can_play_audio']),'schedules':bool(g['can_edit_reminders'])} for g in grants}
+        return {**{k:row[k] for k in ('id','home_id','home_name','role','scopes','expires','status')},'rights':db.dumps(active_rights(row['rights'])),'camera_permissions':camera_permissions}
 
 
 @router.post('/invitations/{token}/accept')
@@ -289,6 +348,8 @@ def accept_invite(token:str,current:Current):
         existing=conn.execute('SELECT 1 FROM memberships WHERE home_id=? AND user_id=?',(row['home_id'],current['id'])).fetchone()
         if existing: raise HTTPException(409,'Bạn đã là thành viên. Chủ nhà có thể sửa quyền trong trang thành viên.')
         conn.execute('INSERT INTO memberships VALUES(?,?,?,?,?)',(row['home_id'],current['id'],row['role'],row['scopes'],row['rights']))
+        conn.execute('''INSERT INTO camera_grants(home_id,camera_id,user_id,can_view,can_handle_events,can_play_audio,can_edit_reminders)
+            SELECT home_id,camera_id,?,1,can_handle_events,can_play_audio,can_edit_reminders FROM invitation_camera_grants WHERE invitation_id=?''',(current['id'],row['id']))
         conn.execute("UPDATE invitations SET status='revoked' WHERE home_id=? AND email=? AND status='pending'",(row['home_id'],row['email']))
         conn.execute("UPDATE invitations SET status='accepted' WHERE id=?",(row['id'],))
         db.audit(conn,row['home_id'],current['id'],'invitation.accept',row['id'])
@@ -318,7 +379,7 @@ def config(camera_id:str,current:Current):
     with db.connect() as conn:
         camera=camera_access(conn,camera_id,current['id'])
         row=conn.execute('SELECT * FROM configurations WHERE camera_id=? ORDER BY version DESC LIMIT 1',(camera_id,)).fetchone()
-        return {'desired_version':camera['desired_version'],'applied_version':camera['applied_version'],'error':camera['config_error'],'payload':svc.config_without_zones(json.loads(row['payload']) if row else {})}
+        return {'desired_version':camera['desired_version'],'applied_version':camera['applied_version'],'error':camera['config_error'],'payload':svc.current_config_payload(json.loads(row['payload']) if row else {})}
 
 
 @router.get('/homes/{home_id}/events')
@@ -396,8 +457,9 @@ def save_settings(home_id:str,payload:m.Settings,current:Current):
 def assets(home_id:str,current:Current):
     with db.connect() as conn:
         cameras=svc.visible_cameras(conn,home_id,current['id'])
-        allowed={c['id'] for c in cameras}
-        return [{k:r[k] for k in ('id','camera_id','event_id','name','mime','size','status','error','created_at')} for r in conn.execute('SELECT * FROM assets WHERE home_id=? ORDER BY created_at DESC',(home_id,)) if r['camera_id'] in allowed]
+        visible={c['id']:c['permissions'] for c in cameras}
+        return [{k:r[k] for k in ('id','camera_id','event_id','name','mime','size','status','error','created_at')} for r in conn.execute('SELECT * FROM assets WHERE home_id=? ORDER BY created_at DESC',(home_id,))
+            if r['camera_id'] in visible and (not r['mime'].startswith('audio/') or visible[r['camera_id']]['audio'] or visible[r['camera_id']]['schedules'])]
 
 
 async def write_asset(request,home_id,camera_id,event_id=None):
@@ -453,7 +515,7 @@ def asset_file(asset_id:str,current:Current):
     with db.connect() as conn:
         row=conn.execute('SELECT * FROM assets WHERE id=?',(asset_id,)).fetchone()
         if not row: raise HTTPException(404,'Không tìm thấy tài nguyên.')
-        camera_access(conn,row['camera_id'],current['id'],historical=True)
+        asset_camera_access(conn,row,current['id'])
         return FileResponse(svc.asset_path(row),media_type=row['mime'],headers={'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'})
 
 
@@ -462,7 +524,7 @@ def delete_asset(asset_id:str,current:Current):
     with db.connect() as conn:
         row=conn.execute('SELECT * FROM assets WHERE id=?',(asset_id,)).fetchone()
         if not row: raise HTTPException(404,'Không tìm thấy tài nguyên.')
-        camera_access(conn,row['camera_id'],current['id'],'audio')
+        camera_access(conn,row['camera_id'],current['id'],'manage')
         if row['event_id']: raise HTTPException(409,'Bằng chứng được quản lý theo chính sách lưu trữ.')
         if conn.execute('SELECT 1 FROM reminders WHERE asset_id=?',(asset_id,)).fetchone(): raise HTTPException(409,'Âm thanh đang được lịch nhắc sử dụng.')
         (db.MEDIA_ROOT/row['path']).unlink(missing_ok=True)
@@ -592,7 +654,7 @@ def heartbeat(payload:m.Heartbeat,current:Device):
 def device_config(current:Device):
     with db.connect() as conn:
         row=conn.execute('SELECT payload FROM configurations WHERE camera_id=? ORDER BY version DESC LIMIT 1',(current['id'],)).fetchone()
-    return svc.config_without_zones(json.loads(row[0]) if row else {'version':0,'reminders':[]})
+    return svc.device_config_payload(json.loads(row[0]) if row else {'version':0,'reminders':[]})
 
 
 @router.post('/device/config/ack')
@@ -689,3 +751,55 @@ def tts_preview(camera_id:str,payload:m.TtsPreview,current:Current):
     with db.connect() as conn: camera_access(conn,camera_id,current['id'],'schedules')
     throttle('tts-preview:'+current['id'],6,60)
     return Response(content=preview_audio(payload.text),media_type='audio/wav',headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'})
+
+@router.post('/homes/{home_id}/invitation-codes',status_code=201)
+def create_invitation_code(home_id:str,current:Current):
+    from . import invitation_codes as codes
+    throttle('invitation-code-create:'+current['id'],20,3600)
+    code=codes.generate();code_id=db.uid();expires=time.time()+7*86400
+    with db.connect() as conn:
+        conn.execute('BEGIN IMMEDIATE');membership(conn,home_id,current['id'],owner=True)
+        conn.execute('INSERT INTO invitation_codes(id,home_id,code_hash,created_by,created_at,expires_at) VALUES(?,?,?,?,?,?)',
+            (code_id,home_id,codes.code_hash(code),current['id'],db.now(),expires))
+        db.audit(conn,home_id,current['id'],'invitation_code.create',code_id)
+    return {'id':code_id,'code':code,'role':'member','expires_at':datetime.fromtimestamp(expires,timezone.utc).isoformat()}
+
+@router.get('/homes/{home_id}/invitation-codes')
+def list_invitation_codes(home_id:str,current:Current):
+    from . import invitation_codes as codes
+    with db.connect() as conn:
+        membership(conn,home_id,current['id'],owner=True)
+        rows=conn.execute('SELECT id,created_at,expires_at,used_at,revoked_at FROM invitation_codes WHERE home_id=? ORDER BY created_at DESC LIMIT 50',(home_id,)).fetchall()
+    return [{**dict(row),'expires_at':datetime.fromtimestamp(row['expires_at'],timezone.utc).isoformat(),
+        'status':codes.status(row,time.time()),'role':'member'} for row in rows]
+
+@router.delete('/homes/{home_id}/invitation-codes/{code_id}')
+def revoke_invitation_code(home_id:str,code_id:str,current:Current):
+    with db.connect() as conn:
+        conn.execute('BEGIN IMMEDIATE');membership(conn,home_id,current['id'],owner=True)
+        result=conn.execute('UPDATE invitation_codes SET revoked_at=? WHERE id=? AND home_id=? AND used_at IS NULL AND revoked_at IS NULL AND expires_at>?',
+            (db.now(),code_id,home_id,time.time()))
+        if not result.rowcount: raise HTTPException(409,'Mã mời không còn hiệu lực hoặc đã được sử dụng.')
+        db.audit(conn,home_id,current['id'],'invitation_code.revoke',code_id)
+    return {'message':'Đã thu hồi mã mời.'}
+
+@router.post('/invitation-codes/join')
+def join_invitation_code(payload:m.JoinInvitationCode,request:Request,current:Current):
+    from . import invitation_codes as codes
+    if not current['verified']: raise HTTPException(403,'Vui lòng xác minh email trước khi tham gia nhà.')
+    throttle('invitation-code-user:'+current['id'],5,900)
+    throttle('invitation-code-ip:'+client_key(request),20,900)
+    with db.connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        row=conn.execute('SELECT * FROM invitation_codes WHERE code_hash=?',(codes.code_hash(payload.code),)).fetchone()
+        codes.invalid(row,time.time());home=row['home_id']
+        target=conn.execute('SELECT name FROM homes WHERE id=?',(home,)).fetchone()
+        if not target: raise HTTPException(400,'Nhà của mã mời này không còn khả dụng.')
+        if conn.execute('SELECT 1 FROM memberships WHERE home_id=? AND user_id=?',(home,current['id'])).fetchone():
+            raise HTTPException(409,'Bạn đã là thành viên của nhà này.')
+        cameras=[item['id'] for item in conn.execute('SELECT id FROM cameras WHERE home_id=? AND claimed=1',(home,))]
+        conn.execute('INSERT INTO memberships(home_id,user_id,role,scopes,rights) VALUES(?,?,?,?,?)',(home,current['id'],'member',db.dumps(cameras),'{}'))
+        store_camera_grants(conn,home,current['id'],m.Access(role='member',scopes=cameras))
+        conn.execute('UPDATE invitation_codes SET used_by=?,used_at=? WHERE id=?',(current['id'],db.now(),row['id']))
+        db.audit(conn,home,current['id'],'invitation_code.accept',row['id'])
+    return {'home_id':home,'home_name':target['name'],'role':'member','message':'Đã tham gia nhà thành công.'}

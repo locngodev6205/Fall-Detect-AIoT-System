@@ -3,3 +3,4 @@ uvicorn[standard]==0.34.2
 paho-mqtt==2.1.0
 psycopg[binary,pool]==3.3.6
 cryptography==46.0.7
+cloudinary==1.46.3

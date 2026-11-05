@@ -26,9 +26,14 @@ def open_pools():
         for name in ROLES:
             url=os.getenv('DATABASE_URL_'+name.upper())
             if not url: raise RuntimeError('Missing least-privilege PostgreSQL runtime configuration.')
+            test_ssl=os.getenv('ANNHA_TEST_SSL_MODE') if os.getenv('ANNHA_TEST_ENV') else None
+            sslmode=test_ssl or 'verify-full'
+            if sslmode not in ('verify-full','disable'):
+                raise ValueError('Invalid PostgreSQL test SSL mode')
+            kwargs={'row_factory':dict_row,'prepare_threshold':None,'connect_timeout':int(os.getenv('DATABASE_CONNECT_TIMEOUT_SECONDS','15')),'sslmode':sslmode}
+            if sslmode=='verify-full': kwargs['sslrootcert']=ssl.get_default_verify_paths().cafile
             POOLS[name]=ConnectionPool(url,min_size=int(os.getenv('DATABASE_POOL_MIN','0')),max_size=int(os.getenv('DATABASE_POOL_MAX','3')),open=True,
-                kwargs={'row_factory':dict_row,'prepare_threshold':None,'connect_timeout':int(os.getenv('DATABASE_CONNECT_TIMEOUT_SECONDS','15')),
-                        'sslmode':'verify-full','sslrootcert':ssl.get_default_verify_paths().cafile},timeout=20)
+                kwargs=kwargs,timeout=20)
         for name in ROLES:
             with connect(name) as conn: conn.execute('SELECT 1')
         with connect('auth') as conn:

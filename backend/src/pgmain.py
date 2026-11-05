@@ -1,6 +1,7 @@
 """AnNhà application entry point."""
 import asyncio
 from contextlib import asynccontextmanager, suppress
+import hmac
 import json
 import logging
 import os
@@ -95,6 +96,12 @@ def start_mqtt(loop):
 @asynccontextmanager
 async def lifespan(app):
     await asyncio.to_thread(db.open_pools)
+    telegram_mode=services.telegram_update_mode()
+    if telegram_mode=='webhook':
+        await asyncio.to_thread(services.configure_telegram_webhook)
+    elif telegram_mode!='polling':
+        logger.error('Telegram update mode is invalid; inbound Telegram updates remain disabled')
+    await asyncio.to_thread(services.retire_zone_configs)
     client=start_mqtt(asyncio.get_running_loop()) if MQTT_ENABLED else None
     worker=asyncio.create_task(services.worker()) if WORKER_ENABLED else None
     yield
@@ -117,9 +124,34 @@ app.include_router(router)
 app.include_router(media_router)
 
 
+@app.post('/api/integrations/telegram/webhook')
+async def telegram_webhook(request:Request):
+    if services.telegram_update_mode()!='webhook' or not services.telegram_webhook_ready:
+        raise HTTPException(404,'Webhook Telegram hiện không được bật.')
+    expected=services.telegram_webhook_secret()
+    provided=request.headers.get('X-Telegram-Bot-Api-Secret-Token','')
+    if not expected or not provided.isascii() or not hmac.compare_digest(provided,expected):
+        raise HTTPException(401,'Yêu cầu webhook không hợp lệ.')
+    content_length=request.headers.get('content-length','')
+    if content_length.isdigit() and int(content_length)>65536:
+        raise HTTPException(413,'Nội dung webhook quá lớn.')
+    chunks=[];size=0
+    async for chunk in request.stream():
+        size+=len(chunk)
+        if size>65536: raise HTTPException(413,'Nội dung webhook quá lớn.')
+        chunks.append(chunk)
+    try:
+        payload=json.loads(b''.join(chunks))
+    except (ValueError,UnicodeError):
+        raise HTTPException(400,'Nội dung webhook không hợp lệ.') from None
+    if not isinstance(payload,dict): raise HTTPException(400,'Nội dung webhook không hợp lệ.')
+    await asyncio.to_thread(services.process_telegram_pairing_update,payload)
+    return {'ok':True}
+
+
 @app.middleware('http')
 async def protect_origin(request:Request,call_next):
-    if request.url.path == '/api/tb-webhook':
+    if request.url.path in ('/api/tb-webhook','/api/integrations/telegram/webhook'):
         response = await call_next(request)
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['Cache-Control'] = 'no-store'

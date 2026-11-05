@@ -1,4 +1,7 @@
 const activityNames={
+ 'asset.rename':'Đổi tên âm thanh',
+ 'invitation_code.create':'Tạo mã mời thành viên','invitation_code.accept':'Tham gia nhà bằng mã','invitation_code.revoke':'Thu hồi mã mời',
+ 'notification.telegram_test.accepted':'Đã gửi tin nhắn thử qua Telegram','notification.telegram_photo_test.accepted':'Đã gửi ảnh thử qua Telegram','notification.telegram_pairing.create':'Tạo liên kết Telegram','notification.telegram_pairing.complete':'Kết nối tài khoản Telegram','notification.recipient.update':'Cập nhật người nhận cảnh báo',
  'event.safe':'Xác nhận người thân an toàn','event.acknowledge':'Tiếp nhận cảnh báo','event.resolve':'Đánh dấu sự kiện đã xử lý','event.false_alarm':'Đánh dấu báo động giả','event.silence':'Tạm tắt âm cảnh báo','event.note':'Thêm ghi chú cho sự kiện',
  'reminder.save':'Lưu lời nhắc','reminder.delete':'Xoá lời nhắc','settings.update':'Cập nhật cài đặt nhà','home.create':'Tạo nhà','home.update':'Cập nhật thông tin nhà','home.archive':'Đưa nhà vào lưu trữ','room.create':'Thêm phòng','room.update':'Đổi tên phòng',
  'camera.claim':'Thêm camera vào nhà','camera.remove':'Gỡ camera khỏi nhà','member.update':'Cập nhật quyền thành viên','member.revoke':'Thu hồi quyền thành viên','invitation.create':'Gửi lời mời tham gia nhà','invitation.accept':'Chấp nhận lời mời','invitation.decline':'Từ chối lời mời','invitation.revoke':'Thu hồi lời mời','asset.delete':'Xoá file đã lưu','command.create':'Gửi yêu cầu đến thiết bị'

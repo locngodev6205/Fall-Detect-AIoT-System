@@ -28,6 +28,9 @@ services:
       SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
       SMTP_FROM: "${SMTP_FROM:-AnNha <noreply@annha.local>}"
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TELEGRAM_BOT_USERNAME: "${TELEGRAM_BOT_USERNAME:-AnNhaSafetyAlertBot}"
+      TELEGRAM_UPDATE_MODE: "${TELEGRAM_UPDATE_MODE:-polling}"
+      TELEGRAM_WEBHOOK_REPLACE_EXISTING: "${TELEGRAM_WEBHOOK_REPLACE_EXISTING:-false}"
       MEDIA_ROOT: "${MEDIA_ROOT:-/app/data/media}"
       MAX_HOME_MEDIA_BYTES: "${MAX_HOME_MEDIA_BYTES:-536870912}"
       TB_HOST: "${TB_HOST:-127.0.0.1}"
@@ -49,11 +52,46 @@ services:
       DATA_ENCRYPTION_KEY_ID: "${DATA_ENCRYPTION_KEY_ID:-primary}"
       EMAIL_ALERTS_ENABLED: "${EMAIL_ALERTS_ENABLED:-false}"
       DATABASE_PATH: "${DATABASE_PATH:-/app/data/annha.sqlite3}"
+      MEDIA_STORAGE_PROVIDER: "${MEDIA_STORAGE_PROVIDER:-auto}"
+      CLOUDINARY_CONFIG_FILE: /run/secrets/cloudinary.env
+      CLOUDINARY_ENVIRONMENT: "${CLOUDINARY_ENVIRONMENT:-development}"
+    secrets:
+      - source: cloudinary_config
+        target: cloudinary.env
     volumes:
       - backend-data:/app/data
     depends_on:
       mqtt:
         condition: service_started
+    restart: unless-stopped
+  telegram-poller:
+    build: ./backend
+    command: ["python", "-m", "src.telegram_poller"]
+    # This process has no HTTP server; readiness comes from persisted polling state.
+    healthcheck:
+      disable: true
+    # Finish the current long poll and commit/rollback before Docker sends SIGKILL.
+    stop_grace_period: 60s
+    environment:
+      DATABASE_BACKEND: "${DATABASE_BACKEND:-sqlite}"
+      DATABASE_URL_APP: "${DATABASE_URL_APP:-}"
+      DATABASE_URL_AUTH: "${DATABASE_URL_AUTH:-}"
+      DATABASE_URL_DEVICE: "${DATABASE_URL_DEVICE:-}"
+      DATABASE_URL_WORKER: "${DATABASE_URL_WORKER:-}"
+      DATABASE_POOL_MIN: "${DATABASE_POOL_MIN:-0}"
+      DATABASE_CONNECT_TIMEOUT_SECONDS: "${DATABASE_CONNECT_TIMEOUT_SECONDS:-15}"
+      DATABASE_POOL_MAX: "${DATABASE_POOL_MAX:-3}"
+      DATABASE_STATEMENT_TIMEOUT_MS: "${DATABASE_STATEMENT_TIMEOUT_MS:-10000}"
+      SESSION_CSRF_KEY: "${SESSION_CSRF_KEY:-}"
+      DATA_ENCRYPTION_KEY: "${DATA_ENCRYPTION_KEY:-}"
+      DATA_ENCRYPTION_KEY_ID: "${DATA_ENCRYPTION_KEY_ID:-primary}"
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TELEGRAM_BOT_USERNAME: "${TELEGRAM_BOT_USERNAME:-AnNhaSafetyAlertBot}"
+      TELEGRAM_UPDATE_MODE: "${TELEGRAM_UPDATE_MODE:-polling}"
+      MEDIA_ROOT: /tmp/annha-poller-media
+    depends_on:
+      backend:
+        condition: service_healthy
     restart: unless-stopped
   mailpit:
     image: axllent/mailpit:v1.27.8
@@ -74,3 +112,6 @@ volumes:
   backend-data:
   mqtt-data:
   mail-data:
+secrets:
+  cloudinary_config:
+    file: ${CLOUDINARY_CONFIG_FILE:-./.secrets/cloudinary.env}

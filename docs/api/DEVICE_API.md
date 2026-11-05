@@ -2,7 +2,7 @@
 
 Tài liệu cho firmware/agent tại Pi; đây là giao thức đã có ở backend, không khẳng định mã AI/thiết bị hiện tại đã thực thi tất cả chức năng.
 
-**Phạm vi cập nhật 29/10/2026:** Khoanh vùng đã tạm hoãn theo [đặc tả](PROJECT_SPECIFICATION.md). API chỉnh vùng đã gỡ; trường vùng chỉ còn là giá trị rỗng tương thích để xóa cấu hình cũ tại thiết bị. Servo tracking là hướng triển khai, chưa có hợp đồng điều khiển/trạng thái servo được xác nhận trong API này.
+**Phạm vi cập nhật 04/11/2026:** Khoanh vùng đã được gỡ khỏi hợp đồng ứng dụng theo [đặc tả](../product/PROJECT_SPECIFICATION.md); không có API chỉnh vùng. Hai trường rỗng ở payload dành riêng cho thiết bị là tín hiệu tương thích để firmware cũ xóa cache, không phải cấu hình vùng đang hoạt động. Servo tracking là hướng triển khai, chưa có hợp đồng điều khiển/trạng thái servo được xác nhận trong API này.
 
 ## 1. Cấp và ghép nối
 
@@ -20,14 +20,13 @@ Tất cả HTTP device API dùng header `Authorization: Bearer <device_token>`. 
 
 Observation hỗ trợ: `unknown`, `clear`, `no_person`, `occluded`, `camera_error`. Sau 45 giây không có heartbeat, web coi trạng thái kết nối là quá hạn.
 
-`GET /api/device/config` trả phiên bản mới nhất, zones, reference, reminders và environment policy. Thiết bị cần:
+`GET /api/device/config` trả phiên bản mới nhất, reminders và environment policy. Để tương thích firmware cũ, response vẫn có `zones: []` và `reference: {}`; cấu hình được lưu và API dành cho người dùng không còn các trường này. Thiết bị cần:
 
-1. Tải, kiểm tra và áp dụng nguyên khối; không thay đổi mô hình/tiền xử lý chỉ để phù hợp payload.
-2. Tải file audio/TTS từ `GET /api/device/assets/{asset_id}` khi file sẵn sàng; lưu cục bộ cho lịch offline.
-3. Lưu cấu hình bền vững. Chỉ phản hồi thành công khi các module liên quan thực sự sử dụng được cấu hình.
-4. `POST /api/device/config/ack` với `{"version":2,"success":true}`; lỗi dùng `success:false,error:"..."`. Backend không tự tăng applied version theo thời gian.
+1. Tải file audio/TTS từ `GET /api/device/assets/{asset_id}` khi file sẵn sàng; lưu cục bộ cho lịch offline.
+2. Lưu cấu hình bền vững. Chỉ phản hồi thành công khi các module liên quan thực sự sử dụng được cấu hình.
+3. `POST /api/device/config/ack` với `{"version":2,"success":true}`; lỗi dùng `success:false,error:"..."`. Backend không tự tăng applied version theo thời gian.
 
-`zones` luôn là `[]`, `reference` luôn là `{}` ở cả bản đọc và revision mới. Khi backend khởi động, camera còn cấu hình vùng được thêm revision rỗng một lần; thiết bị phải xóa vùng đã cache, áp dụng các phần cấu hình còn lại rồi ACK đúng phiên bản. Không tự xác nhận ACK khi chưa xóa vùng tại thiết bị. Revision cũ giữ nguyên trong DB để truy vết; thiết bị offline sẽ nhận bản mới sau khi nối lại.
+Thiết bị cũ cần bỏ dữ liệu vùng đã cache khi nhận `zones: []` và `reference: {}`; sau đó áp dụng các phần cấu hình còn lại và ACK đúng phiên bản. Backend chỉ thêm revision mới khi bản cấu hình mới nhất còn khóa cũ, không làm thay đổi revision lịch sử hoặc applied version. Không tự xác nhận ACK trước khi cấu hình đã được áp dụng. Thiết bị offline nhận tín hiệu xóa sau khi nối lại.
 
 ## 3. Sự kiện và bằng chứng
 

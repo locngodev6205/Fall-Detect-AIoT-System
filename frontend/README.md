@@ -13,7 +13,7 @@ Vite chạy ở **127.0.0.1:5188**, `strictPort: true`, proxy `/api` và `/ws` �
 
 `Landing.jsx` giữ nội dung giới thiệu và ảnh minh họa; `App.jsx` quản lý phiên/nhà/navigation. Các nhóm màn hình nằm trong `HomeScreens`, `EventScreens`, `AdminScreens`, `Reminders`, `Auth`. File/font/CSS gốc được giữ. `live.css` mở rộng bố cục màn hình đã nối API.
 
-Khoanh vùng đã tạm bỏ: không còn màn hình/nút thiết lập vùng, quyền sửa vùng hoặc nội dung giới thiệu tính năng này. Đường dẫn cũ `#/zones/...` hiển thị không tìm thấy trang.
+Khoanh vùng đã được gỡ khỏi hợp đồng sản phẩm: không có màn hình/nút thiết lập vùng, quyền sửa vùng, API hay nội dung giới thiệu tính năng này. Đường dẫn cũ `#/zones/...` hiển thị không tìm thấy trang.
 
 Chỉ dùng sessionStorage cho nhà đang chọn và đường dẫn quay lại sau đăng nhập. Session thật nằm trong cookie HttpOnly; CSRF lấy từ backend và giữ trong bộ nhớ. Không có tùy chọn tự đổi vai trò hoặc biến dữ liệu mẫu thành thiết bị online.
 

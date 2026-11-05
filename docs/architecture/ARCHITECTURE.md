@@ -1,30 +1,33 @@
 # KIẾN TRÚC HỆ THỐNG CAMERA GIÁM SÁT GIA ĐÌNH
 
+Trạng thái web mới nhất sau Phase 6: [IMPLEMENTATION_STATUS.md](../planning/IMPLEMENTATION_STATUS.md). Các mô tả theo mốc phía dưới cần đọc theo ngày, không thay thế checkpoint hiện hành.
+
 - **Dự án:** FALL-DETECT-AIOT-SYSTEM.
 - **Phiên bản:** 2.1 — ngày 29/10/2026.
-- **Tài liệu nghiệp vụ:** [PROJECT_SPECIFICATION.md](PROJECT_SPECIFICATION.md).
+- **Tài liệu nghiệp vụ:** [PROJECT_SPECIFICATION.md](../product/PROJECT_SPECIFICATION.md).
 - **Phạm vi:** Kiến trúc mục tiêu cho camera, cảnh báo an toàn, môi trường và hỗ trợ sinh hoạt. Phần hiện trạng bên dưới được đối chiếu mã nguồn; các phần còn lại là thiết kế cần triển khai, không phải xác nhận hệ thống đang hoạt động đầy đủ.
 
-**Cập nhật phạm vi 29/10/2026:** Tạm bỏ khoanh vùng và luật dựa trên vùng; định hướng camera servo bám một người. Panorama/ánh xạ vùng chỉ xem xét sau khi tracking ổn định. UI/API chỉnh vùng và quyền sửa vùng đã được gỡ. Backend giữ lịch sử và gửi revision vùng rỗng cho thiết bị; servo chưa được triển khai/kiểm chứng.
+**Cập nhật phạm vi 04/11/2026:** Khoanh vùng đã được gỡ khỏi hợp đồng sản phẩm/API/UI và không còn quyền hay luật nghiệp vụ dựa trên vùng. Hướng camera servo bám người vẫn là định hướng riêng, chưa được triển khai/kiểm chứng. Dữ liệu revision lịch sử được giữ; backend loại `zones`/`reference` khỏi cấu hình nghiệp vụ mới và chỉ gửi hai giá trị rỗng cho device API để firmware cũ xóa cache.
 
-Thiết kế dữ liệu cloud đích và kế hoạch chuyển đổi: [DATABASE_DESIGN_NEON.md](DATABASE_DESIGN_NEON.md). Backend Docker hiện dùng Neon PostgreSQL với adapter Psycopg 3; SQLite giữ để rollback/local. Media vẫn local, Cloudinary chưa tích hợp. Bằng chứng tại [NEON_INTEGRATION_REPORT.md](NEON_INTEGRATION_REPORT.md).
+Thiết kế dữ liệu cloud và trạng thái chuyển đổi: [DATABASE_DESIGN_NEON.md](DATABASE_DESIGN_NEON.md). Backend Docker dùng Neon PostgreSQL với adapter Psycopg 3; SQLite giữ cho local/rollback. Metadata/quota ở Neon; media mới dùng Cloudinary khi được cấu hình, còn asset legacy có thể tiếp tục đọc từ local. Bốn audio/TTS đủ điều kiện đã chuyển và được đối soát; bản gốc được giữ lại. Xem [NEON_SETUP.md](../setup/NEON_SETUP.md) và báo cáo hoàn tất Phase 2 (`docs/reports/PHASE_02_COMPLETION_REPORT.md`; báo cáo cục bộ, không nằm trong Git). Báo cáo Neon tích hợp ban đầu lưu trạng thái trước Cloudinary ở NEON_INTEGRATION_REPORT.md (`docs/reports/legacy/NEON_INTEGRATION_REPORT.md`; báo cáo cục bộ, không nằm trong Git).
 
 ## 1. HIỆN TRẠNG TRIỂN KHAI
 
 | Thành phần | Đã triển khai trong nguồn | Giới hạn kiểm chứng/tích hợp |
 | :--- | :--- | :--- |
-| [Backend nghiệp vụ](../backend/src/pgapi.py) | Auth/email/session/CSRF, nhà/phòng, quyền theo camera, lời mời, ghép nối, cấu hình phiên bản (vùng đã tạm bỏ), sự kiện và xử lý, telemetry, lịch/lệnh, file và audit | Chưa chứng minh tất cả trên phần cứng Pi/cảm biến/loa thật |
-| [Lưu trữ](../backend/src/pgdb.py) | Neon với transaction/FK/RLS, bốn pool theo quyền; metadata/queue trên PostgreSQL, file trên volume và backup SQLite | Legacy alerts chưa gắn sở hữu không được công khai qua API mới |
-| [Worker nghiệp vụ](../backend/src/pgservices.py) | SMTP retry, TTS tiếng Việt eSpeak NG, Telegram theo cấu hình, retention, luật môi trường hold/hysteresis | Telegram thực cần bot/người nhận; lịch offline cần scheduler tại thiết bị |
-| [Media](../backend/src/pgmedia.py) | Relay JPEG khoảng 5 FPS và audio một chiều có session/device auth, giới hạn kích thước/thời gian, thu hồi quyền | Cần thiết bị gửi JPEG hoặc giải mã/phát WebM/Ogg; chưa phải WebRTC/NVR |
-| [Frontend](../frontend/src/App.jsx) | Landing/font/CSS từ ZIP; các trang nghiệp vụ dùng API thật; phân biệt file sẵn sàng với thiết bị áp dụng/thực thi | Dữ liệu DEMO có nhãn, ảnh phòng là minh hoạ; không dùng timer giả làm phản hồi thiết bị |
-| [AI tại biên](../fall_detect/detect.py) | Pose/chuỗi TFLite, MQTT ngã/bất động; thêm credential và UUID trong payload | Luật bất động vẫn so sánh vector, chưa tiêu thụ vùng; mất pose có thể tạo vector zero. Không coi cảnh báo theo ngữ cảnh đã chạy đầu-cuối |
-| [Docker](../compose.yaml) | nginx/frontend, backend, MQTT và Mailpit; named volumes; web 8188, hộp thư 8125 | Không publish broker/backend; kết nối Pi LAN cần cấu hình truy cập an toàn riêng |
+| [Backend nghiệp vụ](../../backend/src/pgapi.py) | Auth/email/session/CSRF, nhà/phòng, quyền theo camera, lời mời, ghép nối, cấu hình phiên bản (vùng đã tạm bỏ), sự kiện và xử lý, telemetry, lịch/lệnh, file và audit | Chưa chứng minh tất cả trên phần cứng Pi/cảm biến/loa thật |
+| [Lưu trữ](../../backend/src/pgdb.py) | Neon với transaction/FK/RLS, bốn pool theo quyền; metadata/queue trên PostgreSQL, file trên volume và backup SQLite | Legacy alerts chưa gắn sở hữu không được công khai qua API mới |
+| [Worker nghiệp vụ](../../backend/src/pgservices.py) | SMTP retry, TTS tiếng Việt eSpeak NG, Telegram theo cấu hình, retention, luật môi trường hold/hysteresis | Telegram thực cần bot/người nhận; lịch offline cần scheduler tại thiết bị |
+| [Media](../../backend/src/pgmedia.py) | Relay JPEG khoảng 5 FPS và audio một chiều có session/device auth, giới hạn kích thước/thời gian, thu hồi quyền | Cần thiết bị gửi JPEG hoặc giải mã/phát WebM/Ogg; chưa phải WebRTC/NVR |
+| [Frontend](../../frontend/src/App.jsx) | Landing/font/CSS từ ZIP; các trang nghiệp vụ dùng API thật; phân biệt file sẵn sàng với thiết bị áp dụng/thực thi | Dữ liệu DEMO có nhãn, ảnh phòng là minh hoạ; không dùng timer giả làm phản hồi thiết bị |
+| [AI tại biên](../../fall_detect/detect.py) | Pose/chuỗi TFLite, MQTT ngã/bất động; thêm credential và UUID trong payload | Luật bất động vẫn so sánh vector, chưa tiêu thụ vùng; mất pose có thể tạo vector zero. Không coi cảnh báo theo ngữ cảnh đã chạy đầu-cuối |
+| [Docker](../../compose.yaml) | nginx/frontend, backend, MQTT và Mailpit; named volumes; web 8188, hộp thư 8125 | Không publish broker/backend; kết nối Pi LAN cần cấu hình truy cập an toàn riêng |
 
 Hợp đồng AI đang thấy trong nguồn là `(1, 30, 51)`, 17 khớp được chọn từ pose, sắp theo `SORTED_YOUR_KEYPOINT_NAMES`; mỗi khớp gồm x, y, visibility trước chuẩn hóa. Ngưỡng/mặc định nằm trong config và có thể bị env ghi đè. Đợt triển khai backend không thay mô hình, tiền xử lý, ngưỡng hoặc xác nhận chất lượng AI trên Pi.
 
 ```text
-Web AnNhà :8188 → nginx → FastAPI nghiệp vụ → Neon PostgreSQL + media local trên volume
+Web AnNhà :8188 → nginx → FastAPI nghiệp vụ → Neon PostgreSQL + Cloudinary
+                                                   └─ media legacy/originals trên volume local
                             ├─ MQTT gateway có device credential
                             ├─ SMTP → Mailpit :8125 (thử cục bộ)
                             ├─ Worker TTS / Telegram / retention
@@ -34,7 +37,17 @@ Thiết bị → /api/device/* và WebSocket media → backend
          ← cấu hình / file / lệnh; thiết bị phản hồi thực thi
 ```
 
-Đọc [README](../README.md) để chạy và [DEVICE_API.md](DEVICE_API.md) để tích hợp thiết bị. Vite phát triển dùng 5188, backend phát triển 8018, không dùng cổng 5173. Các phần tiếp theo vẫn mô tả kiến trúc mục tiêu; chỉ phần đã nêu ở đây được coi là hiện trạng nguồn.
+Đọc [README](../../README.md) để chạy và [DEVICE_API.md](../api/DEVICE_API.md) để tích hợp thiết bị. Vite phát triển dùng 5188, backend phát triển 8018, không dùng cổng 5173. Các phần tiếp theo vẫn mô tả kiến trúc mục tiêu; chỉ phần đã nêu ở đây được coi là hiện trạng nguồn.
+
+### Hiện trạng media sau Phase 2
+
+- Ảnh snapshot và ảnh bằng chứng sự kiện, WAV, MP3 và TTS đi qua backend. Backend kiểm tra session, quyền theo nhà/camera, MIME, kích thước và quota trước khi lưu metadata Neon; Cloudinary dùng resource type `image` cho JPEG/PNG và `video` cho audio theo hợp đồng Cloudinary.
+- Cloudinary delivery là `authenticated`; frontend không nhận API secret hay URL có chữ ký. Tải xuống đi qua backend proxy và hỗ trợ HTTP Range cho audio.
+- ID Cloudinary do backend tạo theo `annha/<environment>/<uuid>`. Cấu hình runtime đã kiểm tra là `development`, folder `Fall Detection`; không suy ra rằng một deployment production khác đã được cấu hình nếu chưa kiểm tra runtime của nó.
+- Asset legacy giữ provider metadata riêng và có thể tiếp tục đọc từ volume local. Migration copy/verify metadata, size, SHA-256 trước khi chuyển trạng thái; bản gốc không bị xoá trong Phase 2.
+- Quota theo nhà có `used_bytes` và `reserved_bytes`. Upload Cloudinary reserve trước, chuyển reservation sang usage khi hoàn tất; failed upload giữ staging để owner thử lại. Job cleanup chỉ xoá asset đủ điều kiện TTL, giữ audio đang được reminder hiện hành dùng và giữ event metadata sau khi ảnh hết hạn.
+- Maintenance chạy reconciliation theo lịch và báo asset Cloudinary thiếu/orphan trong audit/storage API; không tự xoá cloud orphan chỉ vì báo cáo reconciliation. Failed upload staging được dọn sau 7 ngày.
+- Neon dump và media originals cần được backup riêng. Diễn tập khôi phục Phase 2 đã restore metadata vào PostgreSQL 18 cô lập và so checksum local originals; branch recovery tạm thời không được xem là backup dài hạn.
 
 ## 2. NGUYÊN TẮC KIẾN TRÚC MỤC TIÊU
 
@@ -173,11 +186,11 @@ sequenceDiagram
     B-->>W: Cập nhật trạng thái đồng bộ
 ```
 
-- Không yêu cầu đa giác vùng trong cấu hình hiện tại. Các trường tương thích luôn là `zones: []`, `reference: {}` để xóa vùng đã cache; không áp dụng vùng vào luật giám sát.
+- Không yêu cầu đa giác vùng trong cấu hình hiện tại. Cấu hình nghiệp vụ mới và API dành cho chủ nhà không chứa `zones`/`reference`; riêng device API thêm `zones: []`, `reference: {}` làm tín hiệu tương thích để firmware cũ xóa cache. Không áp dụng vùng vào luật giám sát.
 - Cập nhật đồng thời được phát hiện bằng phiên bản nền; không âm thầm ghi đè chỉnh sửa của người khác.
 - Bản cấu hình lỗi giữ nguyên phiên bản hợp lệ trước đó. Thiết bị offline tiếp tục dùng bản cục bộ.
 - Sự kiện ghi phiên bản thực sự đang áp dụng, không gắn phiên bản mới chỉ vì backend đã lưu.
-- Khi khởi động, backend thêm revision mới nếu bản mới nhất còn vùng/ảnh tham chiếu, giữ nguyên lịch sử và applied version, ghi audit hệ thống; khởi động lại không thêm revision lặp. Thiết bị offline cần nối lại và áp dụng bản mới để xóa vùng cũ.
+- Khi khởi động, backend thêm revision cấu hình đã làm sạch nếu bản mới nhất còn khóa cũ `zones`/`reference`, kể cả giá trị rỗng; giữ nguyên lịch sử và applied version, ghi audit hệ thống; khởi động lại không thêm revision lặp. Thiết bị offline cần nối lại và ACK cấu hình mới để xác nhận đã áp dụng.
 - Khi triển khai tracking, bổ sung cấu hình giới hạn quay, tốc độ và mất dấu sau thiết kế phần cứng/giao thức; không giả định API hiện tại đã hỗ trợ servo.
 
 ### 6.3. Té ngã, bất động và vòng đời sự kiện
@@ -282,4 +295,4 @@ Bản tin cần có `schema_version`, `message_id`, `device_id`, thời gian ngu
 - Schema/topic/API chi tiết và kế hoạch chuyển đổi payload hiện tại.
 - Thời gian chờ cảnh báo, FPS, độ trễ, ngưỡng chất lượng AI và dung lượng/thời hạn lưu.
 
-Phần hiện trạng đã được cập nhật theo backend nghiệp vụ và giao diện dùng API thật; các mục tiêu edge và kiểm chứng phần cứng còn lại không được coi là đã hoàn thành. Kiểm chứng theo [các kịch bản nghiệm thu trong specification](PROJECT_SPECIFICATION.md#7-kịch-bản-nghiệm-thu-nghiệp-vụ), có phân biệt kiểm tra nguồn, mô phỏng và chạy thiết bị thật.
+Phần hiện trạng đã được cập nhật theo backend nghiệp vụ và giao diện dùng API thật; các mục tiêu edge và kiểm chứng phần cứng còn lại không được coi là đã hoàn thành. Kiểm chứng theo [các kịch bản nghiệm thu trong specification](../product/PROJECT_SPECIFICATION.md#7-kịch-bản-nghiệm-thu-nghiệp-vụ), có phân biệt kiểm tra nguồn, mô phỏng và chạy thiết bị thật.

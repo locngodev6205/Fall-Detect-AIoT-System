@@ -4,15 +4,15 @@ import { dateTime } from './api';
 import { usePagination } from './pagination';
 import { roomImage, connectionLabel } from './cameraState';
 export function Logo({ href = '#/' }) { return <a className="brand" href={href}><House weight="bold"/><span><strong>AnNhà</strong><small>Nhà an tâm, mình an lòng</small></span></a>; }
-export function Button({ children, kind = '', type = 'button', ...rest }) { return <button type={type} className={'button ' + kind} {...rest}>{children}</button>; }
+export const Button = React.forwardRef(function Button({ children, kind = '', type = 'button', ...rest }, ref) { return <button ref={ref} type={type} className={'button ' + kind} {...rest}>{children}</button>; });
 export function Badge({ children, tone = 'teal' }) { return <span className={'badge ' + tone}>{children}</span>; }
 export function Field({ label, children, hint, ...props }) { return <label className="field"><span>{label}</span>{children ? React.cloneElement(children, { 'aria-label': label }) : <input aria-label={label} {...props}/ >}{hint && <small>{hint}</small>}</label>; }
 export function Empty({ title, text, action, icon: Icon = House }) { return <div className="empty"><Icon size={40}/><h2>{title}</h2><p>{text}</p>{action}</div>; }
 export function Heading({ title, text, action, level = 1 }) { const Tag = level === 1 ? 'h1' : 'h2';return <div className="section-heading"><div><Tag>{title}</Tag>{text && <p>{text}</p>}</div>{action}</div>; }
-export function Modal({ title, children, onClose, wide = false }) {
+export function Modal({ title, children, onClose, wide = false, className = '', initialFocusRef }) {
   const ref = useRef();
   useEffect(() => {
-    const old = document.activeElement;ref.current?.focus();
+    const old = document.activeElement;(initialFocusRef?.current || ref.current)?.focus();
     function key(event) {
       if (event.key === 'Escape') onClose();
       if (event.key === 'Tab') {
@@ -25,7 +25,7 @@ export function Modal({ title, children, onClose, wide = false }) {
     document.addEventListener('keydown', key);
     return () => { document.removeEventListener('keydown', key);old?.focus(); };
   }, []);
-  return <div className="modal-backdrop"><section ref={ref} tabIndex={-1} className={'modal ' + (wide ? 'wide' : '')} role="dialog" aria-modal="true" aria-label={title}><header><h2>{title}</h2><button className="icon" onClick={onClose} aria-label="Đóng"><X/></button></header>{children}</section></div>;
+  return <div className="modal-backdrop"><section ref={ref} tabIndex={-1} className={'modal ' + (wide ? 'wide ' : '') + className} role="dialog" aria-modal="true" aria-label={title}><header><h2>{title}</h2><button className="icon" onClick={onClose} aria-label="Đóng"><X/></button></header>{children}</section></div>;
 }
 export function CameraThumbnail({ name, className = '' }) {
   return <img className={'room-thumbnail ' + className} src={roomImage(name)} alt={'Ảnh minh hoạ ' + name} loading="lazy"/>;

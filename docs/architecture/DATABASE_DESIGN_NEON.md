@@ -1,8 +1,8 @@
 # Thiết kế database và hướng dẫn triển khai AnNhà: Neon, Cloudinary, Docker
 
-Phiên bản 1.3 — 29/10/2026. Thiết kế theo [đặc tả hiện hành](PROJECT_SPECIFICATION.md). **Backend đã tích hợp Neon PostgreSQL, nhập dữ liệu SQLite và seed demo; media vẫn lưu local. Cloudinary chưa được nối vào runtime.** Xem [thiết lập/vận hành hiện tại](NEON_SETUP.md) và [bằng chứng kiểm thử](NEON_INTEGRATION_REPORT.md).
+Phiên bản 1.6 — cập nhật 04/11/2026. Thiết kế theo [đặc tả hiện hành](../product/PROJECT_SPECIFICATION.md). **Backend đã tích hợp Neon và Cloudinary server-side.** JPEG/PNG, WAV/MP3 và TTS đã upload/read/delete live; 4 local media đủ điều kiện đã chuyển và xác minh, giữ nguyên bản local. Phase 2 không cần DDL; không reset hoặc seed lại Neon. Restore rehearsal sang PostgreSQL 18 cô lập đạt; trạng thái branch recovery live chưa xác minh bằng Neon API. Xem [thiết lập/vận hành hiện tại](../setup/NEON_SETUP.md), báo cáo Phase 1 (`docs/reports/PHASE_01_IMPLEMENTATION_REPORT.md`; báo cáo cục bộ, không nằm trong Git), báo cáo triển khai Phase 2 (`docs/reports/PHASE_02_IMPLEMENTATION_REPORT.md`; báo cáo cục bộ, không nằm trong Git) và báo cáo hoàn tất Phase 2 (`docs/reports/PHASE_02_COMPLETION_REPORT.md`; báo cáo cục bộ, không nằm trong Git).
 
-**Ưu tiên hiện tại:** Neon và email/Telegram; Cloudinary để giai đoạn sau. Bắt đầu bằng [NEON_SETUP.md](NEON_SETUP.md); không cần Cloudinary credential để migrate/tích hợp Neon.
+**Trạng thái media:** schema hiện hành có metadata provider, checksum, version, resource/delivery type, quota reservation và durable upload/delete jobs. `MEDIA_STORAGE_PROVIDER=auto` chọn Cloudinary khi secret hợp lệ; mỗi media legacy vẫn đọc từ local bằng provider metadata. Backend dùng authenticated delivery và proxy kiểm quyền. 4 asset local đã chuyển; inventory app namespace thấy 4 Cloudinary assets, 0 orphan; 11 demo assets tiếp tục local. Dump/restore metadata + local originals đã diễn tập thành công trên clone cô lập. Tên/expiry recovery branch ghi trong tài liệu cũ chưa được xác minh live và không thay backup dài hạn.
 
 **Cách đọc:** mục 1–10 mô tả dữ liệu, bảo mật và chuyển đổi; mục 12 là Docker chạy thử; mục 13 hướng dẫn Neon; mục 14 hướng dẫn Cloudinary; mục 15 giải thích `.env.example` và lỗi thường gặp. Mục 16 ghi kết quả kiểm chứng cuối.
 
@@ -12,19 +12,20 @@ Phiên bản 1.3 — 29/10/2026. Thiết kế theo [đặc tả hiện hành](PR
 - **Cloudinary:** ảnh chụp, clip ngắn quanh sự kiện, file ghi âm và TTS; mọi media gia đình dùng chế độ bảo vệ. Không đặt video/base64 trong PostgreSQL.
 - **Thiết bị:** AI, cảnh báo tại chỗ, lịch/file đã đồng bộ, bộ đệm khi offline. Cloud DB không thay thế outbox cục bộ trên Pi.
 - **Backend:** xác thực và kiểm tra quyền; trung gian cấp quyền media, điều phối worker; frontend và Pi không nhận database URL hoặc Cloudinary secret.
-- Không có bảng khoanh vùng. `zones: []`/`reference: {}` chỉ là trường tương thích trong cấu hình. Tracking servo chưa triển khai; sau này thêm capability/cấu hình có phiên bản, không ghi vị trí servo theo từng frame vào DB mặc định.
+- Không có bảng hoặc hợp đồng nghiệp vụ khoanh vùng. Cấu hình nghiệp vụ mới không chứa `zones`/`reference`; device API chỉ gửi `zones: []`/`reference: {}` như tín hiệu tương thích để firmware cũ xóa cache. Tracking servo chưa triển khai; sau này thêm capability/cấu hình có phiên bản, không ghi vị trí servo theo từng frame vào DB mặc định.
 - Giữ email/mật khẩu/session đang dùng; chưa yêu cầu thay bằng Neon Auth hay dịch vụ đăng nhập khác.
 
 File triển khai:
 
 | File | Mục đích |
 |---|---|
-| [001_schema.sql](../backend/database/postgresql/001_schema.sql) | Bảng, kiểu dữ liệu, khoá ngoại, chỉ mục, ràng buộc và trigger |
-| [002_security.sql](../backend/database/postgresql/002_security.sql) | Bốn nhóm quyền, RLS và giới hạn thao tác |
-| [003_verify.sql](../backend/database/postgresql/003_verify.sql) | 46 kiểm tra nền, kết thúc bằng ROLLBACK |
-| [005_email_notifications.sql](../backend/database/postgresql/005_email_notifications.sql) | Nâng cấp cảnh báo email và vòng đời địa chỉ nhận |
-| [006_verify_email.sql](../backend/database/postgresql/006_verify_email.sql) | 27 kiểm tra email bổ sung, kết thúc bằng ROLLBACK |
-| [README database](../backend/database/postgresql/README.md) | Cách áp dụng và chạy kiểm tra |
+| [001_schema.sql](../../backend/database/postgresql/001_schema.sql) | Bảng, kiểu dữ liệu, khoá ngoại, chỉ mục, ràng buộc và trigger |
+| [002_security.sql](../../backend/database/postgresql/002_security.sql) | Bốn nhóm quyền, RLS và giới hạn thao tác |
+| [003_verify.sql](../../backend/database/postgresql/003_verify.sql) | 46 kiểm tra nền, kết thúc bằng ROLLBACK |
+| [009_schedule_tts_permissions.sql](../../backend/database/postgresql/009_schedule_tts_permissions.sql) | Điều chỉnh RLS để quyền lịch tạo TTS, không cấp quyền upload/điều khiển audio |
+| [005_email_notifications.sql](../../backend/database/postgresql/005_email_notifications.sql) | Nâng cấp cảnh báo email và vòng đời địa chỉ nhận |
+| [006_verify_email.sql](../../backend/database/postgresql/006_verify_email.sql) | 27 kiểm tra email bổ sung, kết thúc bằng ROLLBACK |
+| [README database](../../backend/database/postgresql/README.md) | Cách áp dụng và chạy kiểm tra |
 
 Không chạy DDL này trực tiếp lên database đang có bảng cùng tên. Đây không phải bản dịch từng câu SQL SQLite và không có seed xoá dữ liệu.
 
@@ -76,9 +77,10 @@ erDiagram
 | `email_tokens` | Hash token xác minh/reset, user, phiên bản địa chỉ email, hạn và thời điểm đã dùng; đổi email vô hiệu token/phiên cũ |
 | `rate_limits` | Hash khoá giới hạn, số lần và cửa sổ; không lưu IP/email thô chỉ để rate limit |
 | `security_events` | Nhật ký xác thực toàn hệ thống: đăng nhập/reset/thu hồi thành công hoặc bị từ chối, user nếu có, hash chủ thể và request ID; dùng cả khi chưa có nhà, auth không được sửa/xoá |
-| `home_memberships` | User–nhà, owner/caregiver/viewer, người cấp, thời điểm thu hồi và phiên bản quyền; mỗi nhà có đúng một owner còn hiệu lực |
+| `home_memberships` | User–nhà, owner/caregiver/viewer/member, người cấp, thời điểm thu hồi và phiên bản quyền; mỗi nhà có đúng một owner còn hiệu lực |
 | `camera_grants` | Phạm vi từng camera và quyền xem/xử lý sự kiện/phát loa/sửa lịch; viewer không nhận quyền điều khiển dù dữ liệu cũ có cờ true |
-| `invitations` | Nhà, email đích, vai trò, hash token, người mời/chấp nhận, hạn, trạng thái; một lời mời pending cho mỗi email/nhà |
+| `invitation_codes` | MVP: hash SHA-256 mã ngẫu nhiên 80 bit, nhà/người tạo, hạn 7 ngày, used_by/used_at/revoked_at; member/view-only, một lần; chỉ auth control plane truy cập qua API |
+| `invitations` | Legacy ngoài MVP: nhà, email đích, vai trò, hash token, người mời/chấp nhận, hạn, trạng thái; một lời mời pending cho mỗi email/nhà |
 | `invitation_camera_grants` | Phạm vi và quyền dự kiến của lời mời; camera phải cùng nhà |
 | `device_registry` | Thiết bị vật lý, serial/model, ngừng sử dụng; không mang lịch sử của riêng một chủ hộ |
 | `device_credentials` | Hash token thiết bị, thiết bị vật lý, camera triển khai, hạn/thu hồi; không trả token cho frontend |
@@ -175,7 +177,7 @@ Neon pooler dùng transaction pooling; không dựa vào SET/session state sốn
 
 ### 5.3. Các kiểm tra vẫn thuộc backend
 
-DDL chặn cấu trúc/quyền dữ liệu. Adapter `pg*` hiện triển khai các bước dưới đây; các phần Cloudinary/receipt được đánh dấu là giai đoạn sau:
+Đây là checklist bảo mật từ bản thiết kế ban đầu. Adapter `pg*` hiện triển khai các bước dưới đây; tích hợp lưu trữ Cloudinary được hoàn thành trong Phase 2, còn receipt từ nhà cung cấp email/thông báo là phần mở rộng riêng:
 
 - Hash mật khẩu bằng hàm chuyên dụng có salt/chi phí; giữ tương thích PBKDF2 hiện có, có thể nâng Argon2id khi đăng nhập thành công. Không SHA-256 trực tiếp mật khẩu; SHA-256 trong schema chỉ dành cho token ngẫu nhiên entropy cao.
 - Cookie HttpOnly/Secure/SameSite, HTTPS, kiểm tra Origin và CSRF; xác minh email, hạn session, `auth_version`, thu hồi sau reset/logout. Hash CSRF khác SQLite cũ: phát lại raw CSRF đã ký hoặc xoay raw token và cập nhật hash ở `/auth/me`; không cố giải hash để trả lại.
@@ -205,7 +207,7 @@ Luồng đề xuất ban đầu: thiết bị/browser → backend → Cloudinary
 
 1. Xác thực người/thiết bị; suy ra nhà/camera. Với bằng chứng, xác nhận event cùng camera. Với audio, kiểm tra quyền phát loa.
 2. Trong transaction: giữ chỗ dung lượng, tạo `media_assets` uploading/processing bằng `upload_key` ổn định, ghi job/outbox khi cần. COMMIT trước gọi mạng.
-3. Kiểm tra bytes/MIME/giới hạn trong lúc nhận; server quyết định public ID ngẫu nhiên, `overwrite=false`, type và các tham số upload, không dùng preset unsigned cho media gia đình. [Cloudinary upload authentication](https://cloudinary.com/documentation/upload_images).
+3. Kiểm tra bytes/MIME/giới hạn trong lúc nhận; backend tạo public ID từ UUID nội bộ và environment (`annha/<environment>/<uuid>`), đặt `overwrite=true` để retry cùng một media ID có tính idempotent; namespace UUID do server cấp không lấy từ tên người dùng. Delivery là `authenticated`, không dùng preset public/unsigned cho media gia đình. [Cloudinary upload authentication](https://cloudinary.com/documentation/upload_images).
 4. Sau upload, xác minh kết quả phía server. Trong transaction khác: khoá asset/storage, chuyển reserved sang used, ghi metadata, đặt ready. Retry cùng upload key trả cùng asset.
 5. Webhook phải xác minh chữ ký/raw body và timestamp bằng SDK; khử trùng theo asset/version/action trong queue. Không nhận JSON của browser làm bằng chứng upload thành công. [Cloudinary notification signatures](https://cloudinary.com/documentation/signatures).
 6. Nếu upload thành công nhưng DB thất bại, job đối soát kiểm tra public ID/asset ID xác định trước để hoàn tất hoặc xoá file mồ côi. Upload treo cần đối soát trước khi giải phóng reservation, tránh release dung lượng trong khi file cloud đã tồn tại.
@@ -243,7 +245,7 @@ Không có hàng trả về thì từ chối upload. `$2` phải là số dươn
 | Worker jobs | Claim hàng đến hạn bằng `FOR UPDATE SKIP LOCKED`, ghi lease rồi COMMIT; gọi cloud/email ngoài giao dịch. Reclaim lease hết hạn, retry có backoff và giới hạn |
 | Quota | Giữ chỗ và ghi asset nguyên tử; chuyển reservation/usage và cập nhật asset nguyên tử; định kỳ đối soát totals với Cloudinary, tránh quota âm/rò reservation |
 
-Các cột/unique/check/RLS và orchestration PostgreSQL nằm trong DDL cùng các module `pg*`. Worker đang chạy cho mail, TTS, delivery, thiết bị offline và retention. Phần Cloudinary và provider receipt còn chờ tích hợp.
+Các cột/unique/check/RLS và orchestration PostgreSQL nằm trong DDL cùng các module `pg*`. Worker đang chạy cho mail, TTS, delivery, thiết bị offline, retention và media Cloudinary. Receipt xác nhận từ nhà cung cấp email/thông báo vẫn là phần mở rộng; xem trạng thái kiểm chứng mới nhất ở báo cáo Phase 2.
 
 ## 8. Lưu trữ, hiệu năng và vận hành
 
@@ -275,7 +277,7 @@ Neon cấp `neon_superuser` cho role tạo qua Console/API/CLI; runtime nên t�
 Quy trình đề xuất:
 
 1. Tạo database/branch mới dành cho AnNhà; chọn PostgreSQL tương thích 16+ và bật kết nối TLS.
-2. Dùng direct migration connection áp dụng `001_schema.sql`, `002_security.sql`, rồi `005_email_notifications.sql`. Bốn tên group phải chưa tồn tại; không tự tái sử dụng role cũ chưa kiểm tra quyền.
+2. Với database mới, dùng direct migration connection và migration runner để áp dụng theo thứ tự. Với database hiện hữu, chỉ áp migration chưa có trong ledger; không chạy lại DDL đầu kỳ. Migration 009 thay đổi riêng policy RLS cho TTS.
 3. Tạo bốn login riêng bằng SQL, cấp đúng group; password đặt qua cơ chế quản lý secret, không commit vào SQL. Ví dụ một login:
 
 ```sql
@@ -315,7 +317,7 @@ Cutover: snapshot/backup → dừng ghi ngắn → import có mapping/đếm/che
 
 Thiết kế hiện có **40 bảng: 25 nghiệp vụ và 15 nội bộ**, sau migration email 005. **73 kiểm tra SQL/bảo mật (46 nền + 27 email)** đã chạy trên PostgreSQL 16.14 Docker lab bằng fixture rollback, không dùng dữ liệu dự án. Bản nền trước đây cũng đã được kiểm tra trên cluster tạm trong `/tmp`. Kiểm tra bao gồm cách ly nhà/camera, quyền viewer/caregiver/owner, thu hồi membership, bí mật token, device scope, chống trùng, liên kết media khác nhà, quota, revision/audit và cấu hình vùng bị loại bỏ.
 
-Đã kiểm chứng schema và API trên Neon, driver/pool trong Docker, import snapshot, quyền runtime, thu hồi socket, media local, email Mailpit và TTS. Chưa kiểm thử Cloudinary, camera/Pi thật, tải đồng thời quy mô lớn và restore diễn tập. Không suy từ kiểm thử tổng hợp sang hiệu năng phần cứng thật.
+Cloudinary đã được xác minh bằng JPEG/PNG, WAV, MP3 và TTS WAV qua backend; test xác nhận cross-home denial, HTTP Range 206, quota reservation/release, retry sau provider failure và delete. Migration 4/4 media local đủ điều kiện đạt; reconciliation xác nhận 4 provider assets không thiếu/checksum mismatch, 11 local assets không thiếu/checksum mismatch, không file local thừa chưa ánh xạ. Inventory Admin API giới hạn prefix `annha/development/`: 4 tài nguyên, 0 orphan. Restore rehearsal vào PostgreSQL 18 cô lập đạt: 41 bảng, 15 local originals/654,167 bytes khớp checksum, 0 mapping Cloudinary thiếu, 0 reminder reference treo, RLS bật và migration 009 checksum khớp. Browser smoke chưa hoàn tất; clip/video/Pi/servo thuộc teammate và không phải điều kiện Phase 2.
 
 
 ## 12. Docker có sẵn và cách chạy trên máy của bạn
@@ -478,7 +480,7 @@ Không cấp `neon_superuser` hoặc group migration cho bốn login này. Role 
 
 Lấy pooled URL riêng cho mỗi login và chuẩn bị `DATABASE_URL_APP`, `DATABASE_URL_AUTH`, `DATABASE_URL_DEVICE`, `DATABASE_URL_WORKER` trong secret manager/env của backend PostgreSQL. Password trong URL cần percent-encode. Migration URL dùng direct host và không được đưa vào runtime.
 
-**Triển khai hiện tại:** công cụ `deploy_postgres.py` tạo bốn LOGIN NOINHERIT có quyền tối thiểu và xuất URL riêng; backend đã đọc pool/timeouts và context LOCAL. Làm theo [NEON_SETUP.md](NEON_SETUP.md) để dùng migration ledger, không chạy lại bootstrap thủ công trên database đã triển khai.
+**Triển khai hiện tại:** công cụ `deploy_postgres.py` tạo bốn LOGIN NOINHERIT có quyền tối thiểu và xuất URL riêng; backend đã đọc pool/timeouts và context LOCAL. Làm theo [NEON_SETUP.md](../setup/NEON_SETUP.md) để dùng migration ledger, không chạy lại bootstrap thủ công trên database đã triển khai.
 
 ## 14. Setup và liên kết Cloudinary
 
@@ -523,31 +525,30 @@ docker compose -f compose.database.yaml run --rm --no-deps cloudinary-check --ch
 
 Danh sách định dạng preset: JPEG/PNG, MP4/WebM, MP3/WAV/Ogg. Các ảnh/thumbnail/clip cũ đã public không tự trở thành private khi tạo preset; phải xử lý riêng trước khi dùng dữ liệu thật.
 
-### 14.3. Cách backend sẽ liên kết file với database
+### 14.3. Cách backend liên kết file với database
 
-Luồng tích hợp cần thực hiện khi port media adapter:
+Backend hiện dùng `backend/src/media_storage.py` làm storage abstraction và `backend/src/pgservices.py` làm lớp delivery/lifecycle:
 
 ```text
 Pi hoặc browser
   → endpoint upload backend có xác thực
   → kiểm tra home/camera/event, MIME, size và quota
   → tạo media_assets + reservation
-  → upload Cloudinary với preset, type=authenticated,
-     public_id ngẫu nhiên, overwrite=false
+  → upload ký phía server, type=authenticated,
+     public_id từ UUID nội bộ và environment prefix
   → xác minh phản hồi, cập nhật provider identifiers + ready
   → client nhận ID/API media nội bộ, không nhận API secret
 ```
 
-Metadata phải gồm cloud name → `provider_environment`, asset ID, public ID, resource type, delivery type, version, bytes và MIME. Audio dùng resource type video. Request xem ảnh/video/audio được kiểm tra quyền và proxy theo mục 6; không đưa URL công khai vĩnh viễn vào DB/UI.
+Metadata lưu provider environment, asset ID, public ID, resource type, delivery type, version, bytes, MIME và SHA-256. Audio dùng resource type video. API kiểm tra quyền trước khi proxy ảnh/video/audio và chuyển tiếp Range; signed provider URL chỉ dùng nội bộ backend, không trả cho client. Upload không cần preset public. Queue ghi trạng thái upload trước network call, gọi Cloudinary ngoài transaction, rồi mới chuyển `ready` và chốt quota; retry dùng cùng media UUID/public ID để không nhân đôi asset.
 
 Trước production phải thử: người ngoài nhà không xem được file dù biết ID; camera khác không lấy được audio; user bị thu hồi không gửi Range mới; chữ ký biến đổi không mở quyền public; upload lỗi không trừ sai quota; delete thất bại không ghi đã xoá. URL đã ký không mặc định có TTL. [Cloudinary media security](https://cloudinary.com/documentation/control_access_to_media).
 
-### 14.4. Webhook, TTS và xoá media
+### 14.4. Worker, TTS và xoá media
 
-- Chuẩn bị URL HTTPS của backend cho thông báo upload/processing; `CLOUDINARY_WEBHOOK_URL` trong mẫu env là biến dự kiến. **Backend hiện chưa có route webhook Cloudinary**, vì vậy chưa đăng ký một URL giả rồi coi đã hoạt động.
-- Khi bổ sung route, xác minh chữ ký/timestamp bằng SDK trên raw body, khử trùng và đối chiếu asset nội bộ; không tin callback từ browser. [Cloudinary signatures](https://cloudinary.com/documentation/signatures).
-- TTS được tạo xong mới upload như audio. Pi tải file đã được cấp quyền để chạy lịch offline, không giữ Cloudinary API secret.
-- Worker retention/xoá gọi API với đúng resource/delivery type, invalidate CDN và chỉ giảm quota sau xác nhận; giữ sự kiện khi file hết hạn. Thiết lập backup/cloud retention riêng, vì backup Neon không chứa media.
+- Hiện chưa dùng webhook Cloudinary; trạng thái upload được quyết toán bởi durable job đồng bộ phía server. Nếu thêm callback sau này, phải xác minh chữ ký và timestamp trên raw body rồi khử trùng/đối chiếu asset; không tin callback từ browser. [Cloudinary signatures](https://cloudinary.com/documentation/signatures).
+- TTS được tạo xong rồi upload như audio; worker dùng cùng metadata/quota model. Pi chỉ nhận API media đã cấp quyền, không giữ Cloudinary API secret.
+- Worker xoá đúng resource/delivery type, invalidate CDN và chỉ giải phóng quota sau xác nhận; giữ event history khi media hết hạn. Migration local giữ file gốc đến khi chủ động xóa; đối soát không tự xóa orphan.
 
 ## 15. `.env.example` và xử lý lỗi
 
@@ -562,7 +563,7 @@ Trước production phải thử: người ngoài nhà không xem được file 
 | `NEON_SERVICE_FILE`, `NEON_PGPASS_FILE`, `CLOUDINARY_CONFIG_FILE` | Đường dẫn secret file cho `compose.database.yaml`, có thể đặt ngoài repo |
 | `DATABASE_BACKEND`, `DATABASE_URL_APP/AUTH/DEVICE/WORKER`, pool/timeouts | Có hiệu lực trong adapter PostgreSQL; owner URL chỉ cho công cụ triển khai |
 | `DATA_ENCRYPTION_KEY*`, `SESSION_CSRF_KEY` | Bắt buộc cho PostgreSQL; mã hoá secret queue/Telegram và bảo vệ CSRF |
-| `CLOUDINARY_*` | Dự kiến cho media cloud; checker dùng file secret riêng |
+| `CLOUDINARY_*` | Runtime đọc secret file riêng; `MEDIA_STORAGE_PROVIDER` điều khiển `auto/local/cloudinary`; API secret không chuyển vào frontend |
 
 Root `.env.example` dùng mặc định Docker. `backend/.env.example` dùng khi chạy standalone **từ repository root**, MQTT tắt mặc định và đường dẫn lưu trữ nằm tại `backend/data`. Backend không tự đọc file này; đưa qua process manager/`uvicorn --env-file` khi phát triển.
 
@@ -580,7 +581,7 @@ Không commit file `.env`, `.secrets`, DB URL, bot token hay API secret. Sau khi
 | Cloudinary validate thành công nhưng ping thất bại | Validate không kiểm tra credential; đối chiếu đúng cloud/environment/API key/quyền |
 | Cloudinary 401/403 | Kiểm tra credential hoặc quyền Admin API; checker chỉ in HTTP code, không log secret/body |
 | Preset unsigned/public | Dừng dùng cho media gia đình; kiểm tra cấu hình trong Console hoặc tạo preset tên khác rồi kiểm tra lại |
-| Điền URL/preset nhưng web vẫn lưu file local | Đúng với media hiện tại: Neon đã nối nhưng Cloudinary chưa tích hợp; đọc mục 14.3 |
+| Cloudinary trả 403 khi upload | Kiểm tra credential/quyền `create/upload` và cấu hình API key; backend che lỗi provider cụ thể, còn job/reservation được retry/release theo trạng thái. Recheck live bằng smoke test trước khi chạy migration |
 | DB lab healthy nhưng không kết nối được localhost:5432 | Lab không publish cổng; dùng compose exec/tool trong mạng riêng |
 | Đổi password file lab rồi client không đăng nhập | File mới không tự ALTER ROLE đã init; đồng bộ mật khẩu qua console quản trị |
 
@@ -596,7 +597,7 @@ Không commit file `.env`, `.secrets`, DB URL, bot token hay API secret. Sau khi
 - Script prepare chạy lại giữ nguyên nội dung `.env` và secret hiện hữu; `.secrets/` được gitignore và không vào build context.
 - Frontend/backend đã rebuild và chạy healthy cùng MQTT/Mailpit, giữ volume SQLite/media. Web `http://localhost:8188`, Mailpit `http://localhost:8125`.
 
-Phần kiểm chứng local phía trên ghi lại giai đoạn thiết kế. Sau đó Neon đã được cung cấp và tích hợp; kết quả mới tại [NEON_INTEGRATION_REPORT.md](NEON_INTEGRATION_REPORT.md). Cloudinary chưa tích hợp runtime; không suy kết quả checker thành upload/delivery cloud thành công.
+Phần Docker phía trên ghi mốc thiết kế ban đầu. Neon đã được cung cấp và tích hợp; Cloudinary hiện đã upload/read/delete thật và migration local-to-cloud 4/4 hoàn tất. Neon migration ledger không đổi trong Phase 2. Một branch recovery đã được tạo trong lần migration trước, nhưng trạng thái tồn tại/expiry hiện chưa xác minh live. Kết quả và giới hạn còn lại ở báo cáo hoàn tất Phase 2 (`docs/reports/PHASE_02_COMPLETION_REPORT.md`; báo cáo cục bộ, không nằm trong Git).
 
 
 ## 17. Mở rộng cảnh báo email — 005
@@ -611,7 +612,7 @@ Phần kiểm chứng local phía trên ghi lại giai đoạn thiết kế. Sau
 - Worker sẽ giảm trạng thái theo thời gian nguồn/loại receipt, không để webhook trễ tự ghi đè complaint/hard bounce thành delivered. Hard bounce/complaint: đặt suppressed + disabled cho kênh, ngừng retry; SMTP thuần chưa có receipt thì giữ accepted/unknown. Xử lý này thuộc adapter/worker cần tích hợp, không tự chạy chỉ do INSERT receipt.
 - Email xác minh/reset/lời mời vẫn qua `email_tokens`/`job_queue(kind=email)` và SMTP, độc lập với tuỳ chọn cảnh báo. `EMAIL_ALERTS_ENABLED=false` không được tắt mail xác minh tài khoản.
 
-Bản 39 bảng cũ nâng cấp một lần bằng `db-inspect upgrade-email`; bootstrap mới đã bao gồm 005. Cloudinary không phải điều kiện tiên quyết: `media_assets.provider='local'` được giữ trong đợt tích hợp Neon sắp tới.
+Bản 39 bảng cũ nâng cấp một lần bằng `db-inspect upgrade-email`; bootstrap mới đã bao gồm 005. Ghi chú Cloudinary không phải điều kiện tiên quyết là trạng thái lịch sử trước Phase 2. Hiện tại media local cũ vẫn được giữ theo `media_assets.provider='local'`; media đủ điều kiện có thể được chuyển theo runbook ở mục 14.
 
 
 ## 18. Ánh xạ runtime đã thực hiện
