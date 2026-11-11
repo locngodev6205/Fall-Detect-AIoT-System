@@ -60,9 +60,23 @@ def reminder_public(row):
     return result
 
 
+DEFAULT_SMART_MODES = {
+    'fall_detection': True,
+    'servo_tracking': True,
+    'night_mode_enabled': True,
+    'night_start': '22:00',
+    'night_end': '06:00',
+}
+
+
 def current_config_payload(payload):
     # New business/API contract has no zone configuration; historical revisions are untouched.
-    return {key:value for key,value in payload.items() if key not in ('zones','reference')}
+    cleaned = {key:value for key,value in payload.items() if key not in ('zones','reference')}
+    smart_modes = dict(DEFAULT_SMART_MODES)
+    if isinstance(cleaned.get('smart_modes'), dict):
+        smart_modes.update(cleaned['smart_modes'])
+    cleaned['smart_modes'] = smart_modes
+    return cleaned
 
 
 def device_config_payload(payload):
@@ -83,10 +97,12 @@ def retire_zone_configs():
                 db.audit(conn,camera['home_id'],'system','zones.retire',camera['id'])
 
 
-def revision(conn, camera_id):
+def revision(conn, camera_id, extra_patch=None):
     camera=conn.execute('SELECT * FROM cameras WHERE id=?',(camera_id,)).fetchone()
     previous=conn.execute('SELECT payload FROM configurations WHERE camera_id=? ORDER BY version DESC LIMIT 1',(camera_id,)).fetchone()
     payload=current_config_payload(json.loads(previous['payload']) if previous else {})
+    if extra_patch:
+        payload.update(extra_patch)
     version=camera['desired_version']+1
     payload.update(version=version,camera_id=camera_id)
     payload['reminders']=[reminder_public(r) for r in conn.execute('SELECT * FROM reminders WHERE camera_id=?',(camera_id,))]
@@ -126,6 +142,29 @@ def provision_device(name):
         conn.execute('INSERT INTO cameras(id,name,token_hash,pair_hash,pair_expires) VALUES(?,?,?,?,?)',
                      (device_id,name,digest(token),digest(code),time.time()+1800))
     return {'device_id':device_id,'device_token':token,'pairing_code':code,'expires_in_seconds':1800}
+
+
+def refresh_device(device_id, *, rotate_token):
+    with db.connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        camera = conn.execute('SELECT * FROM cameras WHERE id=?', (device_id,)).fetchone()
+        if not camera:
+            raise ValueError('Không tìm thấy thiết bị.')
+        if not camera['claimed'] and camera['home_id']:
+            raise ValueError('Thiết bị đã được gỡ. Hãy đăng ký thiết bị mới.')
+
+        if rotate_token:
+            token = secrets.token_urlsafe(40)
+            conn.execute('UPDATE cameras SET token_hash=?,last_seen=NULL WHERE id=?', (digest(token), device_id))
+            if camera['claimed']:
+                db.audit(conn, camera['home_id'], 'system', 'camera.rotate_token', device_id)
+            return {'device_id':device_id,'device_token':token}
+
+        if camera['claimed']:
+            raise ValueError('Thiết bị đã ghép nối. Dùng --rotate-token nếu cần đổi token.')
+        code = secrets.token_urlsafe(16)
+        conn.execute('UPDATE cameras SET pair_hash=?,pair_expires=? WHERE id=?', (digest(code), time.time()+1800, device_id))
+        return {'device_id':device_id,'pairing_code':code,'expires_in_seconds':1800}
 
 
 def ingest_event(camera, payload):

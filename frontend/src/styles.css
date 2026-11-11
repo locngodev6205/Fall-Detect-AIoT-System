@@ -12,7 +12,7 @@
 
 @media(min-width:1251px){.greeting h1{font-size:36px}.sidebar nav>a{font-size:15px}.room-row strong{font-size:15px}.room-row small{font-size:12px}.room-row>img{width:40%;max-width:146px}.summary{font-size:13px}.overview-bottom h3{font-size:15px}.metrics small{font-size:12px}}
 @media(min-width:1251px){.sidebar nav>a{font-size:14px;padding-left:13px;padding-right:8px;gap:13px;white-space:nowrap}.overview-cameras .room-row>img{height:72px;aspect-ratio:auto}.overview-cameras>.camera-photo{height:100%;aspect-ratio:auto;min-height:420px}}
-@media(max-width:760px){.overview-cameras>.camera-photo{height:auto;aspect-ratio:1.37;min-height:0}}
+@media(max-width:760px){.overview-cameras>.camera-photo{height:auto;aspect-ratio:4/3;min-height:0}}
 @media(min-width:1251px){.workspace{padding-top:25px}.greeting{margin-bottom:22px}.alert-banner{padding-top:17px;padding-bottom:17px;margin-bottom:20px}.section-heading{margin-top:20px}}
 @media(max-width:760px){.action-panel:has(.button){position:fixed;bottom:72px;left:0;right:0;z-index:66;border-radius:14px 14px 0 0;display:flex;flex-wrap:wrap;gap:8px;padding:12px;box-shadow:0 -6px 24px #183c3512}.action-panel:has(.button)>h2,.action-panel:has(.button)>p,.action-panel:has(.button)>hr{display:none}.action-panel .button{width:auto;flex:1;font-size:11px;margin:0;padding:10px;min-width:100px}.action-panel .notice{margin:0;padding:9px;font-size:11px;width:100%}.detail-grid:has(.action-panel){padding-bottom:130px}}
 

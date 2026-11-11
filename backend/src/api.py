@@ -9,6 +9,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse
+from . import device_pairing
 from . import db, models as m, services as svc
 from .security import COOKIE, SESSION_SECONDS, active_rights, camera_access, device, digest, effective_camera_permissions, membership, password_hash, password_matches, public_user, throttle, user, verification_code_digest, reset_code_digest
 
@@ -234,6 +235,11 @@ def cameras(home_id:str,current:Current):
     with db.connect() as conn: return svc.visible_cameras(conn,home_id,current['id'])
 
 
+@router.post('/device/pairing-ticket')
+def pairing_ticket(request: Request):
+    return device_pairing.issue_ticket(request.headers.get('authorization', ''))
+
+
 @router.post('/homes/{home_id}/cameras/claim',status_code=201)
 def claim(home_id:str,payload:m.Claim,current:Current):
     with db.connect() as conn:
@@ -241,10 +247,26 @@ def claim(home_id:str,payload:m.Claim,current:Current):
         throttle('claim:'+current['id'],10,900)
         # Single transaction prevents two accounts from claiming the same code.
         conn.execute('BEGIN IMMEDIATE')
-        camera=conn.execute('SELECT * FROM cameras WHERE pair_hash=? AND pair_expires>? AND claimed=0',(digest(payload.code),time.time())).fetchone()
+        ticket = device_pairing.read_ticket(payload.code)
+        if ticket:
+            device_id, token_hash = ticket
+            conn.execute(
+                'INSERT INTO cameras(id,name,token_hash) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING',
+                (device_id, payload.name, token_hash.hex()),
+            )
+            camera = conn.execute(
+                'SELECT * FROM cameras WHERE id=? AND token_hash=? AND (claimed=1 OR home_id IS NULL)',
+                (device_id, token_hash.hex()),
+            ).fetchone()
+        else:
+            camera=conn.execute('SELECT * FROM cameras WHERE pair_hash=? AND pair_expires>?',(digest(payload.code),time.time())).fetchone()
         if not camera: raise HTTPException(400,'Mã ghép nối sai, hết hạn hoặc đã được sử dụng.')
+        if camera['claimed']:
+            if (camera['home_id'], camera['room_id'], camera['name']) == (home_id, payload.room_id, payload.name):
+                return svc.camera_public(camera)
+            raise HTTPException(400,'Mã ghép nối sai, hết hạn hoặc đã được sử dụng.')
         if not conn.execute('SELECT 1 FROM rooms WHERE id=? AND home_id=?',(payload.room_id,home_id)).fetchone(): raise HTTPException(422,'Phòng không thuộc nhà.')
-        conn.execute('UPDATE cameras SET home_id=?,room_id=?,name=?,claimed=1,pair_hash=NULL,pair_expires=NULL WHERE id=?',(home_id,payload.room_id,payload.name,camera['id']))
+        conn.execute('UPDATE cameras SET home_id=?,room_id=?,name=?,claimed=1 WHERE id=?',(home_id,payload.room_id,payload.name,camera['id']))
         svc.revision(conn,camera['id'])
         db.audit(conn,home_id,current['id'],'camera.claim',camera['id'])
         return svc.camera_public(conn.execute('SELECT * FROM cameras WHERE id=?',(camera['id'],)).fetchone())
@@ -382,6 +404,25 @@ def config(camera_id:str,current:Current):
         return {'desired_version':camera['desired_version'],'applied_version':camera['applied_version'],'error':camera['config_error'],'payload':svc.current_config_payload(json.loads(row['payload']) if row else {})}
 
 
+@router.get('/cameras/{camera_id}/smart-modes')
+def get_smart_modes(camera_id:str,current:Current):
+    with db.connect() as conn:
+        camera=camera_access(conn,camera_id,current['id'])
+        row=conn.execute('SELECT * FROM configurations WHERE camera_id=? ORDER BY version DESC LIMIT 1',(camera_id,)).fetchone()
+        payload=svc.current_config_payload(json.loads(row['payload']) if row else {})
+        return {'camera_id':camera_id,'desired_version':camera['desired_version'],'applied_version':camera['applied_version'],'smart_modes':payload['smart_modes']}
+
+
+@router.put('/cameras/{camera_id}/smart-modes')
+def put_smart_modes(camera_id:str,payload:m.SmartModes,current:Current):
+    with db.connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        camera=camera_access(conn,camera_id,current['id'],'schedules')
+        updated=svc.revision(conn,camera_id,{'smart_modes':payload.model_dump()})
+        db.audit(conn,camera['home_id'],current['id'],'camera.smart_modes',camera_id)
+        return {'camera_id':camera_id,'desired_version':updated['version'],'applied_version':camera['applied_version'],'smart_modes':updated['smart_modes']}
+
+
 @router.get('/homes/{home_id}/events')
 def events(home_id:str,current:Current,limit:int=100,status:str|None=None):
     if not 1<=limit<=500: raise HTTPException(422,'Giới hạn phải từ 1 đến 500.')
@@ -394,6 +435,30 @@ def events(home_id:str,current:Current,limit:int=100,status:str|None=None):
         if status: sql+=' AND status=?';params.append(status)
         rows=conn.execute(sql+' ORDER BY received_at DESC LIMIT ?',params+[limit]).fetchall()
         return [svc.event_public(conn,r) for r in rows]
+
+
+@router.get('/homes/{home_id}/active-events')
+def active_events(home_id:str,current:Current,page_size:int=5):
+    if not 1<=page_size<=20: raise HTTPException(422,'Giới hạn trang không hợp lệ.')
+    with db.connect() as conn:
+        member=membership(conn,home_id,current['id'])
+        visible=[c['id'] for c in conn.execute('SELECT id FROM cameras WHERE home_id=?',(home_id,)) if member['role']=='owner' or c['id'] in member['scopes']]
+        as_of=db.now()
+        if not visible:
+            return {'count':0,'items':[],'as_of':as_of}
+        placeholders=','.join('?' for _ in visible)
+        count=conn.execute(f"SELECT count(*) AS n FROM events WHERE home_id=? AND camera_id IN ({placeholders}) AND status IN ('OPEN','ACKNOWLEDGED')", [home_id, *visible]).fetchone()['n']
+        sql=f"""
+            SELECT e.*, c.name AS camera_name, r.name AS room_name
+            FROM events e
+            JOIN cameras c ON c.id=e.camera_id AND c.home_id=e.home_id
+            LEFT JOIN rooms r ON r.id=c.room_id AND r.home_id=c.home_id
+            WHERE e.home_id=? AND e.camera_id IN ({placeholders}) AND e.status IN ('OPEN','ACKNOWLEDGED')
+            ORDER BY e.received_at DESC, e.id DESC LIMIT ?
+        """
+        rows=conn.execute(sql, [home_id, *visible, page_size]).fetchall()
+        items=[svc.event_public(conn,r) for r in rows]
+        return {'count':count,'items':items,'as_of':as_of}
 
 
 @router.get('/events/{event_id}')
@@ -428,12 +493,113 @@ async def event_action(event_id:str,payload:m.Action,current:Current):
     return result
 
 
+def _parse_iso_utc(ts:str):
+    from datetime import datetime, timezone
+    dt=datetime.fromisoformat(ts.replace('Z','+00:00'))
+    return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 @router.get('/cameras/{camera_id}/telemetry')
-def telemetry(camera_id:str,current:Current,limit:int=100):
+def telemetry(camera_id:str,current:Current,limit:int=100,start:str|None=None,end:str|None=None,page:int|None=None,page_size:int=10):
     if not 1<=limit<=1000: raise HTTPException(422,'Giới hạn không hợp lệ.')
     with db.connect() as conn:
         camera_access(conn,camera_id,current['id'])
-        return [{**dict(r),'payload':json.loads(r['payload'])} for r in conn.execute('SELECT * FROM telemetry WHERE camera_id=? ORDER BY id DESC LIMIT ?',(camera_id,limit))]
+        all_rows=conn.execute('SELECT * FROM telemetry WHERE camera_id=? ORDER BY id DESC',(camera_id,)).fetchall()
+        if start and end:
+            try:
+                a_ep=_parse_iso_utc(start).timestamp()
+                b_ep=_parse_iso_utc(end).timestamp()
+                all_rows=[r for r in all_rows if a_ep<=_parse_iso_utc(r['observed_at']).timestamp()<=b_ep]
+            except Exception:
+                raise HTTPException(422,'Định dạng ngày giờ không hợp lệ.')
+        if page is not None:
+            p=max(1,page);ps=max(1,min(100,page_size));total=len(all_rows)
+            sliced=all_rows[(p-1)*ps:p*ps]
+            items=[{**dict(r),'payload':json.loads(r['payload'])} for r in sliced]
+            return {'items':items,'total':total,'page':p,'page_size':ps,'total_pages':max(1,(total+ps-1)//ps)}
+        return [{**dict(r),'payload':json.loads(r['payload'])} for r in all_rows[:limit]]
+
+
+@router.get('/cameras/{camera_id}/telemetry-summary')
+def telemetry_summary(camera_id:str,current:Current,hours:int|None=None,start:str|None=None,end:str|None=None,buckets:int=120):
+    import math
+    from datetime import datetime, timezone, timedelta
+    if not 2<=buckets<=500: raise HTTPException(422,'Số khoảng biểu đồ không hợp lệ.')
+    with db.connect() as conn:
+        camera=camera_access(conn,camera_id,current['id'])
+        now_dt=datetime.now(timezone.utc)
+        if start and end:
+            try:
+                a=_parse_iso_utc(start)
+                b=_parse_iso_utc(end)
+            except Exception:
+                raise HTTPException(422,'Định dạng ngày giờ không hợp lệ.')
+        else:
+            h=hours if hours and hours>0 else 24
+            b=now_dt+timedelta(seconds=5)
+            a=now_dt-timedelta(hours=h)
+        if a>=b:
+            raise HTTPException(422,'Ngày kết thúc phải sau ngày bắt đầu.')
+
+        seconds=max(1,math.ceil((b-a).total_seconds()/buckets))
+        n=math.ceil((b-a).total_seconds()/seconds)
+
+        raw_rows=conn.execute('SELECT * FROM telemetry WHERE camera_id=? ORDER BY id ASC',(camera_id,)).fetchall()
+        a_ep,b_ep=a.timestamp(),b.timestamp()
+        parsed_rows=[]
+        for r in raw_rows:
+            try:
+                obs=_parse_iso_utc(r['observed_at'])
+            except Exception:
+                continue
+            if a_ep<=obs.timestamp()<=b_ep:
+                parsed_rows.append((obs,r))
+        parsed_rows.sort(key=lambda item:item[0])
+        rows=[r for _,r in parsed_rows]
+
+        latest=None
+        if parsed_rows:
+            latest=dict(parsed_rows[-1][1])
+            latest['payload']=json.loads(latest['payload'])
+
+        series={};units={};occupied=set()
+        for obs,r in parsed_rows:
+            slot=int((obs.timestamp()-a_ep)//seconds)
+            if 0<=slot<n:
+                occupied.add(slot)
+                p=json.loads(r['payload'])
+                readings=p.get('readings',{})
+                for metric,data in readings.items():
+                    if not isinstance(data,dict): continue
+                    val=data.get('value')
+                    unit=data.get('unit','')
+                    quality=data.get('quality','valid')
+                    if quality!='valid' or val is None: continue
+                    units.setdefault(metric,[])
+                    if unit not in units[metric]: units[metric].append(unit)
+                    pts=series.setdefault(metric,{}).setdefault(unit,[{'x':(a_ep+i*seconds)*1000,'y':None,'count':0,'min':None,'max':None} for i in range(n)])
+                    pt=pts[slot]
+                    if pt['y'] is None:
+                        pt['y']=float(val);pt['min']=float(val);pt['max']=float(val);pt['count']=1
+                    else:
+                        pt['y']=(pt['y']*pt['count']+float(val))/(pt['count']+1)
+                        pt['min']=min(pt['min'],float(val));pt['max']=max(pt['max'],float(val));pt['count']+=1
+
+        empty=n-len(occupied)
+        return {
+            'sample_count':len(rows),
+            'first_observed_at':rows[0]['observed_at'] if rows else None,
+            'last_observed_at':rows[-1]['observed_at'] if rows else None,
+            'start':a.isoformat(),
+            'end':b.isoformat(),
+            'bucket_seconds':seconds,
+            'bucket_count':n,
+            'empty_buckets':empty,
+            'coverage_percent':round(100*(n-empty)/n,1) if n>0 else 0,
+            'metric_units':{k:sorted(v) for k,v in units.items()},
+            'series':series,
+            'latest':latest
+        }
 
 
 @router.get('/homes/{home_id}/settings')
@@ -453,13 +619,82 @@ def save_settings(home_id:str,payload:m.Settings,current:Current):
     return payload.model_dump()
 
 
+@router.get('/homes/{home_id}/storage')
+def storage_usage(home_id:str,current:Current):
+    with db.connect() as conn:
+        membership(conn,home_id,current['id'],owner=True)
+        quota_bytes=int(os.getenv('MAX_HOME_MEDIA_BYTES','536870912'))
+        used_bytes=conn.execute('SELECT COALESCE(SUM(size),0) AS total FROM assets WHERE home_id=?',(home_id,)).fetchone()['total']
+        reserved_bytes=0
+        available_bytes=max(0,quota_bytes-used_bytes)
+        used_percent=min(100.0,round((used_bytes/quota_bytes)*100,1)) if quota_bytes else 0
+        warning_level='critical' if used_percent>=90 else ('near' if used_percent>=75 else 'stable')
+        return {
+            'quota_bytes':quota_bytes,
+            'used_bytes':used_bytes,
+            'reserved_bytes':reserved_bytes,
+            'available_bytes':available_bytes,
+            'used_percent':used_percent,
+            'warning_level':warning_level,
+            'retention_days':30,
+            'reconciliation':None
+        }
+
+
 @router.get('/homes/{home_id}/assets')
-def assets(home_id:str,current:Current):
+def assets(home_id:str,current:Current,page:int|None=None,page_size:int=10,camera_id:str|None=None,q:str='',status:str|None=None,audio_only:bool=False):
+    if len(q)>160: raise HTTPException(422,'Từ khóa quá dài.')
     with db.connect() as conn:
         cameras=svc.visible_cameras(conn,home_id,current['id'])
         visible={c['id']:c['permissions'] for c in cameras}
-        return [{k:r[k] for k in ('id','camera_id','event_id','name','mime','size','status','error','created_at')} for r in conn.execute('SELECT * FROM assets WHERE home_id=? ORDER BY created_at DESC',(home_id,))
-            if r['camera_id'] in visible and (not r['mime'].startswith('audio/') or visible[r['camera_id']]['audio'] or visible[r['camera_id']]['schedules'])]
+        if camera_id and camera_id not in visible:
+            raise HTTPException(404,'Không tìm thấy camera hoặc không có quyền.')
+
+        clauses=['home_id=?']
+        params=[home_id]
+        if camera_id:
+            clauses.append('camera_id=?')
+            params.append(camera_id)
+        if audio_only:
+            clauses.append("mime LIKE 'audio/%'")
+        if q:
+            clauses.append('name LIKE ?')
+            params.append(f'%{q}%')
+        if status:
+            clauses.append('status=?')
+            params.append(status)
+
+        query=f"SELECT * FROM assets WHERE {' AND '.join(clauses)} ORDER BY created_at DESC"
+        all_rows=conn.execute(query,params).fetchall()
+
+        filtered=[
+            r for r in all_rows
+            if r['camera_id'] in visible and (
+                not r['mime'].startswith('audio/')
+                or visible[r['camera_id']]['audio']
+                or visible[r['camera_id']]['schedules']
+            )
+        ]
+
+        used={}
+        reminders=conn.execute('SELECT asset_id, id, name, enabled FROM reminders WHERE home_id=? AND asset_id IS NOT NULL',(home_id,)).fetchall()
+        for rem in reminders:
+            used.setdefault(rem['asset_id'],[]).append({'id':rem['id'],'name':rem['name'],'enabled':bool(rem['enabled'])})
+
+        items=[]
+        for r in filtered:
+            item={k:r[k] for k in ('id','camera_id','event_id','name','mime','size','status','error','created_at')}
+            item['used_by']=used.get(r['id'],[])
+            item['used_count']=len(item['used_by'])
+            items.append(item)
+
+        if page is not None:
+            p=max(1,page)
+            ps=max(1,min(100,page_size))
+            total=len(items)
+            paged_items=items[(p-1)*ps:p*ps]
+            return {'items':paged_items,'total':total,'page':p,'page_size':ps,'total_pages':max(1,(total+ps-1)//ps)}
+        return items
 
 
 async def write_asset(request,home_id,camera_id,event_id=None):
@@ -493,10 +728,10 @@ async def write_asset(request,home_id,camera_id,event_id=None):
             conn.execute('INSERT INTO assets(id,home_id,camera_id,event_id,name,mime,size,path,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
                          (asset_id,home_id,camera_id,event_id,name,mime,size,filename,db.now()))
             if event_id is None and mime.startswith('image/'):
-                old_snapshots=conn.execute("SELECT id,path FROM assets WHERE camera_id=? AND event_id IS NULL AND mime LIKE 'image/%' AND status='ready' ORDER BY created_at DESC LIMIT -1 OFFSET 5",(camera_id,)).fetchall()
+                old_snapshots=conn.execute("SELECT id,path FROM assets WHERE camera_id=? AND event_id IS NULL AND mime LIKE 'image/%' ORDER BY created_at DESC LIMIT -1 OFFSET 3",(camera_id,)).fetchall()
                 for snapshot in old_snapshots:
                     (db.MEDIA_ROOT/snapshot['path']).unlink(missing_ok=True)
-                    conn.execute("UPDATE assets SET status='expired' WHERE id=?",(snapshot['id'],))
+                    conn.execute("DELETE FROM assets WHERE id=?",(snapshot['id'],))
     except Exception:
         path.unlink(missing_ok=True)
         raise
@@ -611,6 +846,12 @@ def command(camera_id:str,payload:m.Command,current:Current):
             if not asset: raise HTTPException(422,'Âm thanh không thuộc camera hoặc chưa sẵn sàng.')
         old=conn.execute('SELECT * FROM commands WHERE user_id=? AND idempotency_key=?',(current['id'],payload.idempotency_key)).fetchone()
         command_payload={'asset_id':payload.asset_id,'volume':payload.volume}
+        if payload.kind in ('ptz_move','ptz_center'):
+            command_payload['direction']=payload.direction
+            command_payload['degrees']=payload.degrees
+        if payload.kind in ('bt_scan','bt_connect','bt_disconnect'):
+            command_payload['bt_address']=payload.bt_address
+            command_payload['bt_name']=payload.bt_name
         if old:
             if old['camera_id']!=camera_id or old['kind']!=payload.kind or json.loads(old['payload'])!=command_payload: raise HTTPException(409,'Mã lệnh đã được dùng cho nội dung khác.')
             return {'id':old['id'],'status':old['status']}
@@ -626,6 +867,38 @@ def commands(camera_id:str,current:Current):
     with db.connect() as conn:
         camera_access(conn,camera_id,current['id'],'audio')
         return [{**dict(r),'payload':json.loads(r['payload'])} for r in conn.execute('SELECT * FROM commands WHERE camera_id=? ORDER BY created_at DESC LIMIT 50',(camera_id,))]
+
+
+def _save_camera_bluetooth(conn,camera_id:str,payload:dict):
+    conn.execute("CREATE TABLE IF NOT EXISTS camera_bluetooth(camera_id TEXT PRIMARY KEY,payload TEXT NOT NULL DEFAULT '{}',updated_at TEXT NOT NULL)")
+    clean={
+        'connected':bool(payload.get('connected')),
+        'deviceName':str(payload.get('deviceName') or '')[:120],
+        'address':str(payload.get('address') or '')[:32],
+        'status':'connected' if payload.get('connected') else 'disconnected',
+        'devices':payload.get('devices') if isinstance(payload.get('devices'),list) else [],
+    }
+    conn.execute('''INSERT INTO camera_bluetooth(camera_id,payload,updated_at) VALUES(?,?,?)
+        ON CONFLICT(camera_id) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at''',
+        (camera_id,db.dumps(clean),db.now()))
+
+
+@router.get('/cameras/{camera_id}/bluetooth')
+def get_camera_bluetooth(camera_id:str,current:Current):
+    with db.connect() as conn:
+        camera_access(conn,camera_id,current['id'])
+        conn.execute("CREATE TABLE IF NOT EXISTS camera_bluetooth(camera_id TEXT PRIMARY KEY,payload TEXT NOT NULL DEFAULT '{}',updated_at TEXT NOT NULL)")
+        row=conn.execute('SELECT payload,updated_at FROM camera_bluetooth WHERE camera_id=?',(camera_id,)).fetchone()
+        data=json.loads(row['payload']) if row else {'connected':False,'deviceName':'','address':'','status':'disconnected','devices':[]}
+        data['updated_at']=row['updated_at'] if row else None
+        now_ts=time.time()
+        active_scan=conn.execute("SELECT id,status FROM commands WHERE camera_id=? AND kind='bt_scan' AND status IN ('pending','accepted','executing') AND expires>?",(camera_id,now_ts)).fetchone()
+        active_conn=conn.execute("SELECT id,status,payload FROM commands WHERE camera_id=? AND kind='bt_connect' AND status IN ('pending','accepted','executing') AND expires>? ORDER BY created_at DESC LIMIT 1",(camera_id,now_ts)).fetchone()
+        last_cmd=conn.execute("SELECT id,kind,status,result,created_at FROM commands WHERE camera_id=? AND kind IN ('bt_scan','bt_connect','bt_disconnect') ORDER BY created_at DESC LIMIT 1",(camera_id,)).fetchone()
+        data['scanning']=bool(active_scan)
+        data['connecting_address']=json.loads(active_conn['payload']).get('bt_address') if active_conn else None
+        data['last_command']=dict(last_cmd) if last_cmd else None
+        return data
 
 
 @router.get('/homes/{home_id}/audit')
@@ -647,7 +920,16 @@ def deliveries(home_id:str,current:Current):
 def heartbeat(payload:m.Heartbeat,current:Device):
     with db.connect() as conn:
         conn.execute('UPDATE cameras SET last_seen=?,observation=?,capabilities=? WHERE id=?',(db.now(),payload.observation,db.dumps(payload.capabilities),current['id']))
+        if isinstance(payload.bluetooth,dict):
+            _save_camera_bluetooth(conn,current['id'],payload.bluetooth)
     return {'server_time':db.now(),'desired_version':current['desired_version']}
+
+
+@router.post('/device/bluetooth')
+def device_bluetooth(payload:dict,current:Device):
+    with db.connect() as conn:
+        _save_camera_bluetooth(conn,current['id'],payload)
+    return {'stored':True}
 
 
 @router.get('/device/config')

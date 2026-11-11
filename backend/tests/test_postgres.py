@@ -83,6 +83,42 @@ class PostgresTests(unittest.TestCase):
     def device(self,provision):
         client=TestClient(main.app);self.clients.append(client);client.headers['Authorization']='Bearer '+provision['device_token'];return client
 
+    def test_pi_self_enrollment(self):
+        from backend.tests.device_pairing_cases import exercise_self_enrollment
+        exercise_self_enrollment(self)
+
+    def test_pairing_retries_after_config_failure_and_rotates_token(self):
+        from unittest.mock import patch
+
+        owner, _ = self.account('owner@example.com')
+        home, room, _, _ = self.home_camera(owner)
+        provision = services.provision_device('Camera cần khôi phục')
+        device = self.device(provision)
+        self.assertEqual(device.get('/api/device/config').status_code, 401)
+
+        device_id = provision['device_id']
+        renewed = services.refresh_device(device_id, rotate_token=False)
+        path = f"/api/homes/{home['id']}/cameras/claim"
+        payload = {'code': provision['pairing_code'], 'name': 'Camera cần khôi phục', 'room_id': room['id']}
+        self.assertEqual(owner.post(path, json=payload).status_code, 400)
+
+        payload['code'] = renewed['pairing_code']
+        with patch.object(services, 'compile_config', side_effect=RuntimeError('configuration unavailable')):
+            with self.assertRaisesRegex(RuntimeError, 'configuration unavailable'):
+                owner.post(path, json=payload)
+
+        claimed = owner.post(path, json=payload)
+        self.assertEqual(claimed.status_code, 201, claimed.text)
+        self.assertEqual(owner.post(path, json=payload).json()['id'], claimed.json()['id'])
+        self.assertEqual(device.get('/api/device/config').status_code, 200)
+
+        rotated = services.refresh_device(device_id, rotate_token=True)
+        self.assertEqual(device.get('/api/device/config').status_code, 401)
+        config = self.device(rotated).get('/api/device/config')
+        self.assertEqual(config.status_code, 200)
+        self.assertEqual(config.json()['camera_id'], claimed.json()['id'])
+        self.assertGreater(config.json()['version'], 0)
+
     def test_scoped_invitation_revocation_and_device_claim(self):
         owner,_=self.account('owner@example.com');viewer,viewer_user=self.account('viewer@example.com')
         home,room,camera,provision=self.home_camera(owner)

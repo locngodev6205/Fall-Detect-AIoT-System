@@ -1,8 +1,10 @@
-import React, { lazy, Suspense, useState } from 'react';
-import { Plus, VideoCamera, Thermometer, Drop, Leaf, WarningCircle, Clock, SpeakerHigh, CaretRight, ArrowRight, ArrowClockwise, Trash, Shield, Globe, WifiSlash, CheckCircle, ShieldCheck, House } from '@phosphor-icons/react';
+import React, { lazy, Suspense, useEffect, useState } from 'react';
+import { Plus, VideoCamera, Thermometer, Drop, Leaf, WarningCircle, Clock, SpeakerHigh, CaretRight, ArrowRight, ArrowLeft, ArrowUp, ArrowDown, Crosshair, Bed, Eye, PersonSimple, ArrowClockwise, Trash, Shield, Globe, WifiSlash, CheckCircle, ShieldCheck, House } from '@phosphor-icons/react';
 import { api, go, roleNames, statusNames, eventNames, dateTime } from './api';
 import { Badge, Button, CameraImage, CameraThumbnail, Empty, Field, Heading, Modal, PagedList, Pagination } from './ui';
 import { useApp, useResource, ResourceState } from './context';
+import { LiveAudio } from './LiveAudio';
+import { BluetoothSpeakerCard } from './BluetoothSpeakerCard';
 const EnvironmentChart=lazy(()=>import('./EnvironmentChart').then(module=>({default:module.EnvironmentChart})));
 import {useServerPage,ServerPager} from './serverPaging';
 import { JoinHomeByCode } from './InvitationCodes';
@@ -39,17 +41,18 @@ export function Setup() {
     try { await api(`/homes/${home.id}/cameras/claim`, { method: 'POST', body: Object.fromEntries(new FormData(event.currentTarget)) });reload();go('/devices');notify('Đã đăng ký camera. Đang chờ thiết bị kết nối.'); }
     catch (e) { notify(e.message); } finally { setBusy(false); }
   }
-  return <><Heading title="Kết nối camera với nhà" action={<Button kind="secondary-btn" onClick={()=>go('/overview')}>Thiết lập sau<ArrowRight/></Button>} text="Mã ghép nối chỉ dùng một lần và có thời hạn. Thiết bị đang thuộc nhà khác không thể được nhận lại bằng mã cũ."/>
+  return <><Heading title="Kết nối camera với nhà" action={<Button kind="secondary-btn" onClick={()=>go('/overview')}>Thiết lập sau<ArrowRight/></Button>} text="Lấy mã ghép nối trên Pi, rồi chọn phòng để thêm camera. Mã có hiệu lực 30 phút."/>
     <div className="two-grid"><form className="panel" onSubmit={room}><h2>1. Tạo phòng</h2><Field label="Tên phòng" name="name" required maxLength={120}/><Button type="submit">Thêm phòng</Button><p>{rooms.map(r => r.name).join(' · ') || 'Chưa có phòng'}</p></form>
-    <form className="panel" onSubmit={claim}><h2>2. Ghép nối thiết bị</h2><Field label="Mã ghép nối từ thiết bị" name="code" required minLength={8} autoComplete="off"/><Field label="Tên camera" name="name" required maxLength={120}/><Field label="Phòng"><select name="room_id" required defaultValue=""><option value="" disabled>Chọn phòng</option>{rooms.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}</select></Field><Button type="submit" disabled={busy || !rooms.length}>{busy ? 'Đang ghép nối…' : 'Đăng ký camera'}</Button></form></div>
+    <form className="panel" onSubmit={claim}><h2>2. Ghép nối thiết bị</h2><Field label="Mã ghép nối từ Pi" name="code" required minLength={8} maxLength={128} autoComplete="off" spellCheck={false}/><Field label="Tên camera" name="name" required maxLength={120}/><Field label="Phòng"><select name="room_id" required defaultValue=""><option value="" disabled>Chọn phòng</option>{rooms.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}</select></Field><Button type="submit" disabled={busy || !rooms.length}>{busy ? 'Đang ghép nối…' : 'Đăng ký camera'}</Button></form></div>
     <div className="notice">Sau khi ghép nối, kiểm tra hình ảnh và tình trạng kết nối trong trang camera. Chưa kết nối không có nghĩa là đang giám sát.</div>
   </>;
 }
 
 function RoomRow({ entry, selected, owner, onSelect }) {
   const camera = entry.camera;
+  const [hasSnapshot, setHasSnapshot] = useState(false);
   return <button className={'room-row ' + (selected ? 'active' : '')} onClick={onSelect} aria-pressed={selected}>
-    <CameraThumbnail name={entry.name}/><span><strong>{entry.name}</strong><small className={camera?.online ? 'teal-text' : ''}>{camera?.online ? <CheckCircle/> : <WifiSlash/>}{connectionLabel(camera)}</small><span className="room-source">Ảnh minh hoạ</span></span><CaretRight/>
+    <CameraThumbnail name={entry.name} camera={camera} onSnapshotChange={setHasSnapshot}/><span><strong>{entry.name}</strong><small className={camera?.online ? 'teal-text' : ''}>{camera?.online ? <CheckCircle/> : <WifiSlash/>}{connectionLabel(camera)}</small><span className="room-source">{hasSnapshot ? (camera?.online ? 'Trực tiếp' : 'Ảnh gần nhất') : 'Ảnh minh hoạ'}</span></span><CaretRight/>
   </button>;
 }
 
@@ -83,19 +86,162 @@ export function Cameras() {
   </>;
 }
 
+function makeCommandKey(prefix = 'cmd') {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 export function CameraDetail({ id }) {
-  const { cameras, rooms, home, can, notify } = useApp();const camera = cameras.find(c => c.id === id);
+  const { cameras, rooms, can, notify, reload, tick } = useApp();
+  const camera = cameras.find(c => c.id === id);
+  const modesResource = useResource(camera ? `/cameras/${id}/smart-modes` : null, tick);
+  const [stepDeg, setStepDeg] = useState(10);
+  const [ptzBusy, setPtzBusy] = useState('');
+  const [ptzStatus, setPtzStatus] = useState('');
+  const [modesDraft, setModesDraft] = useState({
+    fall_detection: true,
+    servo_tracking: true,
+    night_mode_enabled: true,
+    night_start: '22:00',
+    night_end: '06:00',
+  });
+  const [modesBusy, setModesBusy] = useState(false);
+
+  useEffect(() => {
+    if (modesResource.data?.smart_modes) {
+      setModesDraft(modesResource.data.smart_modes);
+    }
+  }, [modesResource.data]);
+
   if (!camera) return <Empty title="Camera không tồn tại hoặc ngoài phạm vi quyền"/>;
+
+  const canControlPtz = can(camera, 'audio');
+  const canEditModes = can(camera, 'schedules');
+
+  async function sendPtz(kind, direction = null, label = '') {
+    if (!canControlPtz || ptzBusy) return;
+    setPtzBusy(direction || kind);
+    try {
+      const body = {
+        kind,
+        idempotency_key: makeCommandKey('ptz'),
+        ttl_seconds: 30,
+      };
+      if (kind === 'ptz_move') {
+        body.direction = direction;
+        body.degrees = Number(stepDeg) || 10;
+      }
+      await api(`/cameras/${id}/commands`, { method: 'POST', body });
+      setPtzStatus(kind === 'ptz_center'
+        ? 'Đã gửi lệnh đưa camera về chính giữa (90°, 90°).'
+        : `Đã gửi lệnh xoay ${label} ${stepDeg}°.`);
+    } catch (error) {
+      notify(error.message);
+    } finally {
+      setPtzBusy('');
+    }
+  }
+
+  async function saveSmartModes(nextModes, message = 'Đã lưu chế độ thông minh. Đang đồng bộ xuống thiết bị.') {
+    if (!canEditModes) return;
+    setModesDraft(nextModes);
+    setModesBusy(true);
+    try {
+      await api(`/cameras/${id}/smart-modes`, { method: 'PUT', body: nextModes });
+      await modesResource.reload();
+      reload();
+      notify(message);
+    } catch (error) {
+      notify(error.message);
+      modesResource.reload();
+    } finally {
+      setModesBusy(false);
+    }
+  }
+
+  function toggleMode(key, checked, label) {
+    const next = { ...modesDraft, [key]: checked };
+    saveSmartModes(next, `${checked ? 'Đã bật' : 'Đã tắt'} ${label}.`);
+  }
+
   return <><Heading title={camera.name} text={`Kết nối cuối: ${dateTime(camera.last_seen)}`}/><CameraImage camera={camera} roomName={rooms.find(room => room.id === camera.room_id)?.name}/>
     <div className="notice">Luồng hình chỉ hiển thị trực tiếp khi đang nhận frame mới từ thiết bị. Khi luồng gián đoạn, giao diện chuyển sang ảnh gần nhất và giữ thời điểm nhận để tránh nhầm với tình hình hiện tại.</div>
-    <div className="two-grid"><section className="panel"><h2>Tình trạng giám sát</h2><p>Quan sát: {camera.online ? observationNames[camera.observation] || 'Chưa có quan sát' : 'Chưa nhận quan sát mới'}</p><p>Cấu hình: {camera.applied_version}/{camera.desired_version} · {statusNames[camera.sync_status]}</p>{camera.config_error && <p role="alert">{camera.config_error}</p>}</section><section className="panel"><h2>Kết nối với người thân</h2><p>Lệnh phát âm thanh chỉ được ghi nhận hoàn thành khi thiết bị phản hồi.</p>{can(camera, 'audio') && <Button onClick={() => go('/reminders/send?camera=' + id)}><SpeakerHigh/>Gửi âm thanh</Button>}<a className="button secondary-btn" href="#/environment">Xem môi trường</a></section></div>
+    <div className="two-grid">
+      <section className="panel ptz-panel">
+        <div className="ptz-header">
+          <div>
+            <h2>Điều khiển góc quay PTZ</h2>
+            <p>Xoay Pan/Tilt thủ công hoặc đưa về góc chuẩn trung tâm 90°.</p>
+          </div>
+          <label className="ptz-step-select">
+            <span>Bước xoay</span>
+            <select value={stepDeg} onChange={e => setStepDeg(Number(e.target.value))} disabled={!canControlPtz}>
+              <option value={5}>5° (Mịn)</option>
+              <option value={10}>10° (Chuẩn)</option>
+              <option value={15}>15° (Nhanh)</option>
+            </select>
+          </label>
+        </div>
+        <div className="ptz-dpad" role="group" aria-label="Bàn phím xoay camera PTZ">
+          <span className="ptz-spacer" aria-hidden="true"/>
+          <Button kind="secondary-btn ptz-btn" disabled={!canControlPtz || !!ptzBusy} onClick={() => sendPtz('ptz_move', 'UP', 'lên trên')} aria-label="Xoay camera lên trên"><ArrowUp/>Lên</Button>
+          <span className="ptz-spacer" aria-hidden="true"/>
+          <Button kind="secondary-btn ptz-btn" disabled={!canControlPtz || !!ptzBusy} onClick={() => sendPtz('ptz_move', 'LEFT', 'sang trái')} aria-label="Xoay camera sang trái"><ArrowLeft/>Trái</Button>
+          <Button kind="ptz-btn ptz-center-btn" disabled={!canControlPtz || !!ptzBusy} onClick={() => sendPtz('ptz_center')} aria-label="Đưa camera về góc giữa 90 độ"><Crosshair/>Giữa 90°</Button>
+          <Button kind="secondary-btn ptz-btn" disabled={!canControlPtz || !!ptzBusy} onClick={() => sendPtz('ptz_move', 'RIGHT', 'sang phải')} aria-label="Xoay camera sang phải"><ArrowRight/>Phải</Button>
+          <span className="ptz-spacer" aria-hidden="true"/>
+          <Button kind="secondary-btn ptz-btn" disabled={!canControlPtz || !!ptzBusy} onClick={() => sendPtz('ptz_move', 'DOWN', 'xuống dưới')} aria-label="Xoay camera xuống dưới"><ArrowDown/>Xuống</Button>
+          <span className="ptz-spacer" aria-hidden="true"/>
+        </div>
+        <small className="ptz-hint">
+          {ptzStatus || (camera.online ? 'Giới hạn an toàn cơ khí: Pan 30°–150° · Tilt 45°–135°.' : 'Thiết bị đang offline — lệnh PTZ sẽ được thực thi nếu thiết bị kết nối lại trong 30 giây.')}
+        </small>
+      </section>
+
+      <section className="panel smart-modes-panel">
+        <h2>Chế độ AI & Ban đêm</h2>
+        <p>Bật/tắt nhận diện té ngã, bám người tự động và lịch yên tĩnh ban đêm trên thiết bị biên.</p>
+        <div className="smart-mode-list">
+          <label className="smart-mode-item">
+            <span className="smart-mode-info">
+              <strong><PersonSimple/>Phát hiện té ngã AI</strong>
+              <small>Phân tích tư thế thời gian thực, còi hú tại phòng và gửi cảnh báo ngay khi ngã.</small>
+            </span>
+            <input type="checkbox" checked={!!modesDraft.fall_detection} disabled={!canEditModes || modesBusy}
+              onChange={e => toggleMode('fall_detection', e.target.checked, 'Phát hiện té ngã AI')}/>
+          </label>
+          <label className="smart-mode-item">
+            <span className="smart-mode-info">
+              <strong><Eye/>Tự động xoay Servo bám người</strong>
+              <small>Giữ người thân ở tâm khung hình; tự ngắt xung PWM khi tắt để bảo vệ động cơ.</small>
+            </span>
+            <input type="checkbox" checked={!!modesDraft.servo_tracking} disabled={!canEditModes || modesBusy}
+              onChange={e => toggleMode('servo_tracking', e.target.checked, 'Tự động xoay Servo bám người')}/>
+          </label>
+          <label className="smart-mode-item">
+            <span className="smart-mode-info">
+              <strong><Bed/>Chế độ ban đêm yên tĩnh</strong>
+              <small>Khóa động cơ Servo (0 tiếng ồn) và tạm hoãn lời nhắc thường; giữ 100% còi khẩn cấp.</small>
+            </span>
+            <input type="checkbox" checked={!!modesDraft.night_mode_enabled} disabled={!canEditModes || modesBusy}
+              onChange={e => toggleMode('night_mode_enabled', e.target.checked, 'Chế độ ban đêm yên tĩnh')}/>
+          </label>
+        </div>
+        {modesDraft.night_mode_enabled && <form className="night-window-form" onSubmit={e => { e.preventDefault(); saveSmartModes(modesDraft, 'Đã cập nhật khung giờ ban đêm.'); }}>
+          <Field label="Giờ bắt đầu đêm"><input type="time" value={modesDraft.night_start || '22:00'} disabled={!canEditModes || modesBusy} onChange={e => setModesDraft({ ...modesDraft, night_start: e.target.value })} required/></Field>
+          <Field label="Giờ kết thúc đêm"><input type="time" value={modesDraft.night_end || '06:00'} disabled={!canEditModes || modesBusy} onChange={e => setModesDraft({ ...modesDraft, night_end: e.target.value })} required/></Field>
+          {canEditModes && <Button kind="secondary-btn" type="submit" disabled={modesBusy}>Lưu giờ đêm</Button>}
+        </form>}
+      </section>
+    </div>
+
+    <div className="two-grid spaced"><section className="panel"><h2>Tình trạng giám sát</h2><p>Quan sát: {camera.online ? observationNames[camera.observation] || 'Chưa có quan sát' : 'Chưa nhận quan sát mới'}</p><p>Cấu hình: {camera.applied_version}/{camera.desired_version} · {statusNames[camera.sync_status]}</p>{camera.config_error && <p role="alert">{camera.config_error}</p>}</section><section className="panel"><h2>Kết nối với người thân &amp; Loa Bluetooth</h2><p>Quét, ghép đôi loa Bluetooth tại phòng và gửi lời nhắn hoặc đàm thoại trực tiếp.</p><BluetoothSpeakerCard cameraId={id} canControl={canControlPtz}/><div className="actions">{can(camera, 'audio') && <Button onClick={() => go('/reminders/send?camera=' + id)}><SpeakerHigh/>Gửi âm thanh</Button>}<a className="button secondary-btn" href="#/environment">Xem môi trường</a></div>{can(camera, 'audio') && <LiveAudio cameraId={id} disabled={!camera.online}/>}</section></div>
   </>;
 }
 
 export function Devices() {
   const { cameras, home, notify, reload } = useApp();const [remove, setRemove] = useState(null);
   async function removeDevice() { try { await api('/cameras/' + remove.id, { method: 'DELETE' });setRemove(null);reload();notify('Đã gỡ thiết bị và vô hiệu credential cũ.'); } catch (e) { notify(e.message); } }
-  return <><Heading title="Thiết bị trong nhà" action={home.role === 'owner' && <Button onClick={() => go('/setup')}>Thêm thiết bị</Button>}/>{<PagedList items={cameras} label="thiết bị" resetKey={home.id}>{c => <article className="panel device-row" key={c.id}><CameraThumbnail name={c.name}/><div><h2>{c.name}</h2><p>{dateTime(c.last_seen)}</p><small>{Object.entries(c.capabilities).filter(([,v]) => v).map(([k]) => k).join(', ') || 'Chưa có thông tin phần cứng'}</small><p>Cấu hình {c.applied_version}/{c.desired_version} · {statusNames[c.sync_status]}</p></div><Badge tone={c.online ? 'teal' : 'gray'}>{c.online ? 'Đang kết nối' : 'Offline / chưa kết nối'}</Badge><Button kind="secondary-btn" onClick={() => go('/camera/' + c.id)}>Chi tiết</Button>{home.role === 'owner' && <Button kind="ghost danger" onClick={() => setRemove(c)}>Gỡ thiết bị</Button>}</article>}</PagedList>}{!cameras.length && <Empty title="Chưa có thiết bị"/>}{remove && <Modal title="Gỡ thiết bị khỏi nhà?" onClose={() => setRemove(null)}><p>{remove.name} sẽ không thể nhận lệnh hoặc gửi dữ liệu bằng thông tin xác thực cũ. Lịch sử được giữ lại.</p><Button kind="critical" onClick={removeDevice}>Xác nhận gỡ</Button></Modal>}</>;
+  return <><Heading title="Thiết bị trong nhà" action={home.role === 'owner' && <Button onClick={() => go('/setup')}>Thêm thiết bị</Button>}/>{<PagedList items={cameras} label="thiết bị" resetKey={home.id}>{c => <article className="panel device-row" key={c.id}><CameraThumbnail name={c.name} camera={c}/><div><h2>{c.name}</h2><p>{dateTime(c.last_seen)}</p><small>{Object.entries(c.capabilities).filter(([,v]) => v).map(([k]) => k).join(', ') || 'Chưa có thông tin phần cứng'}</small><p>Cấu hình {c.applied_version}/{c.desired_version} · {statusNames[c.sync_status]}</p></div><Badge tone={c.online ? 'teal' : 'gray'}>{c.online ? 'Đang kết nối' : 'Offline / chưa kết nối'}</Badge><Button kind="secondary-btn" onClick={() => go('/camera/' + c.id)}>Chi tiết</Button>{home.role === 'owner' && <Button kind="ghost danger" onClick={() => setRemove(c)}>Gỡ thiết bị</Button>}</article>}</PagedList>}{!cameras.length && <Empty title="Chưa có thiết bị"/>}{remove && <Modal title="Gỡ thiết bị khỏi nhà?" onClose={() => setRemove(null)}><p>{remove.name} sẽ không thể nhận lệnh hoặc gửi dữ liệu bằng thông tin xác thực cũ. Lịch sử được giữ lại.</p><Button kind="critical" onClick={removeDevice}>Xác nhận gỡ</Button></Modal>}</>;
 }
 
 function Sensor({ reading, label, icon: Icon }) {

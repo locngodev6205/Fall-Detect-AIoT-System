@@ -75,9 +75,20 @@ TTS local cần eSpeak NG (đã có trong backend image). PostgreSQL test phải
 ## Tài liệu
 
 - [Danh mục docs](docs/README.md)
+- [Hướng dẫn đấu nối chân phần cứng (Pinout) & triển khai Raspberry Pi 4 + Arduino + Loa Bluetooth](docs/hardware/HARDWARE_WIRING_AND_DEPLOYMENT.md)
+- [Hướng dẫn tích hợp Firmware Arduino USB Serial (`annha_node`)](docs/hardware/ARDUINO_INTEGRATION_GUIDE.md)
 - [Đặc tả](docs/product/PROJECT_SPECIFICATION.md), [kiến trúc](docs/architecture/ARCHITECTURE.md), [database/media](docs/architecture/DATABASE_DESIGN_NEON.md)
 - [Neon setup](docs/setup/NEON_SETUP.md), [database tooling/migrations](backend/database/postgresql/README.md)
 - [Trạng thái hiện tại](docs/planning/IMPLEMENTATION_STATUS.md), [backlog](docs/planning/SOFTWARE_BACKLOG_ANNHA.md)
 - [Teammate cần nhận gì ngoài `.env`](docs/handoff/TEAMMATE_SETUP.md)
+
+## Thêm Raspberry Pi vào AnNhà
+
+1. Trên Pi đã cài phần mềm và kết nối mạng, sao chép `.env.edge.example` thành `.env.edge` nếu chưa có. Đặt `ANNHA_BASE_URL` thành địa chỉ AnNhà mà Pi truy cập được.
+2. Trong thư mục `fall_detect` trên Pi, chạy `bash run_edge.sh --pair`. Pi tự tạo token và hiển thị mã ghép nối.
+3. Trên web, đăng nhập bằng tài khoản chủ nhà và mở **Thiết bị → Thêm thiết bị**. Tạo phòng nếu cần, dán mã từ Pi, nhập tên camera, chọn phòng rồi bấm **Đăng ký camera**.
+4. Chờ Pi báo đã ghép. Trang **Thiết bị** sẽ hiển thị **Đang kết nối** sau heartbeat. Kiểm tra hình ảnh thật trong trang chi tiết camera.
+
+Pi tự lưu thông tin ghép nối. Các lần sau chạy `bash run_edge.sh`. Xem [hướng dẫn ghép Pi và xử lý sự cố](docs/api/DEVICE_API.md#1-cấp-và-ghép-nối).
 
 `docs/reports/`, `.env`, `.secrets/`, runtime data, build và review screenshots được giữ ngoài Git. Nếu cần báo cáo nghiệm thu hoặc file media local cũ, chia sẻ riêng; pull source không tự khôi phục các dữ liệu này.

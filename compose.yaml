@@ -3,7 +3,7 @@ services:
   frontend:
     build: ./frontend
     ports:
-      - "127.0.0.1:${WEB_PORT:-8188}:80"
+      - "${WEB_BIND_HOST:-0.0.0.0}:${WEB_PORT:-8188}:80"
     depends_on:
       backend:
         condition: service_healthy

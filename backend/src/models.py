@@ -149,19 +149,39 @@ class Reminder(Model):
         return self
 
 class Command(Model):
-    kind: Literal['play_audio','test_speaker','silence']
+    kind: Literal['play_audio','test_speaker','silence','ptz_move','ptz_center','bt_scan','bt_connect','bt_disconnect']
     asset_id: str | None = None
     volume: int = Field(default=70,ge=0,le=100)
+    direction: Literal['LEFT','RIGHT','UP','DOWN'] | None = None
+    degrees: int = Field(default=6,ge=1,le=45)
+    bt_address: str | None = Field(default=None,max_length=32)
+    bt_name: str | None = Field(default=None,max_length=120)
     ttl_seconds: int = Field(default=60,ge=5,le=300)
     idempotency_key: str = Field(min_length=8,max_length=128)
     @model_validator(mode='after')
     def audio(self):
         if self.kind=='play_audio' and not self.asset_id: raise ValueError('Thiếu âm thanh')
+        if self.kind=='ptz_move' and not self.direction: raise ValueError('Thiếu hướng xoay camera')
+        if self.kind=='bt_connect' and not self.bt_address: raise ValueError('Thiếu địa chỉ MAC của thiết bị Bluetooth')
+        return self
+
+class SmartModes(Model):
+    fall_detection: bool = True
+    servo_tracking: bool = True
+    night_mode_enabled: bool = True
+    night_start: str = '22:00'
+    night_end: str = '06:00'
+    @model_validator(mode='after')
+    def valid_window(self):
+        for value in (self.night_start, self.night_end):
+            if not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', value):
+                raise ValueError('Giờ chế độ ban đêm không hợp lệ')
         return self
 
 class Heartbeat(Model):
     observation: Literal['unknown','clear','no_person','occluded','camera_error'] = 'unknown'
     capabilities: dict[Literal['camera','speaker','sensors'],bool] = Field(default_factory=dict)
+    bluetooth: dict | None = None
 
 class ConfigAck(Model):
     version: int = Field(ge=1)

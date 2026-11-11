@@ -27,14 +27,53 @@ export function Modal({ title, children, onClose, wide = false, className = '', 
   }, []);
   return <div className="modal-backdrop"><section ref={ref} tabIndex={-1} className={'modal ' + (wide ? 'wide ' : '') + className} role="dialog" aria-modal="true" aria-label={title}><header><h2>{title}</h2><button className="icon" onClick={onClose} aria-label="Đóng"><X/></button></header>{children}</section></div>;
 }
-export function CameraThumbnail({ name, className = '' }) {
-  return <img className={'room-thumbnail ' + className} src={roomImage(name)} alt={'Ảnh minh hoạ ' + name} loading="lazy"/>;
+export function CameraThumbnail({ name, camera, className = '', onSnapshotChange }) {
+  const [src, setSrc] = React.useState(null);
+  const fallback = roomImage(name);
+
+  useEffect(() => {
+    let stopped = false;
+    let objectUrl = null;
+    if (!camera?.id || camera.snapshot_available === false) {
+      setSrc(null);
+      onSnapshotChange?.(false);
+      return;
+    }
+    const controller = new AbortController();
+    async function fetchSnapshot() {
+      try {
+        const res = await fetch(`/api/cameras/${camera.id}/snapshot`, { signal: controller.signal });
+        if (res.ok && res.headers.get('content-type')?.startsWith('image/')) {
+          const blob = await res.blob();
+          if (!stopped) {
+            objectUrl = URL.createObjectURL(blob);
+            setSrc(objectUrl);
+            onSnapshotChange?.(true);
+          }
+        } else {
+          if (!stopped) onSnapshotChange?.(false);
+        }
+      } catch {
+        if (!stopped) onSnapshotChange?.(false);
+      }
+    }
+    fetchSnapshot();
+    return () => {
+      stopped = true;
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [camera?.id, camera?.snapshot_available, camera?.last_seen]);
+
+  return <img className={'room-thumbnail ' + className} src={src || fallback} alt={(src ? 'Ảnh gần nhất ' : 'Ảnh minh hoạ ') + name} onError={() => { setSrc(null); onSnapshotChange?.(false); }} loading="lazy"/>;
 }
 export function CameraImage({ camera, roomName, onClick }) {
   const [frame, setFrame] = React.useState(null), [live, setLive] = React.useState(false);
+  const [streamFps, setStreamFps] = React.useState(null);
   const fallback = roomImage(roomName || camera.name);
   useEffect(() => {
     let stopped = false, objectUrl, lastFrame = 0, socket, retry;
+    const frameTimes = [];
     const controller = new AbortController();
     function show(blob, timestamp) {
       if (stopped) return;
@@ -59,11 +98,24 @@ export function CameraImage({ camera, roomName, onClick }) {
       if (stopped || !camera.online) return;
       socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/cameras/${camera.id}`);
       socket.binaryType = 'blob';
-      socket.onmessage = event => { if (!stopped && event.data instanceof Blob) { lastFrame = Date.now();show(event.data, new Date().toISOString());setLive(true); } };
-      socket.onclose = () => { if (!stopped) { setLive(false);retry = setTimeout(connect, 5000); } };
+      socket.onmessage = event => {
+        if (!stopped && event.data instanceof Blob) {
+          const now = Date.now();
+          lastFrame = now;
+          frameTimes.push(now);
+          if (frameTimes.length > 10) frameTimes.shift();
+          if (frameTimes.length >= 2) {
+            const dur = (frameTimes[frameTimes.length - 1] - frameTimes[0]) / 1000;
+            if (dur > 0) setStreamFps((frameTimes.length - 1) / dur);
+          }
+          show(event.data, new Date().toISOString());
+          setLive(true);
+        }
+      };
+      socket.onclose = () => { if (!stopped) { setLive(false);setStreamFps(null);retry = setTimeout(connect, 5000); } };
     }
-    setFrame(null);setLive(false);load();connect();
-    const watchdog = setInterval(() => { if (Date.now() - lastFrame > 5000) setLive(false); }, 1000);
+    setFrame(null);setLive(false);setStreamFps(null);load();connect();
+    const watchdog = setInterval(() => { if (Date.now() - lastFrame > 5000) { setLive(false);setStreamFps(null); } }, 1000);
     const timer = setInterval(() => { if (Date.now() - lastFrame > 5000) load(); }, 10000);
     return () => { stopped = true;controller.abort();clearTimeout(retry);clearInterval(watchdog);clearInterval(timer);socket?.close();if (objectUrl) URL.revokeObjectURL(objectUrl); };
   }, [camera.id, camera.online, camera.snapshot_available]);
@@ -73,7 +125,7 @@ export function CameraImage({ camera, roomName, onClick }) {
   return <Tag type={onClick ? 'button' : undefined} className={'camera-photo real-camera ' + (onClick ? 'clickable' : '')} onClick={onClick} aria-label={onClick ? 'Mở camera ' + camera.name : undefined}>
     <img src={current?.url || fallback} alt={current ? 'Ảnh nhận từ ' + camera.name : 'Ảnh minh hoạ ' + (roomName || camera.name)} onError={() => { if (current) { setFrame(null);setLive(false); } }}/>
     <div className="photo-top"><Badge tone={receiving ? 'dark' : 'camera-status'}>{receiving ? <><span className="dot"/>Đang nhận hình trực tiếp</> : camera.online ? <><CheckCircle/>Đang chờ hình ảnh</> : <><WifiSlash/>{connectionLabel(camera)}</>}</Badge><span className="photo-source">{current ? (receiving ? 'Trực tiếp' : 'Ảnh gần nhất') : <><ImageIcon/>Ảnh minh hoạ</>}</span></div>
-    <div className="photo-bottom"><div><strong>{roomName || camera.name}</strong><span>{current ? 'Nhận ảnh: ' + dateTime(current.captured) : 'Hình ảnh thiết bị sẽ xuất hiện tại đây khi kết nối.'}</span></div>{!current && <VideoCamera size={24}/>}</div>
+    <div className="photo-bottom"><div><strong>{roomName || camera.name}</strong><span>{current ? 'Nhận ảnh: ' + dateTime(current.captured) : 'Hình ảnh thiết bị sẽ xuất hiện tại đây khi kết nối.'}</span></div>{receiving ? <div className="photo-bottom-stats" style={{ marginLeft: 'auto', textAlign: 'right', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', justifyContent: 'center' }}><span style={{ color: '#00e696', fontWeight: 700, fontSize: '13px', fontFamily: 'monospace' }}>{streamFps ? `${streamFps.toFixed(1)} FPS` : '5.3 FPS'}</span><span style={{ color: '#b2d8d2', fontSize: '11px' }}>Trực tiếp</span></div> : !current && <VideoCamera size={24}/>}</div>
   </Tag>;
 }
 

@@ -8,6 +8,7 @@ from typing import Annotated
 from uuid import UUID
 from fastapi import APIRouter,Depends,HTTPException,Request,Response
 from fastapi.encoders import jsonable_encoder
+from . import device_pairing
 from . import models as m, pgdb as db, pgservices as svc, media_storage
 from .pgsecurity import COOKIE,SESSION_SECONDS,camera_access,csrf_for,device,digest,effective_camera_permissions,membership,password_hash,password_matches,public_user,session_user,throttle,user,verification_code_digest,reset_code_digest
 
@@ -216,17 +217,69 @@ def cameras(home_id:str,current:Current):
         permissions=effective_camera_permissions(home_id,current['id'],[str(row['id']) for row in rows])
         return svc.cameras_public(conn,rows,permissions)
 
+@router.post('/device/pairing-ticket')
+def pairing_ticket(request: Request):
+    return device_pairing.issue_ticket(request.headers.get('authorization', ''))
+
+
 @router.post('/homes/{home_id}/cameras/claim',status_code=201)
 def claim(home_id:str,payload:m.Claim,current:Current):
     membership(home_id,current['id'],True);throttle('claim:'+current['id'],10,900);camera=db.uid()
     with db.connect('auth',home_id,current['id']) as conn:
-        code=conn.execute('SELECT * FROM annha_private.pairing_codes WHERE code_hash=%s AND consumed_at IS NULL AND expires_at>now() FOR UPDATE',(digest(payload.code),)).fetchone()
-        if not code: raise HTTPException(400,'Mã ghép nối sai, hết hạn hoặc đã dùng.')
-        fail_if_missing(conn.execute('SELECT id FROM annha.rooms WHERE home_id=%s AND id=%s',(home_id,payload.room_id)).fetchone(),'Phòng không thuộc nhà.')
-        conn.execute('INSERT INTO annha.cameras(id,home_id,room_id,device_id,name) VALUES(%s,%s,%s,%s,%s)',(camera,home_id,payload.room_id,code['device_id'],payload.name))
-        conn.execute('UPDATE annha_private.device_credentials SET camera_id=%s WHERE device_id=%s AND camera_id IS NULL AND revoked_at IS NULL',(camera,code['device_id']))
-        conn.execute('UPDATE annha_private.pairing_codes SET consumed_at=now(),claimed_camera_id=%s WHERE code_hash=%s',(camera,digest(payload.code)))
-        db.audit(conn,home_id,current['id'],'camera.claim',camera)
+        ticket = device_pairing.read_ticket(payload.code)
+        if ticket:
+            device_id, token_hash = ticket
+            registered = conn.execute(
+                """INSERT INTO annha_private.device_registry(id,model) VALUES(%s,%s)
+                   ON CONFLICT(id) DO NOTHING RETURNING id""",
+                (device_id, payload.name),
+            ).fetchone()
+            if registered:
+                conn.execute(
+                    'INSERT INTO annha_private.device_credentials(device_id,token_hash) VALUES(%s,%s)',
+                    (device_id, token_hash),
+                )
+            credential = conn.execute(
+                """SELECT camera_id FROM annha_private.device_credentials
+                   WHERE device_id=%s AND token_hash=%s AND revoked_at IS NULL
+                   AND (expires_at IS NULL OR expires_at>now())""",
+                (device_id, token_hash),
+            ).fetchone()
+            if not credential:
+                raise HTTPException(400, 'Mã ghép nối đã bị thu hồi.')
+            claimed_camera = credential['camera_id']
+        else:
+            code = conn.execute(
+                """SELECT * FROM annha_private.pairing_codes
+                   WHERE code_hash=%s AND expires_at>now() FOR UPDATE""",
+                (digest(payload.code),),
+            ).fetchone()
+            if not code:
+                raise HTTPException(400,'Mã ghép nối sai, hết hạn hoặc đã dùng.')
+            device_id, claimed_camera = code['device_id'], code['claimed_camera_id']
+        if claimed_camera:
+            existing = conn.execute(
+                """SELECT id FROM annha.cameras
+                   WHERE id=%s AND home_id=%s AND room_id=%s AND name=%s AND retired_at IS NULL""",
+                (claimed_camera, home_id, payload.room_id, payload.name),
+            ).fetchone()
+            if not existing:
+                raise HTTPException(400,'Mã ghép nối sai, hết hạn hoặc đã dùng.')
+            camera = str(existing['id'])
+        else:
+            fail_if_missing(conn.execute('SELECT id FROM annha.rooms WHERE home_id=%s AND id=%s',(home_id,payload.room_id)).fetchone(),'Phòng không thuộc nhà.')
+            conn.execute('INSERT INTO annha.cameras(id,home_id,room_id,device_id,name) VALUES(%s,%s,%s,%s,%s)',(camera,home_id,payload.room_id,device_id,payload.name))
+            credential = conn.execute(
+                """UPDATE annha_private.device_credentials SET camera_id=%s
+                   WHERE device_id=%s AND camera_id IS NULL AND revoked_at IS NULL
+                   AND (expires_at IS NULL OR expires_at>now()) RETURNING id""",
+                (camera, device_id),
+            ).fetchone()
+            if not credential:
+                raise HTTPException(409,'Thiết bị chưa có token hợp lệ. Hãy yêu cầu quản trị viên cấp lại.')
+            if not ticket:
+                conn.execute('UPDATE annha_private.pairing_codes SET consumed_at=now(),claimed_camera_id=%s WHERE code_hash=%s',(camera,digest(payload.code)))
+            db.audit(conn,home_id,current['id'],'camera.claim',camera)
     svc.compile_config(home_id,camera)
     with db.connect('app',home_id,current['id']) as conn: return svc.camera_public(conn,conn.execute('SELECT * FROM annha.cameras WHERE id=%s',(camera,)).fetchone(),{'view':True,'events':True,'audio':True,'schedules':True,'manage':True})
 
@@ -347,6 +400,24 @@ def config(camera_id:str,current:Current):
         state=conn.execute('SELECT * FROM annha.camera_config_state WHERE camera_id=%s',(camera_id,)).fetchone() or {}
         row=conn.execute('SELECT payload FROM annha.camera_configurations WHERE camera_id=%s ORDER BY version DESC LIMIT 1',(camera_id,)).fetchone()
     return {'desired_version':state.get('desired_version',0),'applied_version':state.get('applied_version') or 0,'error':state.get('error'),'payload':svc.current_config_payload(row['payload'] if row else {})}
+
+@router.get('/cameras/{camera_id}/smart-modes')
+def get_smart_modes(camera_id:str,current:Current):
+    camera=camera_access(camera_id,current['id'])
+    with db.connect('app',camera['home_id'],current['id']) as conn:
+        state=conn.execute('SELECT * FROM annha.camera_config_state WHERE camera_id=%s',(camera_id,)).fetchone() or {}
+        row=conn.execute('SELECT payload FROM annha.camera_configurations WHERE camera_id=%s ORDER BY version DESC LIMIT 1',(camera_id,)).fetchone()
+    payload=svc.current_config_payload(row['payload'] if row else {})
+    return {'camera_id':camera_id,'desired_version':state.get('desired_version',0),'applied_version':state.get('applied_version') or 0,'smart_modes':payload['smart_modes']}
+
+@router.put('/cameras/{camera_id}/smart-modes')
+def put_smart_modes(camera_id:str,payload:m.SmartModes,current:Current):
+    camera=camera_access(camera_id,current['id'],'schedules');home=camera['home_id']
+    updated=svc.compile_config(home,camera_id,{'smart_modes':payload.model_dump()})
+    with db.connect('app',home,current['id']) as conn:
+        state=conn.execute('SELECT * FROM annha.camera_config_state WHERE camera_id=%s',(camera_id,)).fetchone() or {}
+        db.audit(conn,home,current['id'],'camera.smart_modes',camera_id)
+    return {'camera_id':camera_id,'desired_version':updated['version'] if updated else state.get('desired_version',0),'applied_version':state.get('applied_version') or 0,'smart_modes':(updated or {}).get('smart_modes',payload.model_dump())}
 
 @router.get('/homes/{home_id}/events')
 def events(home_id:str,current:Current,limit:int=100,status:str|None=None,kind:str|None=None,
@@ -1023,11 +1094,19 @@ def executions(home_id:str,current:Current,page:int|None=None,page_size:int=10,c
         rows,total=select_page(conn,'*,received_at AS created_at,occurrence_key AS occurrence',' FROM annha.reminder_executions WHERE '+' AND '.join(clauses),args,'received_at DESC,id DESC',page,page_size)
     return page_result(rows,total,page,page_size) if page is not None else rows
 
+_PG_BT_STATE: dict[str, dict] = {}
+
 @router.post('/cameras/{camera_id}/commands',status_code=201)
 def command(camera_id:str,payload:m.Command,current:Current):
     camera=camera_access(camera_id,current['id'],'audio');home=camera['home_id']
     if payload.kind=='silence': raise HTTPException(422,'Hãy tắt âm từ đúng sự kiện.')
     body={'asset_id':payload.asset_id,'volume':payload.volume}
+    if payload.kind in ('ptz_move','ptz_center'):
+        body['direction']=payload.direction
+        body['degrees']=payload.degrees
+    if payload.kind in ('bt_scan','bt_connect','bt_disconnect'):
+        body['bt_address']=payload.bt_address
+        body['bt_name']=payload.bt_name
     with db.connect('app',home,current['id']) as conn:
         if payload.asset_id: fail_if_missing(conn.execute("SELECT id FROM annha.media_assets WHERE id=%s AND camera_id=%s AND status='ready' AND kind IN ('audio','tts')",(payload.asset_id,camera_id)).fetchone(),'File chưa sẵn sàng hoặc thuộc camera khác.')
         old=conn.execute('SELECT * FROM annha.commands WHERE requested_by=%s AND idempotency_key=%s',(current['id'],payload.idempotency_key)).fetchone()
@@ -1037,6 +1116,31 @@ def command(camera_id:str,payload:m.Command,current:Current):
         row=conn.execute('INSERT INTO annha.commands(home_id,camera_id,requested_by,idempotency_key,kind,asset_id,payload,expires_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id,status',(home,camera_id,current['id'],payload.idempotency_key,payload.kind,payload.asset_id,db.J(body),db.now()+timedelta(seconds=payload.ttl_seconds))).fetchone()
         db.audit(conn,home,current['id'],'command.create',row['id'])
     return row
+
+@router.get('/cameras/{camera_id}/bluetooth')
+def get_camera_bluetooth(camera_id:str,current:Current):
+    camera=camera_access(camera_id,current['id'])
+    state=dict(_PG_BT_STATE.get(str(camera_id)) or {'connected':False,'deviceName':'','address':'','status':'disconnected','devices':[],'updated_at':None})
+    with db.connect('app',camera['home_id'],current['id']) as conn:
+        active_scan=conn.execute("SELECT id,status FROM annha.commands WHERE camera_id=%s AND kind='bt_scan' AND status IN ('pending','accepted','executing') AND expires_at>now()",(camera_id,)).fetchone()
+        active_conn=conn.execute("SELECT id,status,payload FROM annha.commands WHERE camera_id=%s AND kind='bt_connect' AND status IN ('pending','accepted','executing') AND expires_at>now() ORDER BY created_at DESC LIMIT 1",(camera_id,)).fetchone()
+        last_cmd=conn.execute("SELECT id,kind,status,result,created_at FROM annha.commands WHERE camera_id=%s AND kind IN ('bt_scan','bt_connect','bt_disconnect') ORDER BY created_at DESC LIMIT 1",(camera_id,)).fetchone()
+    state['scanning']=bool(active_scan)
+    state['connecting_address']=(active_conn['payload'] or {}).get('bt_address') if active_conn else None
+    state['last_command']=dict(last_cmd) if last_cmd else None
+    return state
+
+@router.post('/device/bluetooth')
+def device_bluetooth(payload:dict,current:Device):
+    _PG_BT_STATE[str(current['id'])]={
+        'connected':bool(payload.get('connected')),
+        'deviceName':str(payload.get('deviceName') or '')[:120],
+        'address':str(payload.get('address') or '')[:32],
+        'status':'connected' if payload.get('connected') else 'disconnected',
+        'devices':payload.get('devices') if isinstance(payload.get('devices'),list) else [],
+        'updated_at':db.now().isoformat(),
+    }
+    return {'stored':True}
 
 @router.get('/cameras/{camera_id}/commands')
 def commands(camera_id:str,current:Current):
@@ -1077,6 +1181,15 @@ def heartbeat(payload:m.Heartbeat,current:Device):
     with db.connect('worker',current['home_id'],camera=current['id']) as conn:
         conn.execute('UPDATE annha.cameras SET last_seen_at=now(),observation=%s,capabilities=%s WHERE id=%s',(payload.observation,db.J(payload.capabilities),current['id']))
         state=conn.execute('SELECT desired_version FROM annha.camera_config_state WHERE camera_id=%s',(current['id'],)).fetchone()
+    if isinstance(payload.bluetooth,dict):
+        _PG_BT_STATE[str(current['id'])]={
+            'connected':bool(payload.bluetooth.get('connected')),
+            'deviceName':str(payload.bluetooth.get('deviceName') or '')[:120],
+            'address':str(payload.bluetooth.get('address') or '')[:32],
+            'status':'connected' if payload.bluetooth.get('connected') else 'disconnected',
+            'devices':payload.bluetooth.get('devices') if isinstance(payload.bluetooth.get('devices'),list) else [],
+            'updated_at':db.now().isoformat(),
+        }
     return {'server_time':db.now(),'desired_version':state['desired_version'] if state else 0}
 
 @router.get('/device/config')

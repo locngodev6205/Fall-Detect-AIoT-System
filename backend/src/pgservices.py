@@ -72,6 +72,59 @@ def provision_device(name):
         conn.execute('INSERT INTO annha_private.pairing_codes(code_hash,device_id,expires_at) VALUES(%s,%s,%s)',(digest(code),device,db.now()+timedelta(minutes=30)))
     return {'device_id':device,'device_token':token,'pairing_code':code,'expires_in_seconds':1800}
 
+def refresh_device(device_id, *, rotate_token):
+    """Reissue a pending pairing code or replace an existing device credential."""
+    with db.connect('auth') as conn:
+        device = conn.execute(
+            'SELECT id FROM annha_private.device_registry WHERE id=%s FOR NO KEY UPDATE',
+            (device_id,),
+        ).fetchone()
+        if not device:
+            raise ValueError('Không tìm thấy thiết bị.')
+
+        # Claim takes this lock before it links the credential to a camera.
+        conn.execute(
+            'SELECT code_hash FROM annha_private.pairing_codes WHERE device_id=%s AND consumed_at IS NULL FOR UPDATE',
+            (device_id,),
+        ).fetchall()
+        camera = conn.execute(
+            'SELECT id, home_id, retired_at FROM annha.cameras WHERE device_id=%s ORDER BY retired_at NULLS FIRST LIMIT 1 FOR UPDATE',
+            (device_id,),
+        ).fetchone()
+        if camera and camera['retired_at']:
+            raise ValueError('Thiết bị đã được gỡ. Hãy đăng ký thiết bị mới.')
+
+        if rotate_token:
+            token = secrets.token_urlsafe(40)
+            camera_id = camera['id'] if camera else None
+            conn.execute(
+                'UPDATE annha_private.device_credentials SET revoked_at=now() WHERE device_id=%s AND revoked_at IS NULL',
+                (device_id,),
+            )
+            conn.execute(
+                'INSERT INTO annha_private.device_credentials(device_id,camera_id,token_hash) VALUES(%s,%s,%s)',
+                (device_id, camera_id, digest(token)),
+            )
+            if camera:
+                conn.execute('UPDATE annha.cameras SET last_seen_at=NULL WHERE id=%s', (camera_id,))
+                conn.execute("SELECT set_config('app.home_id', %s, true)", (str(camera['home_id']),))
+                db.audit(conn, camera['home_id'], None, 'camera.rotate_token', camera_id, camera_id)
+            return {'device_id':device_id,'device_token':token}
+
+        if camera:
+            raise ValueError('Thiết bị đã ghép nối. Dùng --rotate-token nếu cần đổi token.')
+        code = secrets.token_urlsafe(16)
+        conn.execute(
+            'DELETE FROM annha_private.pairing_codes WHERE device_id=%s AND consumed_at IS NULL',
+            (device_id,),
+        )
+        conn.execute(
+            'INSERT INTO annha_private.pairing_codes(code_hash,device_id,expires_at) VALUES(%s,%s,%s)',
+            (digest(code), device_id, db.now()+timedelta(minutes=30)),
+        )
+        return {'device_id':device_id,'pairing_code':code,'expires_in_seconds':1800}
+
+
 def cameras_public(conn,rows,permissions=None):
     rows=list(rows)
     if not rows: return []
@@ -91,8 +144,21 @@ def cameras_public(conn,rows,permissions=None):
 
 def camera_public(conn,row,permissions=None): return cameras_public(conn,[row],permissions)[0]
 
+DEFAULT_SMART_MODES = {
+    'fall_detection': True,
+    'servo_tracking': True,
+    'night_mode_enabled': True,
+    'night_start': '22:00',
+    'night_end': '06:00',
+}
+
 def current_config_payload(payload):
-    return {key:value for key,value in payload.items() if key not in ('zones','reference')}
+    cleaned = {key:value for key,value in payload.items() if key not in ('zones','reference')}
+    smart_modes = dict(DEFAULT_SMART_MODES)
+    if isinstance(cleaned.get('smart_modes'), dict):
+        smart_modes.update(cleaned['smart_modes'])
+    cleaned['smart_modes'] = smart_modes
+    return cleaned
 
 def device_config_payload(payload):
     # Empty legacy tombstones tell older edge clients to clear cached zone fields.
@@ -112,7 +178,7 @@ def reminder_rows(conn,home,camera=None,include_deleted=False):
         result.append(item)
     return result
 
-def compile_config(home,camera):
+def compile_config(home,camera,extra_patch=None):
     with db.connect('worker',home,camera=camera) as conn:
         found=conn.execute('SELECT id FROM annha.cameras WHERE id=%s AND retired_at IS NULL FOR UPDATE',(camera,)).fetchone()
         if not found: return None
@@ -120,8 +186,10 @@ def compile_config(home,camera):
         settings.pop('home_id',None);settings.pop('updated_at',None)
         reminders=reminder_rows(conn,home,camera)
         previous=conn.execute('SELECT * FROM annha.camera_configurations WHERE camera_id=%s ORDER BY version DESC LIMIT 1',(camera,)).fetchone()
-        body=jsonable_encoder({'camera_id':camera,'environment':settings,'reminders':reminders})
-        if previous and {key:value for key,value in previous['payload'].items() if key!='version'}==body: return previous['payload']
+        prev_modes=current_config_payload(previous['payload'] if previous else {})['smart_modes']
+        body=jsonable_encoder({'camera_id':camera,'environment':settings,'reminders':reminders,'smart_modes':prev_modes})
+        if extra_patch: body.update(jsonable_encoder(extra_patch))
+        if previous and {key:value for key,value in current_config_payload(previous['payload']).items() if key!='version'}==body: return previous['payload']
         version=previous['version']+1 if previous else 1;body['version']=version
         conn.execute('INSERT INTO annha.camera_configurations(home_id,camera_id,version,payload) VALUES(%s,%s,%s,%s)',(home,camera,version,db.J(body)))
         conn.execute('''INSERT INTO annha.camera_config_state(home_id,camera_id,desired_version) VALUES(%s,%s,%s)

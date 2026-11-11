@@ -21,7 +21,7 @@ export function AudioPicker({camera,value,onChange,onReady,upload=false}) {
     try{const result=await api('/cameras/'+camera+'/assets',{method:'POST',body:file,headers:{'Content-Type':file.type||'audio/wav','X-File-Name':encodeURIComponent(file.name)}});onChange(result.id);setVersion(n=>n+1);notify('Đã nhận file âm thanh.');}
     catch(error){notify(error.message);}finally{setBusy(false);}
   }
-  const options=list.items;
+  const options=(list.items||[]).filter(a => !a.mime || a.mime.startsWith('audio/'));
   return <div className="audio-picker">
     <Field label="Tìm âm thanh"><input type="search" value={search} placeholder="Nhập tên file…" onChange={e=>setSearch(e.target.value)}/></Field>
     <ResourceState resource={list}><Field label="Chọn file thuộc camera đích"><select value={value||''} onChange={e=>onChange(e.target.value)}><option value="">Chọn âm thanh</option>{value&&!options.some(a=>a.id===value)&&<option value={value}>{selected.data?.name||'File đang chọn'}</option>}{options.map(a=><option key={a.id} value={a.id}>{a.name} · {dateTime(a.created_at)}</option>)}</select></Field><ServerPager resource={list} label="file để chọn"/></ResourceState>

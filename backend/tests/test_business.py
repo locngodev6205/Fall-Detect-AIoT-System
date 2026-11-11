@@ -53,6 +53,10 @@ class BusinessTests(unittest.TestCase):
         client.headers['Authorization']='Bearer '+provision['device_token']
         return client
 
+    def test_pi_self_enrollment(self):
+        from backend.tests.device_pairing_cases import exercise_self_enrollment
+        exercise_self_enrollment(self)
+
     def test_auth_csrf_reset_and_password_hash(self):
         client,account=self.account('owner@example.com')
         self.assertEqual(self.client.get('/api/homes').status_code,401)

@@ -43,7 +43,21 @@ def check_origin(origin):
     if not origin:
         return True
     origins = os.getenv('APP_ORIGINS', 'http://localhost:8188,http://127.0.0.1:8188,http://localhost:5188,http://127.0.0.1:5188')
-    return origin.rstrip('/') in {x.strip().rstrip('/') for x in origins.split(',')}
+    allowed = {x.strip().rstrip('/') for x in origins.split(',') if x.strip()}
+    clean = origin.rstrip('/')
+    if clean in allowed:
+        return True
+    # Hỗ trợ tự động các IP trong mạng nội bộ LAN (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
+    parsed = urlsplit(clean)
+    host = parsed.hostname or ''
+    port = parsed.port
+    is_private_ip = (
+        host.startswith(('192.168.', '10.')) or
+        (host.startswith('172.') and 16 <= int(host.split('.')[1]) <= 31 if host.count('.') == 3 and host.split('.')[1].isdigit() else False)
+    )
+    if is_private_ip and (port in (8188, 5188, 8000, 80, None)):
+        return True
+    return False
 
 
 def session_user(token):

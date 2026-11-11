@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS commands(id TEXT PRIMARY KEY,camera_id TEXT NOT NULL 
 CREATE TABLE IF NOT EXISTS deliveries(id TEXT PRIMARY KEY,home_id TEXT NOT NULL REFERENCES homes(id),event_id TEXT NOT NULL REFERENCES events(id),status TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,next_attempt REAL NOT NULL DEFAULT 0,error TEXT,UNIQUE(event_id));
 CREATE TABLE IF NOT EXISTS device_health(camera_id TEXT PRIMARY KEY,source_id TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS environment_states(camera_id TEXT NOT NULL,metric TEXT NOT NULL,since REAL,source_id TEXT,active INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(camera_id,metric));
+CREATE TABLE IF NOT EXISTS camera_bluetooth(camera_id TEXT PRIMARY KEY,payload TEXT NOT NULL DEFAULT '{}',updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS audit(id TEXT PRIMARY KEY,home_id TEXT NOT NULL,user_id TEXT NOT NULL,action TEXT NOT NULL,target TEXT NOT NULL,created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_events_home ON events(home_id,received_at);
 CREATE INDEX IF NOT EXISTS idx_telemetry_camera ON telemetry(camera_id,id);

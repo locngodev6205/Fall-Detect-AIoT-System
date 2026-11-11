@@ -6,9 +6,47 @@ Tài liệu cho firmware/agent tại Pi; đây là giao thức đã có ở back
 
 ## 1. Cấp và ghép nối
 
-Quản trị chạy `docker compose exec backend python -m src.provision --name "Camera phòng khách"`. Giữ `device_token` tại thiết bị; mã ghép nối dùng một lần, hết hạn sau 30 phút. Chủ nhà đăng nhập web, tạo phòng và nhập mã. Trước khi được claim, credential không truy cập được device API.
+### Chủ nhà tự thêm Pi
 
-Tất cả HTTP device API dùng header `Authorization: Bearer <device_token>`. Base URL mặc định trên máy chạy Docker: `http://localhost:8188`; thiết bị LAN cần cấu hình truy cập an toàn và địa chỉ mạng thực tế, không dùng localhost của Pi để chỉ backend ở máy khác. Không ghi token vào log hoặc commit Git.
+Trên Pi đã cài AnNhà Edge, chuẩn bị file cấu hình một lần:
+
+```sh
+cd fall_detect
+cp -n .env.edge.example .env.edge
+```
+
+Đặt `ANNHA_BASE_URL` trong `.env.edge` thành địa chỉ backend mà Pi truy cập được. Ví dụ `http://192.168.1.20:8188` khi máy chạy Docker có IP đó trong LAN. Khi kết nối qua Internet, dùng URL HTTPS. Với bộ cài đã có URL, bỏ qua bước này.
+
+1. Chạy `bash run_edge.sh --pair` trên Pi và giữ terminal mở.
+2. Trên web, mở **Thiết bị → Thêm thiết bị** bằng tài khoản chủ nhà. Dán mã Pi hiển thị, nhập tên camera và chọn phòng.
+3. Pi nhận cấu hình, lưu token cục bộ và khởi động edge. Kiểm tra **Đang kết nối** và hình ảnh camera trên web.
+4. Khi khởi động lại Pi, chạy `bash run_edge.sh`. Pi dùng lại file `fall_detect/.env.edge.pairing.json`.
+
+Mã có hiệu lực 30 phút. Pi sẽ hiển thị mã mới khi mã hết hạn. Nếu mất phản hồi lúc bấm đăng ký, gửi lại cùng mã, tên và phòng. Nếu đã gỡ camera và muốn đăng ký Pi lại, dừng edge, xóa file `.env.edge.pairing.json` trên Pi, rồi chạy lại `bash run_edge.sh --pair`. Khi trình cài đặt báo không lấy được mã (HTTP 404), cập nhật backend lên bản có API ghép Pi trước.
+
+### Đăng ký và khôi phục qua CLI quản trị
+
+Trên máy chạy backend, quản trị viên cấp thiết bị:
+
+```sh
+./scripts/new_device.sh "Camera phòng khách"
+```
+
+Lưu lại `DEVICE_ID` để quản lý thiết bị. Trên Pi, đặt `DEVICE_TOKEN` và `ANNHA_BASE_URL` trong `fall_detect/.env.edge`. URL phải truy cập được từ Pi, ví dụ `http://192.168.1.20:8188` nếu máy chạy Docker có IP đó trong LAN. Dùng HTTPS khi kết nối qua Internet. Chỉ dùng `localhost` khi Pi cũng chạy backend.
+
+Chủ nhà chọn nhà và phòng ở `#/setup`, nhập mã ghép nối rồi khởi động edge. Mã có hiệu lực 30 phút và chỉ tạo một camera. Nếu web mất kết nối lúc gửi yêu cầu, nhập lại cùng mã, phòng và tên trong thời hạn đó để lấy lại kết quả. Trang Thiết bị hiển thị kết nối sau heartbeat đầu tiên.
+
+```sh
+# Mã hết hạn trước khi ghép nối, token trên Pi vẫn dùng được sau khi ghép.
+./scripts/new_device.sh --reissue-code DEVICE_ID
+
+# Pi mất token hoặc cần thay token. Lệnh thu hồi token cũ ngay.
+./scripts/new_device.sh --rotate-token DEVICE_ID
+```
+
+Thay token trên Pi và khởi động lại edge sau khi xoay token. Camera và lịch sử giữ nguyên. Nếu camera đã được gỡ, đăng ký thiết bị mới. Có thể thêm `--save-env --base-url URL_BACKEND` khi tạo thiết bị hoặc đổi token để ghi file cấu hình trên máy chạy script. Chuyển file đến Pi nếu Pi ở máy khác.
+
+Thiết bị dùng `Authorization: Bearer <device_token>` cho device API. Token chỉ có quyền gọi API sau khi ghép nối và phải được giữ trên Pi.
 
 ## 2. Heartbeat và cấu hình
 
