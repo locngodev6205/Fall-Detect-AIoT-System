@@ -69,7 +69,10 @@ services:
     command: ["python", "-m", "src.telegram_poller"]
     # This process has no HTTP server; readiness comes from persisted polling state.
     healthcheck:
-      disable: true
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
     # Finish the current long poll and commit/rollback before Docker sends SIGKILL.
     stop_grace_period: 60s
     environment:

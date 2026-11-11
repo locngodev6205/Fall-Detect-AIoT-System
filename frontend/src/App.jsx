@@ -80,7 +80,7 @@ export function App() {
   useEffect(() => { let active = true;api('/auth/me').then(result => { if (active) { setUser(result.user);setCsrf(result.csrf); } }).catch(() => {}).finally(() => { if (active) setBoot(false); });return () => { active = false; }; }, []);
   useEffect(() => { if (user) reloadHomes().catch(() => {}); }, [user?.id]);
   useEffect(() => { alertSessionRef.current++;alertRequestRef.current++;alertBaselineRef.current=null;knownAlertIds.current = null;setActiveAlerts({ count: 0, items: [] });setAlertOpen(false);setToast(''); }, [home?.id,user?.id]);
-  useEffect(() => { const timer = setInterval(() => { if (document.visibilityState === 'visible' && !['events','event'].includes(section)) reload(); },30000);return () => clearInterval(timer); }, [section]);
+  useEffect(() => { const timer = setInterval(() => { if (document.visibilityState === 'visible' && !['events','event'].includes(section)) reload(); },10000);return () => clearInterval(timer); }, [section]);
   useEffect(() => { if (!toast) return;const timer = setTimeout(() => setToast(''),6000);return () => clearTimeout(timer); }, [toast]);
   useEffect(() => {
     if (!boot && !user && !publicPage) { sessionStorage.setItem('annha-after-login', path);go('/login'); }
