@@ -16,6 +16,8 @@ Thiết kế đầy đủ: [DATABASE_DESIGN_NEON.md](../../../docs/architecture/
 - `011_notification_policies.sql`: thêm phạm vi camera cho từng kênh nhận, bộ lọc/giới hạn nhắc lại và hàm worker kiểm tra quyền trước khi gửi; additive, không xoá dữ liệu/media.
 - `012_telegram_pairing.sql`: thêm liên kết Telegram một lần và offset polling bền vững; bật RLS/FORCE RLS cho hai bảng riêng, chỉ `annha_worker` được truy cập; additive, không xoá dữ liệu hoặc media.
 - `013_invitation_codes.sql`: mã mời một lần/7 ngày lưu hash, RLS/FORCE chỉ auth control plane; mở rộng CHECK role để có member/view-only. Đã áp Neon production sau phê duyệt ngày 05/11/2026; dữ liệu và checksum migration cũ giữ nguyên.
+- `014_ptz_commands.sql`: cho phép lệnh PTZ thủ công trong bảng lệnh thiết bị.
+- `015_event_reads.sql`: lưu trạng thái đã đọc theo từng người dùng và sự kiện, có RLS theo quyền xem camera. API đánh dấu đã đọc sẽ chuyển sự kiện đang mở sang đã tiếp nhận khi người dùng có quyền xử lý sự kiện. Áp dụng migration này trước khi chạy backend có API đánh dấu đã đọc.
 
 Từ thư mục gốc repository, dùng service config của libpq đã cấu hình connection/secret bên ngoài Git:
 

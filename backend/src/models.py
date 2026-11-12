@@ -1,6 +1,7 @@
 import re
 from datetime import date
 from typing import Literal
+from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -292,6 +293,10 @@ class NotificationRecipientUpdate(Model):
 
 class DeleteHome(Model):
     confirmation: str = Field(min_length=1,max_length=120)
+
+
+class DeleteAsset(Model):
+    expected_reminder_ids: list[UUID] = Field(default_factory=list,max_length=1000)
 
 
 class TtsPreview(Model):

@@ -1,6 +1,9 @@
 """Select the configured persistence backend at process startup."""
 import os
-if os.getenv("DATABASE_BACKEND", "sqlite")=="postgres":
+backend=os.getenv("DATABASE_BACKEND", "postgres").lower()
+if backend=="postgres":
     from .pgmain import app
-else:
+elif backend=="sqlite":
     from .main import app
+else:
+    raise RuntimeError("DATABASE_BACKEND phải là postgres hoặc sqlite.")

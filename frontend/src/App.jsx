@@ -10,7 +10,8 @@ import { Events, EventDetail } from './EventScreens';
 import { Reminders } from './Reminders';
 import { Account, Invitation, Members, Settings } from './AdminScreens';
 import { canCamera } from './cameraPermissions';
-import {AlertSoundControl,useAlertSound} from './alertSound';
+import {useAlertSound} from './alertSound';
+import { AlertPopover } from './AlertPopover';
 import { useConfirmation } from './confirmation';
 
 const nav = [['overview','Tổng quan',SquaresFour],['cameras','Camera',VideoCamera],['events','Sự kiện',Bell],['environment','Môi trường',Leaf],['reminders','Lời nhắc & âm thanh',SpeakerHigh],['devices','Thiết bị',DeviceMobile],['members','Thành viên & quyền',Users],['settings','Cài đặt',Gear]];
@@ -21,6 +22,7 @@ export function App() {
   const [user, setUser] = useState(null), [boot, setBoot] = useState(true), [homes, setHomes] = useState([]), [homeId, setHomeId] = useState(sessionStorage.getItem('annha-active-home') || '');
   const alertSound=useAlertSound(user?.id);
   const [data, setData] = useState({ ...emptyData, homeId: null }), [dataError, setDataError] = useState(''), [tick, setTick] = useState(0), [alertTick, setAlertTick] = useState(0), [activeAlerts, setActiveAlerts] = useState({ count: 0, items: [] }), [alertOpen, setAlertOpen] = useState(false), [toast, setToast] = useState(''), [menu, setMenu] = useState(false);
+  const [readingAlertId,setReadingAlertId]=useState('');
   const knownAlertIds = useRef(null);
   const activeHomeRef = useRef(null);
   const alertSessionRef = useRef(0), alertRequestRef = useRef(0), alertBaselineRef = useRef(null);
@@ -62,6 +64,29 @@ export function App() {
       // A network outage preserves the last authorized summary until reconnect.
     }
   }
+  async function markAlertRead(eventId) {
+    if (readingAlertId) return;
+    const targetHome=home?.id;
+    setReadingAlertId(eventId);
+    try {
+      await api('/events/'+eventId+'/read',{method:'POST',body:{}});
+      if (activeHomeRef.current !== targetHome) return;
+      setActiveAlerts(previous => {
+        const wasUnread=previous.items.some(item=>item.id===eventId&&!item.is_read);
+        return {...previous,unread_count:Math.max(0,(previous.unread_count??previous.count??0)-(wasUnread?1:0)),
+          items:previous.items.map(item=>item.id===eventId?{...item,is_read:true}:item)};
+      });
+      reloadAlerts(targetHome);reload();
+    } catch (error) { if (activeHomeRef.current === targetHome) notify(error.message); }
+    finally { setReadingAlertId(''); }
+  }
+  async function markAllAlertsRead() {
+    if (readingAlertId || !home) return;
+    const targetHome=home.id;setReadingAlertId('all');
+    try { await api('/homes/'+targetHome+'/events/read-all',{method:'POST',body:{}});if(activeHomeRef.current===targetHome){reloadAlerts(targetHome);reload();} }
+    catch(error){if(activeHomeRef.current===targetHome)notify(error.message);}
+    finally{setReadingAlertId('');}
+  }
   function selectHome(value) { setHomeId(value);sessionStorage.setItem('annha-active-home', value);setData({ ...emptyData, homeId: null }); }
   async function reloadHomes() {
     setHomesLoading(true);
@@ -79,7 +104,7 @@ export function App() {
   useEffect(() => { const listener = () => { setPath(location.hash.slice(1) || '/');setMenu(false); };window.addEventListener('hashchange',listener);return () => window.removeEventListener('hashchange',listener); }, []);
   useEffect(() => { let active = true;api('/auth/me').then(result => { if (active) { setUser(result.user);setCsrf(result.csrf); } }).catch(() => {}).finally(() => { if (active) setBoot(false); });return () => { active = false; }; }, []);
   useEffect(() => { if (user) reloadHomes().catch(() => {}); }, [user?.id]);
-  useEffect(() => { alertSessionRef.current++;alertRequestRef.current++;alertBaselineRef.current=null;knownAlertIds.current = null;setActiveAlerts({ count: 0, items: [] });setAlertOpen(false);setToast(''); }, [home?.id,user?.id]);
+  useEffect(() => { alertSessionRef.current++;alertRequestRef.current++;alertBaselineRef.current=null;knownAlertIds.current = null;setActiveAlerts({ count: 0, items: [] });setAlertOpen(false);setReadingAlertId('');setToast(''); }, [home?.id,user?.id]);
   useEffect(() => { const timer = setInterval(() => { if (document.visibilityState === 'visible' && !['events','event'].includes(section)) reload(); },10000);return () => clearInterval(timer); }, [section]);
   useEffect(() => { if (!toast) return;const timer = setTimeout(() => setToast(''),6000);return () => clearTimeout(timer); }, [toast]);
   useEffect(() => {
@@ -134,6 +159,7 @@ export function App() {
     return () => { stopped = true;clearInterval(poll);clearTimeout(timer);socket?.close(); };
   }, [user?.id,home?.id]);
   const currentData = data.homeId === home?.id ? data : emptyData;
+  const unreadAlertCount=activeAlerts.unread_count??activeAlerts.count;
   const value = { user, setUser, home, homes, homeId: home?.id, selectHome, reloadHomes, ...currentData, tick, alertTick, reloadAlerts, reload, notify, confirm, can, logout };
   function screen() {
     if (section === 'homes') return homesError ? <div className="notice error">{homesError}<Button onClick={() => reloadHomes().catch(() => {})}>Thử lại</Button></div> : homesLoading && !homes.length ? <p>Đang tải danh sách nhà…</p> : <Homes/>;
@@ -149,7 +175,7 @@ export function App() {
       case 'setup': return <Setup/>;
       case 'cameras': return <Cameras/>;
       case 'camera': return <CameraDetail id={id}/>;
-      case 'events': case 'backend-alerts': return <Events/>;
+      case 'events': case 'backend-alerts': return <Events initialStatus={params.get('status')||''}/>;
       case 'event': return <EventDetail key={id} id={id}/>;
       case 'environment': return <Environment/>;
       case 'reminders': return <Reminders key={home.id + (id || '')} initialTab={id === 'send' ? 'send' : 'schedule'}/>;
@@ -165,6 +191,6 @@ export function App() {
   else if (['login','register','verify','forgot','reset'].includes(section)) content = <Auth key={section + (params.get('token') || '')} page={section} token={params.get('token') || ''} onLogin={setUser}/>;
   else if (['privacy','terms','support'].includes(section)) content = <main className="public-document"><Logo/><h1>{({privacy:'Quyền riêng tư',terms:'Điều khoản sử dụng',support:'Hỗ trợ AnNhà'})[section]}</h1><p>Chỉ người được cấp quyền mới có thể xem camera và dữ liệu theo nhà. Chủ nhà quản lý thành viên, thời gian lưu trữ và chia sẻ Telegram trong cài đặt.</p><p>Hệ thống hỗ trợ nhận biết tình huống cần kiểm tra, không chẩn đoán bệnh lý hoặc thay thế chăm sóc trực tiếp.</p><a href="#/">Về trang chủ</a></main>;
   else if (boot || !user) content = <main className="public-document"><Logo/><p>Đang kiểm tra phiên đăng nhập…</p></main>;
-  else content = <div className="app-shell"><aside className="sidebar"><Logo href="#/overview"/><button className="home-selector" onClick={() => go('/homes')}><House/><strong>{home?.name || 'Chọn nhà'}</strong><CaretDown/></button><nav>{nav.filter(([key]) => home?.role === 'owner' || !['members','settings'].includes(key)).map(([key,label,Icon]) => <a key={key} className={section === key || (key === 'cameras' && section === 'camera') || (key === 'events' && section === 'event') ? 'active' : ''} href={'#/' + key}><Icon/><span>{label}</span></a>)}</nav><footer className="sidebar-footer"><button className="sidebar-logout" onClick={logout}><SignOut/>Đăng xuất</button><div className="sidebar-bottom"><ShieldCheck/><span>Không gian riêng của gia đình<small>{roleNames[home?.role] || 'Tài khoản đã xác minh'}</small></span></div></footer></aside><div className="app-main"><header className="topbar"><span>{nav.find(([key]) => key === section)?.[1] || 'AnNhà'}</span><div className="topbar-controls"><small>{new Date().toLocaleDateString('vi-VN')}</small><button className="icon alert-toggle" aria-label={`Thông báo${activeAlerts.count ? `, ${activeAlerts.count} sự kiện đang mở` : ''}`} aria-expanded={alertOpen} onClick={() => setAlertOpen(value => !value)}><Bell/>{activeAlerts.count>0&&<span className="alert-count">{activeAlerts.count>99?'99+':activeAlerts.count}</span>}</button><button className="icon" title="Đăng xuất" aria-label="Đăng xuất" onClick={logout}><SignOut/></button><button className="account-button" onClick={() => setMenu(!menu)}><span className="avatar small">{user.name.slice(0,1)}</span><span>{user.name}</span><CaretDown/></button></div>{alertOpen&&<section className="alert-popover" aria-label="Sự kiện đang cần chú ý"><header><strong>Cảnh báo đang mở</strong><button onClick={()=>{setAlertOpen(false);go('/events');}}>Xem tất cả</button></header><AlertSoundControl sound={alertSound}/>{activeAlerts.items.length?activeAlerts.items.map(event=><button className="alert-popover-row" key={event.id} onClick={()=>{setAlertOpen(false);go('/event/'+event.id);}}><span className={'alert-dot '+(event.severity==='critical'?'critical':'')}/><span><strong>{event.camera_name||'Camera'}</strong><small>{event.reason||'Cần kiểm tra'} · {event.status==='ACKNOWLEDGED'?'Đã tiếp nhận':'Chưa tiếp nhận'}</small></span></button>):<p className="alert-empty">Không có cảnh báo đang mở.</p>}</section>}{menu && <div className="account-menu"><strong>{user.name}</strong><small>{user.email}</small><a href="#/account">Tài khoản</a><a href="#/homes">Chuyển nhà</a><button className="button ghost" onClick={logout}>Đăng xuất</button></div>}</header><main className="workspace">{dataError && data.homeId === home?.id && <div className="notice error" role="status">Chưa thể cập nhật dữ liệu. Nội dung gần nhất được giữ lại.<Button kind="ghost" onClick={reload}>Thử lại</Button></div>}<ScreenBoundary key={home?.id + path} onRetry={reload}>{screen()}</ScreenBoundary></main></div><nav className="bottom-nav">{[['overview','Tổng quan',SquaresFour],['cameras','Camera',VideoCamera],['events','Sự kiện',Bell],['reminders','Lời nhắc',SpeakerHigh],['more','Thêm',DotsThree]].map(([key,label,Icon]) => <a key={key} className={section === key ? 'active' : ''} href={'#/' + key}><Icon/>{label}</a>)}</nav></div>;
+  else content = <div className="app-shell"><aside className="sidebar"><Logo href="#/overview"/><button className="home-selector" onClick={() => go('/homes')}><House/><strong>{home?.name || 'Chọn nhà'}</strong><CaretDown/></button><nav>{nav.filter(([key]) => home?.role === 'owner' || !['members','settings'].includes(key)).map(([key,label,Icon]) => <a key={key} className={section === key || (key === 'cameras' && section === 'camera') || (key === 'events' && section === 'event') ? 'active' : ''} href={'#/' + key}><Icon/><span>{label}</span></a>)}</nav><footer className="sidebar-footer"><button className="sidebar-logout" onClick={logout}><SignOut/>Đăng xuất</button><div className="sidebar-bottom"><ShieldCheck/><span>Không gian riêng của gia đình<small>{roleNames[home?.role] || 'Tài khoản đã xác minh'}</small></span></div></footer></aside><div className="app-main"><header className="topbar"><span>{nav.find(([key]) => key === section)?.[1] || 'AnNhà'}</span><div className="topbar-controls"><small>{new Date().toLocaleDateString('vi-VN')}</small><button className="icon alert-toggle" aria-label={`Thông báo${unreadAlertCount ? `, ${unreadAlertCount} chưa đọc` : ''}`} aria-expanded={alertOpen} onClick={() => setAlertOpen(value => !value)}><Bell/>{unreadAlertCount>0&&<span className="alert-count">{unreadAlertCount>99?'99+':unreadAlertCount}</span>}</button><button className="icon" title="Đăng xuất" aria-label="Đăng xuất" onClick={logout}><SignOut/></button><button className="account-button" onClick={() => setMenu(!menu)}><span className="avatar small">{user.name.slice(0,1)}</span><span>{user.name}</span><CaretDown/></button></div>{alertOpen&&<AlertPopover alerts={activeAlerts} sound={alertSound} onRead={markAlertRead} onReadAll={markAllAlertsRead} readingId={readingAlertId} onClose={() => setAlertOpen(false)}/>}{menu && <div className="account-menu"><strong>{user.name}</strong><small>{user.email}</small><a href="#/account">Tài khoản</a><a href="#/homes">Chuyển nhà</a><button className="button ghost" onClick={logout}>Đăng xuất</button></div>}</header><main className="workspace">{dataError && data.homeId === home?.id && <div className="notice error" role="status">Chưa thể cập nhật dữ liệu. Nội dung gần nhất được giữ lại.<Button kind="ghost" onClick={reload}>Thử lại</Button></div>}<ScreenBoundary key={home?.id + path} onRetry={reload}>{screen()}</ScreenBoundary></main></div><nav className="bottom-nav">{[['overview','Tổng quan',SquaresFour],['cameras','Camera',VideoCamera],['events','Sự kiện',Bell],['reminders','Lời nhắc',SpeakerHigh],['more','Thêm',DotsThree]].map(([key,label,Icon]) => <a key={key} className={section === key ? 'active' : ''} href={'#/' + key}><Icon/>{label}</a>)}</nav></div>;
   return <AppContext.Provider value={value}>{content}{dialog}{toast && <div className="toast" role="status" aria-live="polite"><CheckCircle/><span>{toast}</span><button className="icon" aria-label="Đóng thông báo" onClick={() => setToast('')}><X/></button></div>}</AppContext.Provider>;
 }

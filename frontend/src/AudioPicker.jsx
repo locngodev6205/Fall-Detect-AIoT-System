@@ -10,7 +10,10 @@ export function AudioPicker({camera,value,onChange,onReady,upload=false}) {
   useEffect(()=>{const timer=setTimeout(()=>setQuery(search.trim()),250);return()=>clearTimeout(timer);},[search]);
   const list=useServerPage(camera?`/homes/${home.id}/assets?audio_only=true&status=ready&camera_id=${camera}&q=${encodeURIComponent(query)}`:null,version);
   const selected=useResource(value?'/assets/'+value+'/metadata':null,version);
-  const ready=!!value&&selected.data?.status==='ready'&&selected.data?.camera_id===camera;
+  const options=(list.items||[]).filter(a => !a.mime || a.mime.startsWith('audio/'));
+  const ready=!!value&&(selected.data
+    ? selected.data.status==='ready'&&selected.data.camera_id===camera
+    : options.some(a=>a.id===value&&a.camera_id===camera&&a.status==='ready'));
   useEffect(()=>{onReady?.(ready);},[ready,onReady]);
   useEffect(()=>{
     if(!value||!['uploading','processing'].includes(selected.data?.status))return;
@@ -21,7 +24,6 @@ export function AudioPicker({camera,value,onChange,onReady,upload=false}) {
     try{const result=await api('/cameras/'+camera+'/assets',{method:'POST',body:file,headers:{'Content-Type':file.type||'audio/wav','X-File-Name':encodeURIComponent(file.name)}});onChange(result.id);setVersion(n=>n+1);notify('Đã nhận file âm thanh.');}
     catch(error){notify(error.message);}finally{setBusy(false);}
   }
-  const options=(list.items||[]).filter(a => !a.mime || a.mime.startsWith('audio/'));
   return <div className="audio-picker">
     <Field label="Tìm âm thanh"><input type="search" value={search} placeholder="Nhập tên file…" onChange={e=>setSearch(e.target.value)}/></Field>
     <ResourceState resource={list}><Field label="Chọn file thuộc camera đích"><select value={value||''} onChange={e=>onChange(e.target.value)}><option value="">Chọn âm thanh</option>{value&&!options.some(a=>a.id===value)&&<option value={value}>{selected.data?.name||'File đang chọn'}</option>}{options.map(a=><option key={a.id} value={a.id}>{a.name} · {dateTime(a.created_at)}</option>)}</select></Field><ServerPager resource={list} label="file để chọn"/></ResourceState>

@@ -87,7 +87,7 @@ def run(stop_event=None):
     failures=0
     last_idle_reason=None
     while not stop_event.is_set():
-        if os.getenv('DATABASE_BACKEND','sqlite').lower()!='postgres' or not services.telegram_bot_ref():
+        if os.getenv('DATABASE_BACKEND','postgres').lower()!='postgres' or not services.telegram_bot_ref():
             reason='database_or_bot_not_configured'
             if reason!=last_idle_reason: logger.info('Telegram polling is waiting for server configuration')
             last_idle_reason=reason
