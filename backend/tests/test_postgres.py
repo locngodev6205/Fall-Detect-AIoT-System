@@ -1563,6 +1563,32 @@ class PostgresTests(unittest.TestCase):
         from .invitation_code_cases import exercise
         exercise(self,postgres=True)
 
+    def test_audio_delete_requires_exact_reminder_warning(self):
+        owner,_=self.account('audio-delete-warning@example.com')
+        home,_,camera,_=self.home_camera(owner)
+        asset_id=db.uid()
+        with db.connect('worker',home['id']) as conn:
+            conn.execute("""INSERT INTO annha.media_assets(id,home_id,camera_id,kind,name,mime_type,status,provider,upload_key,local_object_key,size_bytes,ready_at)
+                VALUES(%s,%s,%s,'audio','Bản ghi cần xóa','audio/wav','ready','local',%s,%s,44,now())""",
+                (asset_id,home['id'],camera['id'],db.uid(),asset_id+'.wav'))
+        reminders=[]
+        for name,enabled in [('Lời nhắc đang bật',True),('Lời nhắc đã tắt',False)]:
+            response=owner.post(f"/api/homes/{home['id']}/reminders",json={'camera_id':camera['id'],'name':name,'time':'09:00','source':'audio','asset_id':asset_id,'enabled':enabled})
+            self.assertEqual(response.status_code,201,response.text)
+            reminders.append(response.json()['id'])
+        url='/api/assets/'+asset_id
+        self.assertEqual(owner.get(url+'/metadata').json()['used_count'],2)
+        self.assertEqual(owner.delete(url).status_code,409)
+        self.assertEqual(owner.request('DELETE',url,json={'expected_reminder_ids':reminders[:1]}).status_code,409)
+        response=owner.request('DELETE',url,json={'expected_reminder_ids':reminders})
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(response.json()['deleted_reminder_count'],2)
+        with db.connect('worker',home['id']) as conn:
+            rows=conn.execute('SELECT enabled,deleted_at FROM annha.reminders WHERE id=ANY(%s::uuid[])',(reminders,)).fetchall()
+            status=conn.execute('SELECT status FROM annha.media_assets WHERE id=%s',(asset_id,)).fetchone()['status']
+        self.assertTrue(all(not row['enabled'] and row['deleted_at'] for row in rows))
+        self.assertEqual(status,'deleting')
+
     def test_fasttrack_password_reset_otp(self):
         from .fasttrack_cases import reset_otp_case
         reset_otp_case(self,postgres=True)

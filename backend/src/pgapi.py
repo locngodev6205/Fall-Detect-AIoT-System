@@ -3,6 +3,7 @@ from datetime import datetime,timedelta
 import asyncio
 import hashlib
 import os
+import psycopg
 import secrets
 from typing import Annotated
 from uuid import UUID
@@ -436,7 +437,7 @@ def events(home_id:str,current:Current,limit:int=100,status:str|None=None,kind:s
     source=' FROM annha.events e JOIN annha.cameras c ON c.id=e.camera_id AND c.home_id=e.home_id LEFT JOIN annha.rooms r ON r.id=c.room_id AND r.home_id=e.home_id WHERE '+' AND '.join(clauses)
     with db.connect('app',home_id,current['id']) as conn:
         count=conn.execute('SELECT count(*) AS n'+source,args) if page is not None else None
-        rows=conn.execute('SELECT e.*,c.name AS camera_name,r.name AS room_name'+source+' ORDER BY e.received_at DESC,e.id DESC LIMIT %s OFFSET %s',args+[page_size if page is not None else limit,(page-1)*page_size if page is not None else 0]).fetchall()
+        rows=conn.execute('SELECT e.*,c.name AS camera_name,r.name AS room_name,EXISTS (SELECT 1 FROM annha.event_reads er WHERE er.event_id=e.id AND er.user_id=%s) AS is_read'+source+' ORDER BY e.received_at DESC,e.id DESC LIMIT %s OFFSET %s',[current['id']]+args+[page_size if page is not None else limit,(page-1)*page_size if page is not None else 0]).fetchall()
         total=count.fetchone()['n'] if count else 0
         items=svc.events_public(conn,rows)
     return {'items':items,'total':total,'page':page,'page_size':page_size,'total_pages':max(1,(total+page_size-1)//page_size)} if page is not None else items
@@ -449,10 +450,14 @@ def active_events(home_id:str,current:Current,page_size:int=5):
     as_of=db.now()
     with db.connect('app',home_id,current['id']) as conn:
         count=conn.execute('SELECT count(*) AS n'+source,(home_id,)).fetchone()['n']
-        rows=conn.execute('SELECT e.*,c.name AS camera_name,r.name AS room_name'+source+
-            ' ORDER BY e.received_at DESC,e.id DESC LIMIT %s',(home_id,page_size)).fetchall()
+        unread_count=conn.execute('SELECT count(*) AS n'+source+
+            ' AND NOT EXISTS (SELECT 1 FROM annha.event_reads er WHERE er.event_id=e.id AND er.user_id=%s)',
+            (home_id,current['id'])).fetchone()['n']
+        rows=conn.execute('SELECT e.*,c.name AS camera_name,r.name AS room_name,'+
+            'EXISTS (SELECT 1 FROM annha.event_reads er WHERE er.event_id=e.id AND er.user_id=%s) AS is_read'+source+
+            ' ORDER BY is_read ASC,e.received_at DESC,e.id DESC LIMIT %s',(current['id'],home_id,page_size)).fetchall()
         items=svc.events_public(conn,rows)
-    return {'count':count,'items':items,'as_of':as_of}
+    return {'count':count,'unread_count':unread_count,'items':items,'as_of':as_of}
 
 def event_scope(event_id,current,action='view'):
     # Resolve the tenant from trusted records, then enforce RLS and camera permission.
@@ -470,7 +475,47 @@ def event_scope(event_id,current,action='view'):
 @router.get('/events/{event_id}')
 def get_event(event_id:str,current:Current):
     home=event_scope(event_id,current)
-    with db.connect('app',home,current['id']) as conn: return svc.event_public(conn,conn.execute('SELECT * FROM annha.events WHERE id=%s',(event_id,)).fetchone())
+    with db.connect('app',home,current['id']) as conn: return svc.event_public(conn,conn.execute('SELECT e.*,EXISTS (SELECT 1 FROM annha.event_reads er WHERE er.event_id=e.id AND er.user_id=%s) AS is_read FROM annha.events e WHERE e.id=%s',(current['id'],event_id)).fetchone())
+
+def _read_event(conn,event,current):
+    conn.execute('''INSERT INTO annha.event_reads(home_id,camera_id,event_id,user_id)
+        VALUES(%s,%s,%s,%s) ON CONFLICT(event_id,user_id) DO NOTHING''',
+        (event['home_id'],event['camera_id'],event['id'],current['id']))
+    allowed=conn.execute('SELECT annha_private.can_camera(%s,%s,%s) AS allowed',
+        (event['home_id'],event['camera_id'],'events')).fetchone()['allowed']
+    if allowed and event['status']=='OPEN':
+        conn.execute("UPDATE annha.events SET status='ACKNOWLEDGED',updated_at=now() WHERE id=%s",(event['id'],))
+        conn.execute('''INSERT INTO annha.event_actions(home_id,camera_id,event_id,user_id,action,request_id)
+            VALUES(%s,%s,%s,%s,'acknowledge',%s)''',
+            (event['home_id'],event['camera_id'],event['id'],current['id'],db.uid()))
+        db.audit(conn,event['home_id'],current['id'],'event.acknowledge',event['id'])
+        return True
+    return False
+
+@router.post('/events/{event_id}/read')
+async def mark_event_read(event_id:str,current:Current):
+    home=event_scope(event_id,current)
+    with db.connect('app',home,current['id']) as conn:
+        event=fail_if_missing(conn.execute('SELECT * FROM annha.events WHERE id=%s FOR UPDATE',(event_id,)).fetchone())
+        changed=_read_event(conn,event,current)
+        result=svc.event_public(conn,conn.execute('SELECT * FROM annha.events WHERE id=%s',(event_id,)).fetchone()) if changed else None
+    if result: await svc.broadcast(result)
+    return {'id':event_id,'read':True}
+
+@router.post('/homes/{home_id}/events/read-all')
+async def mark_all_events_read(home_id:str,current:Current):
+    membership(home_id,current['id'])
+    changed=[];count=0
+    with db.connect('app',home_id,current['id']) as conn:
+        rows=conn.execute("SELECT * FROM annha.events WHERE home_id=%s AND status IN ('OPEN','ACKNOWLEDGED') ORDER BY received_at FOR UPDATE",(home_id,)).fetchall()
+        for event in rows:
+            previously_read=conn.execute('SELECT 1 FROM annha.event_reads WHERE event_id=%s AND user_id=%s',(event['id'],current['id'])).fetchone()
+            acknowledged=_read_event(conn,event,current)
+            if not previously_read:count+=1
+            if acknowledged:changed.append(event['id'])
+        broadcasts=svc.events_public(conn,conn.execute('SELECT * FROM annha.events WHERE id=ANY(%s::uuid[])',(changed,)).fetchall()) if changed else []
+    for event in broadcasts:await svc.broadcast(event)
+    return {'read_count':count,'acknowledged_count':len(changed)}
 
 @router.get('/events/{event_id}/updates')
 def event_updates(event_id:str,current:Current,page:int=1,page_size:int=10):
@@ -966,21 +1011,36 @@ def rename_asset(asset_id:str,payload:m.Name,current:Current):
     return {'id':asset_id,'name':payload.name}
 
 @router.delete('/assets/{asset_id}')
-def delete_asset(asset_id:str,current:Current):
+def delete_asset(asset_id:str,current:Current,payload:m.DeleteAsset|None=None):
     home,asset=asset_scope(asset_id,current,'manage')
+    affected=[]
     with db.connect('worker',home) as conn:
-        row=conn.execute('SELECT * FROM annha.media_assets WHERE id=%s FOR UPDATE',(asset_id,)).fetchone()
-        if conn.execute('''SELECT 1 FROM annha.reminder_revisions v JOIN annha.reminders r ON r.id=v.reminder_id AND r.current_version=v.version
-             WHERE v.asset_id=%s AND r.deleted_at IS NULL''',(asset_id,)).fetchone(): raise HTTPException(409,'File còn được dùng trong lịch nhắc.')
-        if row['status'] in ('deleted','expired'): return {'message':'File đã ngừng sử dụng.'}
-        if row['status']=='deleting': return {'message':'Yêu cầu xoá đang được xử lý.'}
+        row=fail_if_missing(conn.execute('SELECT * FROM annha.media_assets WHERE id=%s FOR UPDATE',(asset_id,)).fetchone())
+        if row['status'] in ('deleted','expired'): return {'message':'File đã ngừng sử dụng.','deleted_reminder_count':0}
+        if row['status']=='deleting': return {'message':'Yêu cầu xoá đang được xử lý.','deleted_reminder_count':0}
+        try:
+            affected=conn.execute('''SELECT r.id,r.name FROM annha.reminder_revisions v
+                JOIN annha.reminders r ON r.id=v.reminder_id AND r.current_version=v.version
+                WHERE v.asset_id=%s AND r.deleted_at IS NULL ORDER BY r.id FOR UPDATE OF r NOWAIT''',(asset_id,)).fetchall()
+        except psycopg.errors.LockNotAvailable:
+            raise HTTPException(409,'Lời nhắc đang được chỉnh sửa. Hãy thử xóa lại sau ít giây.') from None
+        expected={str(item) for item in (payload.expected_reminder_ids if payload else [])}
+        actual={str(item['id']) for item in affected}
+        if expected!=actual: raise HTTPException(409,'Danh sách lời nhắc dùng file đã thay đổi. Hãy xem lại trước khi xóa.')
+        for reminder in affected:
+            conn.execute('UPDATE annha.reminders SET deleted_at=now(),enabled=false,updated_at=now() WHERE id=%s',(reminder['id'],))
+            db.audit(conn,home,current['id'],'reminder.delete',reminder['id'])
+        if affected:
+            conn.execute('''INSERT INTO annha_private.job_queue(home_id,kind,payload,idempotency_key)
+                VALUES(%s,'compile_config',%s,%s)''',
+                (home,db.J({'camera_id':str(row['camera_id'])}),'compile-audio-delete:'+asset_id))
         conn.execute("UPDATE annha.media_assets SET status='deleting',deletion_requested_at=now() WHERE id=%s",(asset_id,))
         conn.execute('''INSERT INTO annha_private.job_queue(home_id,kind,asset_id,payload,idempotency_key)
             VALUES(%s,'delete_media',%s,%s,%s) ON CONFLICT(idempotency_key) DO UPDATE
             SET status='pending',available_at=now(),lease_until=NULL,last_error_code=NULL''',
             (home,asset_id,db.J({'target_status':'deleted'}),'media-delete:'+asset_id))
         db.audit(conn,home,current['id'],'asset.delete',asset_id)
-    return {'message':'Đã tiếp nhận yêu cầu xoá; file sẽ biến mất sau khi kho lưu trữ xác nhận.'}
+    return {'message':'Đã ngừng các lời nhắc liên quan và xếp xoá file khỏi kho lưu trữ.','deleted_reminder_count':len(affected)}
 
 @router.post('/assets/{asset_id}/retry',status_code=202)
 def retry_asset(asset_id:str,current:Current):

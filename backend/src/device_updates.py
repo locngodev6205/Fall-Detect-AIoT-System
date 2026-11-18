@@ -65,7 +65,7 @@ async def release_worker():
         try:
             await asyncio.to_thread(sync_pinned)
         except Exception:
-            catalog.error = 'Không đọc được dữ liệu cập nhật. Kiểm tra migration và kết nối database.' 
+            catalog.error = 'Không đọc được dữ liệu cập nhật. Kiểm tra migration và kết nối database.'
         await asyncio.sleep(120)
 
 

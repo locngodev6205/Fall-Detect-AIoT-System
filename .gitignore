@@ -8,6 +8,7 @@ env/
 venv/
 venv_*/
 ENV/
+arduino/
 
 # Environment Variables
 .env
