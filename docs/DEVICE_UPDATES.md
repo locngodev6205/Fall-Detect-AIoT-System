@@ -52,11 +52,11 @@ Trang cập nhật nằm tại chi tiết camera và chỉ hiện với chủ nh
 Commit các thay đổi đã kiểm tra, push nhánh, rồi tạo tag trên chính commit chứa workflow và mã OTA.
 
 ```bash
-git tag -a annha-pi-v0.0.1 -m "AnNha Pi OTA smoke release"
-git push origin annha-pi-v0.0.1
+git tag -a annha-pi-v0.1.0 -m "AnNha Pi application release"
+git push origin annha-pi-v0.1.0
 ```
 
-Trong Actions, chờ job Publish AnNha Pi thành công. Trong Releases, kiểm tra đủ ba asset. Mở trang chi tiết camera, chờ tối đa hai phút rồi chọn phiên bản `0.0.1`. Khi chưa cài updater trên Pi, trạng thái ngoại tuyến và nút cài bị khóa là đúng.
+Trong Actions, chờ job Publish AnNha Pi thành công. Trong Releases, kiểm tra đủ ba asset. Mở trang chi tiết camera, chờ tối đa hai phút rồi chọn phiên bản vừa phát hành. Khi chưa cài updater trên Pi, trạng thái ngoại tuyến và nút cài bị khóa là đúng.
 
 Script đóng gói chỉ lấy `edge/`, `modules/`, `update/`, `config.py`, `requirements.txt`, `run_edge.sh`. Model không nằm trong tarball, nhưng hash của model và requirements được ghi vào manifest. Mã mới phải tương thích model và requirements này.
 
@@ -109,3 +109,12 @@ npm --prefix frontend run build
 ```
 
 Nghiệm thu trên Pi thật gồm cập nhật ngay, tải trước/hẹn giờ, cảnh báo giữ chờ, hủy lúc tải, hết hạn, sai hash/chữ ký, mất mạng lúc báo kết quả, mất điện lúc chuyển bản và health check lỗi dẫn đến rollback. Kiểm tra camera, model và âm thanh vẫn hoạt động sau cập nhật. Giữ hai bản gồm bản hiện tại và bản rollback.
+
+## Kết quả triển khai thử ngày 18/11/2026
+
+- Mã nằm trên nhánh `feature/pi-ota-updates`, PR #1 chờ duyệt vào main.
+- Tag `annha-pi-v0.0.2` đã chạy GitHub Actions thành công, có đủ ba asset.
+- Backend đã xác minh chữ ký Ed25519 và checksum của gói từ GitHub thật.
+- Web kiểm thử dùng database SQLite và tài khoản giả lập riêng đã hiển thị/chọn được phiên bản `0.0.2` qua API thật.
+- 22 kiểm thử SQLite/nghiệp vụ/OTA và frontend build đã thành công. Kiểm tra PostgreSQL riêng xác nhận migration, role giới hạn và chặn cập nhật khi còn cảnh báo.
+- Chưa nghiệm thu cài đặt hoặc rollback trên Pi thật vì chưa có thiết bị. Khi có Pi, chỉ chép folder `fall_detect` rồi bootstrap theo hướng dẫn. Installer dò virtualenv giống launcher hiện tại.
