@@ -32,7 +32,7 @@ Các biến ở `.env` gốc được Compose truyền vào backend.
 DEVICE_RELEASE_REPO=locngodev6205/Fall-Detect-AIoT-System
 DEVICE_RELEASE_GITHUB_TOKEN=
 DEVICE_RELEASE_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\nPUBLIC_KEY\n-----END PUBLIC KEY-----"
-DEVICE_RELEASE_CACHE_DIR=data/device-releases
+DEVICE_RELEASE_CACHE_DIR=backend/data/device-releases
 ```
 
 Tạo fine-grained personal access token từ GitHub Settings → Developer settings → Personal access tokens, cấp quyền Contents read cho repo. Điền token vào `DEVICE_RELEASE_GITHUB_TOKEN` để backend gọi GitHub có xác thực. Token thuộc tài khoản, khả năng truy cập phụ thuộc quyền token và repo.

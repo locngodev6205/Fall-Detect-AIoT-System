@@ -44,7 +44,7 @@ class ReleaseCatalog:
         self.error = None
         self.checked_at = None
         self.lock = threading.Lock()
-        self.cache = Path(os.getenv('DEVICE_RELEASE_CACHE_DIR', 'data/device-releases'))
+        self.cache = Path(os.getenv('DEVICE_RELEASE_CACHE_DIR', str(Path(__file__).resolve().parents[1] / 'data/device-releases')))
 
     def bundle(self, release):
         manifest = release['manifest']
