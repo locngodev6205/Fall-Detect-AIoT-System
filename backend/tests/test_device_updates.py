@@ -118,8 +118,11 @@ class SignedCatalogTests(unittest.TestCase):
             assets = {'1': raw, '2': private.sign(raw), '3': bundle}
             listing = [{'tag_name': 'annha-pi-v1.0.0', 'draft': False, 'prerelease': False, 'body': '',
                 'assets': [{'id': 1, 'name': 'manifest.json'}, {'id': 2, 'name': 'manifest.sig'}, {'id': 3, 'name': 'annha-pi.tar.gz'}]}]
-            def download(url, limit, token):
-                return json.dumps(listing).encode() if 'per_page' in url else assets[url.rsplit('/', 1)[1]]
+            def download(url, limit, token, binary=True):
+                if 'per_page' in url:
+                    self.assertFalse(binary, 'Release listing requires GitHub JSON Accept header')
+                    return json.dumps(listing).encode()
+                return assets[url.rsplit('/', 1)[1]]
             with patch.dict(os.environ, {'DEVICE_RELEASE_REPO': 'owner/repo', 'DEVICE_RELEASE_PUBLIC_KEY': public, 'DEVICE_RELEASE_CACHE_DIR': tmp}), patch('backend.src.device_releases.download', side_effect=download):
                 catalog = ReleaseCatalog()
                 catalog.sync()

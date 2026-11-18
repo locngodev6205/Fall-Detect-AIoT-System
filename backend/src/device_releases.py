@@ -19,8 +19,8 @@ MAX_BYTES = 64 * 1024 * 1024
 logger = logging.getLogger(__name__)
 
 
-def download(url, limit, token=None):
-    headers = {'Accept': 'application/octet-stream', 'User-Agent': 'AnNha-Updater'}
+def download(url, limit, token=None, binary=True):
+    headers = {'Accept': 'application/octet-stream' if binary else 'application/vnd.github+json', 'User-Agent': 'AnNha-Updater'}
     if token:
         headers['Authorization'] = 'Bearer ' + token
     # urllib removes Authorization on cross-host redirects only with a custom handler.
@@ -70,7 +70,7 @@ class ReleaseCatalog:
                 raise ValueError('Public key phải là Ed25519')
             api = 'https://api.github.com/repos/' + repo + '/'
             token = os.getenv('DEVICE_RELEASE_GITHUB_TOKEN') or None
-            listing = json.loads(download(api + 'releases?per_page=25', 2 * 1024 * 1024, token))
+            listing = json.loads(download(api + 'releases?per_page=25', 2 * 1024 * 1024, token, binary=False))
             accepted = {}
             invalid = []
             self.cache.mkdir(parents=True, exist_ok=True)
