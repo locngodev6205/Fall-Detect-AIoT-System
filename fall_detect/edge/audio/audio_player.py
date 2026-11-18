@@ -128,7 +128,13 @@ class AudioPlayer:
         self._current_is_gas: bool = False
         self._silenced_until: float = 0.0
         self._last_siren_ts: dict[str, float] = {}
+        self._pending_voice = 0
         self.history: deque[dict[str, Any]] = deque(maxlen=100)
+
+    def is_busy(self) -> bool:
+        """Report playback until the child process has actually finished."""
+        with self._lock:
+            return self._pending_voice > 0 or bool(self._current_proc is not None and self._current_proc.poll() is None)
 
     def stop(self) -> None:
         """Dừng và thu hồi tiến trình âm thanh đang chạy khi tắt Edge Runtime."""
@@ -397,6 +403,8 @@ class AudioPlayer:
         if ok and reason and not self.bt.mock_mode and self._has_espeak:
             tts_wav = self.synthesize_tts_wav(reason)
             if tts_wav != self.chime_path:
+                with self._lock:
+                    self._pending_voice += 1
                 threading.Thread(
                     target=self._delayed_voice_warning,
                     args=(tts_wav, is_gas),
@@ -405,15 +413,19 @@ class AudioPlayer:
         return ok, detail
 
     def _delayed_voice_warning(self, tts_wav: Path, is_gas: bool) -> None:
-        time.sleep(2.1)
-        self.play_file(
-            tts_wav,
-            volume=100,
-            priority=2,
-            label="emergency_tts",
-            bypass_silence=is_gas,
-            is_gas=is_gas,
-        )
+        try:
+            time.sleep(2.1)
+            self.play_file(
+                tts_wav,
+                volume=100,
+                priority=2,
+                label="emergency_tts",
+                bypass_silence=is_gas,
+                is_gas=is_gas,
+            )
+        finally:
+            with self._lock:
+                self._pending_voice -= 1
 
     def execute_audio_command(
         self,

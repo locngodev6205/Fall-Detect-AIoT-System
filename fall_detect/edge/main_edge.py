@@ -159,6 +159,9 @@ def render_synthetic_hud_jpeg(
     return buf.getvalue()
 
 
+from edge.update_status import UpdateStatusServer, maintenance_guard
+
+
 class AnNhaEdgeRuntime:
     """Bộ điều phối hợp nhất toàn bộ phần cứng & kết nối thời gian thực trên Pi 4."""
 
@@ -251,6 +254,14 @@ class AnNhaEdgeRuntime:
         }
         self._observation: str = "clear"
         self._camera_ok: bool = True
+        self.update_lock = threading.RLock()
+        self.maintenance_until = 0.0
+        self.last_camera_frame = 0.0
+        self.last_safety_check = 0.0
+        self.local_danger = False
+        self.unreported_alert = False
+        self.model_inference_ok = False
+        self.update_status = UpdateStatusServer(self, FALL_DETECT_DIR)
         self._stop_event = threading.Event()
         self._workers: list[threading.Thread] = []
 
@@ -264,6 +275,7 @@ class AnNhaEdgeRuntime:
         if isinstance(env, dict):
             self._env_thresholds.update(env)
 
+    @maintenance_guard
     def _on_web_command(self, cmd: dict[str, Any]) -> tuple[bool, str]:
         kind = str(cmd.get("kind") or "")
         if kind in ("ptz_move", "ptz_center"):
@@ -302,6 +314,7 @@ class AnNhaEdgeRuntime:
             return True, "Đã ngắt kết nối loa Bluetooth"
         return False, f"Lệnh Bluetooth không hợp lệ: {kind!r}"
 
+    @maintenance_guard
     def _handle_ptt_file(self, path: Path, _mime: str) -> None:
         self.audio.play_file(
             path,
@@ -311,12 +324,16 @@ class AnNhaEdgeRuntime:
             cleanup_after_play=True,
         )
 
+    @maintenance_guard
     def _evaluate_local_autonomous_safety(self, readings: dict[str, dict[str, Any]]) -> None:
         """Kiểm tra ngưỡng khí gas độc lập ngay tại biên mỗi 1.5s — hú còi tại chỗ kể cả khi rớt mạng!"""
+        self.last_safety_check = time.monotonic()
         gas_info = readings.get("gas") or {}
+        self.local_danger = gas_info.get("quality") != "valid"
         if gas_info.get("quality") == "valid" and gas_info.get("value") is not None:
             gas_val = float(gas_info["value"])
             gas_high = float(self._env_thresholds.get("gas_high") or 450.0)
+            self.local_danger = gas_val >= gas_high
             if gas_val >= gas_high:
                 logger.critical("[LocalSafety] CẢNH BÁO RÒ RỈ KHÍ GAS: %.1f >= %.1f!", gas_val, gas_high)
                 siren_ok, _ = self.audio.trigger_emergency_siren(
@@ -335,10 +352,12 @@ class AnNhaEdgeRuntime:
                             reason=f"Nồng độ khí gas vượt ngưỡng nguy hiểm ({gas_val:.0f} >= {gas_high:.0f}).",
                         )
 
+    @maintenance_guard
     def handle_fall_detected(self, confidence: float, reason: str, jpeg_evidence: bytes | None = None) -> None:
         """Xử lý tức thời khi AI phát hiện té ngã: Hú còi tại phòng trước -> Gửi Event + Ảnh lên Backend."""
         if not self.tracker.is_fall_detection_enabled():
             return
+        self.unreported_alert = True
         # 1. Còi báo động tại chỗ NGAY LẬP TỨC (0 độ trễ mạng)
         self.audio.trigger_emergency_siren("fall", "Cảnh báo! Phát hiện người thân có dấu hiệu té ngã!")
 
@@ -352,6 +371,8 @@ class AnNhaEdgeRuntime:
             reason=reason,
             confidence=confidence,
         )
+        if ev and ev.get("id"):
+            self.unreported_alert = False
         if ev and ev.get("id") and jpeg_evidence:
             self.client.upload_evidence(
                 jpeg_evidence,
@@ -405,7 +426,9 @@ class AnNhaEdgeRuntime:
 
                 # 4. Kiểm tra lịch nhắc sinh hoạt Offline mỗi 5s
                 if now >= next_sched:
-                    self.scheduler.evaluate_due()
+                    with self.update_lock:
+                        if time.monotonic() >= self.maintenance_until:
+                            self.scheduler.evaluate_due()
                     next_sched = now + 5.0
 
                 # 5. Cập nhật ảnh Snapshot đại diện phòng định kỳ
@@ -463,6 +486,7 @@ class AnNhaEdgeRuntime:
                     self._stop_event.wait(0.5)
                     continue
                 self._camera_ok = True
+                self.last_camera_frame = time.monotonic()
                 self._observation = "clear"
 
                 now_m = time.monotonic()
@@ -523,6 +547,12 @@ class AnNhaEdgeRuntime:
                     event_cooldown=fd_cfg.FALL_EVENT_COOLDOWN,
                     on_fall_alert=_on_fall,
                 )
+                # Probe inference without triggering event callbacks or requiring a person.
+                import numpy as np
+                tensor = detector.input_details[0]
+                detector.interpreter.set_tensor(tensor["index"], np.zeros(tuple(tensor["shape"]), dtype=tensor["dtype"]))
+                detector.interpreter.invoke()
+                self.model_inference_ok = True
             except Exception as exc:
                 logger.warning("[Vision] Không khởi tạo được TFLite FallDetector (%s) -> chỉ chạy Pose Tracking.", exc)
 
@@ -551,6 +581,7 @@ class AnNhaEdgeRuntime:
                         continue
 
                     self._camera_ok = True
+                    self.last_camera_frame = time.monotonic()
                     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     rgb.flags.writeable = False
                     pose_res = pose.process(rgb)
@@ -593,6 +624,7 @@ class AnNhaEdgeRuntime:
                             feats = extract_and_normalize_features(pose_res.pose_landmarks) if present else None
                             detector.update(feats, person_present=present)
                         except Exception as exc:
+                            self.model_inference_ok = False
                             logger.warning("[Vision] Lỗi FallDetector: %s", exc)
 
                     # 1. Vẽ khung xương MediaPipe lên khung hình khi phát hiện người
@@ -664,6 +696,7 @@ class AnNhaEdgeRuntime:
         logger.info("==========================================================")
         logger.info(" KHỞI ĐỘNG ANNHÀ AIoT EDGE NODE -> %s", self.base_url)
         logger.info("==========================================================")
+        self.update_status.start()
         self.bridge.start()
         self.bridge.center()
         self.bt.start()
@@ -681,6 +714,7 @@ class AnNhaEdgeRuntime:
         return self
 
     def stop(self) -> None:
+        self.update_status.stop()
         self._stop_event.set()
         for t in self._workers:
             if t.is_alive():

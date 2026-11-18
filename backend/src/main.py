@@ -16,6 +16,8 @@ from .api import router
 from .media import router as media_router
 from .security import COOKIE, camera_access, check_origin, digest, membership, session_user
 
+from . import device_updates
+
 logger=logging.getLogger(__name__)
 MQTT_ENABLED=os.getenv('MQTT_ENABLED','true').lower()=='true'
 WORKER_ENABLED=os.getenv('WORKER_ENABLED','true').lower()=='true'
@@ -100,7 +102,11 @@ async def lifespan(app):
     services.retire_zone_configs()
     client=start_mqtt(asyncio.get_running_loop()) if MQTT_ENABLED else None
     worker=asyncio.create_task(services.worker()) if WORKER_ENABLED else None
+    await asyncio.to_thread(device_updates.initialize)
+    updates=asyncio.create_task(device_updates.release_worker())
     yield
+    updates.cancel()
+    with suppress(asyncio.CancelledError): await updates
     if worker:
         worker.cancel()
         with suppress(asyncio.CancelledError): await worker
@@ -117,6 +123,7 @@ async def lifespan(app):
 app=FastAPI(title='AnNhà Business API',version='3.0.0',lifespan=lifespan)
 app.include_router(router)
 app.include_router(media_router)
+app.include_router(device_updates.router)
 
 
 @app.middleware('http')
