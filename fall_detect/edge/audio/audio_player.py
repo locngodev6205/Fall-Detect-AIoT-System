@@ -131,6 +131,7 @@ class AudioPlayer:
         self._current_priority: int = 0  # 0: idle, 1: normal/reminder, 2: emergency
         self._current_is_gas: bool = False
         self._silenced_until: float = 0.0
+        self._siren_in_flight: set[str] = set()
         self._last_siren_ts: dict[str, float] = {}
         self._pending_voice = 0
         self.history: deque[dict[str, Any]] = deque(maxlen=100)
@@ -245,14 +246,17 @@ class AudioPlayer:
         proc: subprocess.Popen[bytes],
         cleanup_paths: tuple[Path | None, ...],
         label: str,
+        on_finished: Callable[[bool], None] | None,
     ) -> None:
+        success = False
         try:
             try:
                 status = proc.wait(timeout=180)
             except subprocess.TimeoutExpired:
                 _terminate_and_reap(proc)
                 raise
-            if status == 0:
+            success = status == 0
+            if success:
                 logger.info("[AudioPlayer] Đã phát xong %r qua Bluetooth.", label)
             else:
                 logger.warning("[AudioPlayer] Trình phát %r dừng với mã %d.", label, status)
@@ -260,11 +264,14 @@ class AudioPlayer:
             logger.warning("[AudioPlayer] Phát %r quá thời gian.", label)
         finally:
             with self._lock:
+                success = success and proc not in self._interrupted and not self._closed
                 self._interrupted.discard(proc)
                 if self._current_proc is proc:
                     self._current_proc = None
                     self._current_priority = 0
                     self._current_is_gas = False
+            if on_finished is not None:
+                on_finished(success)
             for path in cleanup_paths:
                 if path is not None:
                     path.unlink(missing_ok=True)
@@ -281,6 +288,7 @@ class AudioPlayer:
         cleanup_after_play: bool = False,
         wait_for_completion: bool = False,
         start_guard: Callable[[], bool] | None = None,
+        on_finished: Callable[[bool], None] | None = None,
     ) -> tuple[bool, str]:
         """Phát file âm thanh qua Loa Bluetooth chuyên dụng."""
         path = Path(file_path)
@@ -330,10 +338,12 @@ class AudioPlayer:
                                          ts=time.time()))
 
             if proc is None:
+                if on_finished is not None:
+                    on_finished(True)
                 return True, "Đã phát qua loa Bluetooth mô phỏng."
             paths = (original_to_remove, converted)
             if not wait_for_completion:
-                threading.Thread(target=self._watch_and_reap, args=(proc, paths, label),
+                threading.Thread(target=self._watch_and_reap, args=(proc, paths, label, on_finished),
                                  name="audio-proc-reaper", daemon=True).start()
                 return True, f"Đã khởi chạy trình phát '{label}'."
             try:
@@ -369,17 +379,27 @@ class AudioPlayer:
     def start_live_stream(self, mime: str) -> LiveInput | None:
         if mime not in FORMATS or not self.bt.is_speaker_ready():
             return None
-        with self._lock:
-            if (self._closed or self._live_input is not None or self._pending_voice
-                    or time.monotonic() < self._silenced_until
-                    or (self._current_proc is not None and self._current_proc.poll() is None)):
-                return None
-            self.bt.apply_volume(85, refresh=False)
-            status = self.bt.get_status()
-            if not status["sink"]:
-                return None
-            self._live_input = LiveInput(mime, status["sink"], status["backend"])
-            return self._live_input
+        status = self.bt.get_status()
+        sink, backend = status["sink"], status["backend"]
+        if not sink:
+            return None
+        try:
+            target = self.bt.resolve_live_target(sink, backend)
+            with self._lock:
+                if (self._closed or self._live_input is not None or self._pending_voice
+                        or time.monotonic() < self._silenced_until
+                        or (self._current_proc is not None and self._current_proc.poll() is None)):
+                    return None
+                current = self.bt.get_status()
+                if (current["sink"], current["backend"]) != (sink, backend):
+                    return None
+                if not self.bt.apply_volume(85, refresh=False):
+                    return None
+                self._live_input = LiveInput(mime, target, backend)
+                return self._live_input
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            logger.warning("[AudioPlayer] Push-to-Talk chưa sẵn sàng: %s", exc)
+            return None
 
     def finish_live_stream(self, stream: LiveInput):
         stream.close()
@@ -399,26 +419,34 @@ class AudioPlayer:
         Lưu ý an toàn: Sự kiện khí gas (`kind == "gas"`) KHÔNG BAO GIỜ bị chặn hay bị tắt bởi lệnh `silence`.
         """
         mono = time.monotonic() if now_monotonic is None else float(now_monotonic)
-        is_gas = kind.lower() == "gas"
+        kind = kind.lower()
+        is_gas = kind == "gas"
 
         if not is_gas and self.is_silenced():
             return False, "Còi cảnh báo đang tạm tắt theo lệnh người dùng."
 
         with self._lock:
             last_ts = self._last_siren_ts.get(kind, -1e9)
-            if mono - last_ts < self.siren_cooldown_s:
-                return False, "Còi khẩn cấp đang trong chu kỳ lặp chống dội."
-            self._last_siren_ts[kind] = mono
+            if kind in self._siren_in_flight or mono - last_ts < self.siren_cooldown_s:
+                return False, "Còi khẩn cấp đang phát hoặc trong chu kỳ chống dội."
+            self._siren_in_flight.add(kind)
 
-        label = f"emergency_{kind}"
-        ok, detail = self.play_file(
-            self.siren_path,
-            volume=100,
-            priority=3 if is_gas else 2,
-            label=label,
-            bypass_silence=is_gas,
-            is_gas=is_gas,
-        )
+        def finished(success: bool) -> None:
+            with self._lock:
+                self._siren_in_flight.discard(kind)
+                if success:
+                    self._last_siren_ts[kind] = mono
+
+        ok = False
+        try:
+            ok, detail = self.play_file(
+                self.siren_path, volume=100, priority=3 if is_gas else 2,
+                label=f"emergency_{kind}", bypass_silence=is_gas, is_gas=is_gas,
+                on_finished=finished,
+            )
+        finally:
+            if not ok:
+                finished(False)
         if ok and reason and not self.bt.mock_mode and self._has_espeak:
             tts_wav = self.synthesize_tts_wav(reason)
             if tts_wav != self.chime_path:

@@ -174,6 +174,11 @@ class DeviceClient:
                 db.execute("UPDATE reports SET retry_at=0 WHERE retry_at=-1")
                 db.execute("""CREATE TABLE IF NOT EXISTS command_receipts (
                     id TEXT PRIMARY KEY, status TEXT NOT NULL, detail TEXT NOT NULL)""")
+                columns = {row[1] for row in db.execute("PRAGMA table_info(command_receipts)")}
+                if "backend_status" not in columns:
+                    db.execute("ALTER TABLE command_receipts ADD COLUMN backend_status TEXT")
+                if "retry_at" not in columns:
+                    db.execute("ALTER TABLE command_receipts ADD COLUMN retry_at REAL NOT NULL DEFAULT 0")
                 db.execute("""UPDATE command_receipts SET status='failed',detail=?
                               WHERE status='executing'""",
                            ("Thiết bị đã khởi động lại trước khi ghi nhận kết quả phát.",))
@@ -579,7 +584,7 @@ class DeviceClient:
 
     def _store_audio_receipt(self, command_id: str, status: str, detail: str = "") -> None:
         with closing(sqlite3.connect(self._audio_db)) as db, db:
-            db.execute("""INSERT INTO command_receipts VALUES(?,?,?)
+            db.execute("""INSERT INTO command_receipts(id,status,detail) VALUES(?,?,?)
                           ON CONFLICT(id) DO UPDATE SET status=excluded.status,detail=excluded.detail""",
                        (command_id, status, detail[:1000]))
 
@@ -593,13 +598,24 @@ class DeviceClient:
     def _flush_audio_receipts(self) -> None:
         with closing(sqlite3.connect(self._audio_db)) as db:
             receipts = db.execute("""SELECT id,status,detail FROM command_receipts
-                                     WHERE status!='executing' ORDER BY rowid LIMIT 8""").fetchall()
+                                     WHERE status!='executing' AND backend_status IS NULL AND retry_at<=?
+                                     ORDER BY retry_at,rowid LIMIT 8""", (time.time(),)).fetchall()
             for command_id, status, detail in receipts:
-                if not self._ack_command(command_id, status, detail):
-                    break
+                confirmed = self._send_command_ack(command_id, status, detail)
                 with db:
-                    db.execute("DELETE FROM command_receipts WHERE id=?", (command_id,))
-                self._processed_commands.append(command_id)
+                    if confirmed == status:
+                        db.execute("DELETE FROM command_receipts WHERE id=?", (command_id,))
+                        self._processed_commands.append(command_id)
+                    elif confirmed in ("executed", "failed", "expired"):
+                        db.execute("UPDATE command_receipts SET backend_status=? WHERE id=?",
+                                   (confirmed, command_id))
+                        logger.warning("[DeviceClient] ACK âm thanh xung đột (%s / %s).", status, confirmed)
+                    else:
+                        db.execute("UPDATE command_receipts SET retry_at=? WHERE id=?",
+                                   (time.time() + 60, command_id))
+                        # A missing command need not delay other receipts. Transport failures do.
+                        if confirmed is None:
+                            break
 
     def poll_and_execute_commands(self) -> int:
         """Nhận lệnh và gửi ACK cuối khi worker đã ghi kết quả xuống đĩa."""
@@ -664,16 +680,26 @@ class DeviceClient:
         return handled
 
     def _ack_command(self, command_id: str, status: str, detail: str) -> bool:
+        return self._send_command_ack(command_id, status, detail) == status
+
+    def _send_command_ack(self, command_id: str, status: str, detail: str) -> str | None:
         try:
             response = self._request(
                 "POST",
                 f"/api/device/commands/{urllib.parse.quote(command_id)}/ack",
                 json_body={"status": status, "detail": (detail or "")[:1000]},
             )
-            return response.status_code == 200 or (status in ("executed", "failed") and response.status_code in (404, 409))
-        except Exception as exc:
+            if response.status_code == 200 and response.json().get("status") == status:
+                return status
+            if response.status_code == 409:
+                conflict = response.json().get("detail")
+                if isinstance(conflict, dict) and conflict.get("status") in ("executed", "failed", "expired"):
+                    return conflict["status"] if conflict["status"] != status else "unconfirmed"
+            if response.status_code in (404, 409):
+                return "unconfirmed"
+        except (requests.RequestException, ValueError, AttributeError) as exc:
             logger.debug("[DeviceClient] Lỗi ACK command %s (%s): %s", command_id, status, exc)
-            return False
+        return None
 
     def _flush_outbox(self) -> None:
         with self._lock:

@@ -794,6 +794,18 @@ class BluetoothSpeakerManager:
         sink = self.refresh_sink(attempt_connect=False)
         return sink is not None
 
+    def resolve_live_target(self, sink: str, backend: str) -> str:
+        if backend != "wpctl":
+            return sink
+        result = subprocess.run(["wpctl", "inspect", sink], capture_output=True, text=True,
+                                timeout=0.75, env=get_audio_env())
+        # wpctl status lists object IDs; PipeWire playback targets accept serials or names.
+        name = re.search(r'^\s*(?:\*\s*)?node\.name = "(bluez_(?:output|sink)\.[^"]+)"', result.stdout, re.M)
+        serial = re.search(r'^\s*(?:\*\s*)?object\.serial = "(\d+)"', result.stdout, re.M)
+        if result.returncode or not name or not serial:
+            raise OSError("Không xác nhận được Bluetooth sink PipeWire.")
+        return serial.group(1)
+
     def apply_volume(self, volume: int, *, refresh: bool = True) -> bool:
         """Đặt âm lượng trực tiếp lên đúng Sink Bluetooth (tuyệt đối không chạm `amixer` 3.5mm/HDMI)."""
         vol = max(0, min(100, int(volume)))

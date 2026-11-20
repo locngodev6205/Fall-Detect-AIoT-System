@@ -46,11 +46,11 @@ async def sample(mime, encoded, capture):
     popen = subprocess.Popen
     with capture.open("wb") as output:
         def start(command, **options):
-            if command[0] == "pw-cat":
+            if Path(command[0]).name == "pw-cat":
                 return popen(["cat"], stdin=options["stdin"], stdout=output)
             return popen(command, **options)
 
-        with patch.object(subprocess, "Popen", side_effect=start):
+        with patch.object(subprocess, "Popen", side_effect=start), patch("shutil.which", side_effect=lambda name: name):
             stream = LiveInput(mime, "fixture", "wpctl")
         started = time.monotonic()
         first_pcm = None

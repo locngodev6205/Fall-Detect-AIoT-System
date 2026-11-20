@@ -684,6 +684,20 @@ class PostgresTests(unittest.TestCase):
         self.assertEqual(len(device.get('/api/device/commands').json()),1)
         self.assertEqual(device.post(f"/api/device/commands/{first.json()['id']}/ack",json={'status':'executed'}).status_code,200)
         self.assertEqual(device.get('/api/device/commands').json(),[])
+        ack = f"/api/device/commands/{first.json()['id']}/ack"
+        self.assertEqual(device.post(ack, json={"status": "executed"}).json(), {"status": "executed"})
+        conflict = device.post(ack, json={"status": "failed"})
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.json()["detail"]["status"], "executed")
+        second = owner.post(f"/api/cameras/{camera['id']}/commands",
+                            json={**cmd, "idempotency_key": "expired-command"})
+        self.assertEqual(second.status_code, 201, second.text)
+        expired_id = second.json()["id"]
+        with db.connect('worker', home['id'], camera=camera['id']) as conn:
+            conn.execute("UPDATE annha.commands SET status='expired' WHERE id=%s", (expired_id,))
+        expired = device.post(f"/api/device/commands/{expired_id}/ack", json={"status": "executed"})
+        self.assertEqual(expired.status_code, 409)
+        self.assertEqual(expired.json()["detail"]["status"], "expired")
         reading={'message_id':'reading-1','observed_at':db.now().isoformat(),'readings':{'temperature':{'value':28,'unit':'C'}}}
         self.assertEqual(device.post('/api/device/telemetry',json=reading).status_code,200)
         self.assertEqual(len(owner.get(f"/api/cameras/{camera['id']}/telemetry").json()),1)

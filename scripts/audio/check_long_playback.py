@@ -49,7 +49,7 @@ def exercise(root):
         if path.endswith("/ack"):
             acknowledgements.append(kwargs["json_body"]["status"])
         return SimpleNamespace(status_code=200,
-                               json=lambda: [command] if path.endswith("/commands") else {})
+                               json=lambda: [command] if path.endswith("/commands") else (kwargs["json_body"] if path.endswith("/ack") else {}))
 
     sink = {"sink": "null", "ready": True, "mock_mode": False, "backend": "wpctl"}
     client._request = request

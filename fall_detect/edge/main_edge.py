@@ -390,7 +390,6 @@ class AnNhaEdgeRuntime:
         next_hb = 0.0
         next_tel = 0.0
         next_cmd = 0.0
-        next_sched = 0.0
         next_snap = time.monotonic() + 2.0
 
         while not self._stop_event.is_set():
@@ -419,12 +418,7 @@ class AnNhaEdgeRuntime:
                     self.client.poll_and_execute_commands()
                     next_cmd = now + self.command_poll_interval_s
 
-                # 4. Kiểm tra lịch nhắc sinh hoạt Offline mỗi 5s
-                if now >= next_sched:
-                    self.scheduler.evaluate_due()
-                    next_sched = now + 5.0
-
-                # 5. Cập nhật ảnh Snapshot đại diện phòng định kỳ
+                # 4. Cập nhật ảnh Snapshot đại diện phòng định kỳ
                 if self.device_token and now >= next_snap:
                     frame_jpg = self.streamer.get_latest_jpeg()
                     if frame_jpg:
@@ -436,6 +430,14 @@ class AnNhaEdgeRuntime:
                 logger.warning("[EdgeRuntime] Lỗi chu kỳ nền: %s", exc)
 
             self._stop_event.wait(0.25)
+
+    def _reminder_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                self.scheduler.evaluate_due()
+            except Exception:
+                logger.exception("[EdgeRuntime] Lỗi kiểm tra lịch nhắc.")
+            self._stop_event.wait(5.0)
 
     def _vision_loop(self) -> None:
         """Luồng thu hình Camera + AI Pose + Pan-Tilt Tracking (tự chuyển sang HUD Mock nếu thiếu Webcam/OpenCV)."""
@@ -689,11 +691,13 @@ class AnNhaEdgeRuntime:
 
         t_safe = threading.Thread(target=self._safety_loop, name="annha-edge-safety", daemon=True)
         t_io = threading.Thread(target=self._background_io_loop, name="annha-edge-io", daemon=True)
+        t_reminder = threading.Thread(target=self._reminder_loop, name="annha-edge-reminders", daemon=True)
         t_vis = threading.Thread(target=self._vision_loop, name="annha-edge-vision", daemon=True)
         t_safe.start()
         t_io.start()
+        t_reminder.start()
         t_vis.start()
-        self._workers = [t_safe, t_io, t_vis]
+        self._workers = [t_safe, t_io, t_reminder, t_vis]
         return self
 
     def stop(self) -> None:

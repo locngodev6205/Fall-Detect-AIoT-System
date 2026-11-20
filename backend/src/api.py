@@ -983,7 +983,7 @@ def command_ack(command_id:str,payload:m.CommandAck,current:Device):
         if not row: raise HTTPException(404,'Không tìm thấy lệnh cho thiết bị.')
         if row['status'] in ('executed','failed','expired'):
             if row['status']==payload.status: return {'status':row['status']}
-            raise HTTPException(409,'Lệnh đã kết thúc.')
+            raise HTTPException(409,{'message':'Lệnh đã kết thúc.','status':row['status']})
         if row['expires']<time.time() and row['status']!='executing': raise HTTPException(409,'Lệnh đã hết hạn.')
         stages={'pending':0,'accepted':1,'executing':2,'executed':3,'failed':3}
         if stages.get(row['status'],0)>stages[payload.status]: raise HTTPException(409,'Không được lùi trạng thái lệnh.')

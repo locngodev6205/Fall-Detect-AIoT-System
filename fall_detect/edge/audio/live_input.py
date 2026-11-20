@@ -1,6 +1,7 @@
 """A session-long decoder feeding a Bluetooth-targeted PCM player."""
 import asyncio
 import os
+import shutil
 import subprocess
 import time
 
@@ -18,20 +19,31 @@ class LiveInput:
         self.interrupted = False
         if backend == "mock":
             return
+        if not sink or sink in ("0", "auto", "@DEFAULT_AUDIO_SINK@"):
+            raise ValueError("Cần chỉ định Bluetooth sink.")
+        decoder = shutil.which("ffmpeg")
+        if not decoder:
+            raise FileNotFoundError("Push-to-Talk cần ffmpeg.")
         if backend == "wpctl":
-            command = ["pw-cat", "--playback", "--target", sink, "--latency", "100ms",
+            player = shutil.which("pw-cat") or shutil.which("pw-play")
+            if not player:
+                raise FileNotFoundError("Push-to-Talk PipeWire cần pw-cat hoặc pw-play.")
+            command = [player, "--playback", "--target", sink, "--latency", "100ms",
                        "--properties", '{"node.dont-fallback":true,"node.dont-reconnect":true}', "-"]
             # AU carries a streamable PCM header on PipeWire versions without --raw.
             codec, container = "pcm_s16be", "au"
         elif backend == "pactl":
-            command = ["paplay", "--device=" + sink, "--latency-msec=100", "--raw",
+            player = shutil.which("paplay")
+            if not player:
+                raise FileNotFoundError("Push-to-Talk PulseAudio cần paplay.")
+            command = [player, "--device=" + sink, "--latency-msec=100", "--raw",
                        "--rate=48000", "--channels=1", "--format=s16le"]
             codec, container = "pcm_s16le", "s16le"
         else:
             raise ValueError("Không có đầu ra Bluetooth phù hợp.")
         try:
             self.decoder = subprocess.Popen(
-                ["ffmpeg", "-nostdin", "-loglevel", "error", "-probesize", "4096",
+                [decoder, "-nostdin", "-loglevel", "error", "-probesize", "4096",
                  "-analyzeduration", "1", "-f", FORMATS[mime], "-i", "pipe:0", "-vn",
                  "-af", "volume=-6dB", "-c:a", codec, "-ar", "48000", "-ac", "1",
                  "-flush_packets", "1", "-f", container, "pipe:1"],
@@ -44,6 +56,14 @@ class LiveInput:
             )
             self.decoder.stdout.close()
             os.set_blocking(self.decoder.stdin.fileno(), False)
+            try:
+                status = self.output.wait(timeout=0.1)
+            except subprocess.TimeoutExpired:
+                pass  # PipeWire may still be waiting for the container header.
+            else:
+                raise OSError(f"Trình phát Push-to-Talk thoát khi khởi tạo (mã {status}).")
+            if self.decoder.poll() is not None:
+                raise OSError("FFmpeg thoát khi khởi tạo Push-to-Talk.")
         except (OSError, ValueError):
             self.close()
             raise
