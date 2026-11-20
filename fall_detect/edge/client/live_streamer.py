@@ -4,11 +4,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from pathlib import Path
-import tempfile
 import threading
-import time
 from typing import Any, Callable
+
+from ..audio.live_input import MAX_CHUNK, MAX_SESSION_BYTES, SESSION_SECONDS, LiveInput
 
 try:
     import websockets
@@ -30,12 +29,12 @@ def _ws_url(http_base_url: str, path: str) -> str:
     return f"ws://{base}{path}"
 
 
-async def _ws_connect(uri: str, token: str) -> Any:
+async def _ws_connect(uri: str, token: str, *, max_size=2 * 1024 * 1024, max_queue=4) -> Any:
     headers = {"Authorization": f"Bearer {token}"}
     try:
-        return await websockets.connect(uri, additional_headers=headers, max_size=2 * 1024 * 1024)
+        return await websockets.connect(uri, additional_headers=headers, max_size=max_size, max_queue=max_queue)
     except TypeError:
-        return await websockets.connect(uri, extra_headers=headers, max_size=2 * 1024 * 1024)
+        return await websockets.connect(uri, extra_headers=headers, max_size=max_size, max_queue=max_queue)
 
 
 class LiveStreamer:
@@ -47,12 +46,14 @@ class LiveStreamer:
         device_token: str,
         *,
         fps_limit: float = 5.0,
-        on_ptt_audio_file: Callable[[Path, str], None] | None = None,
+        start_ptt: Callable[[str], LiveInput | None] | None = None,
+        finish_ptt: Callable[[LiveInput], None] | None = None,
     ) -> None:
         self.base_url = base_url
         self.device_token = device_token.strip()
         self.min_frame_interval = 1.0 / max(1.0, min(5.5, float(fps_limit)))
-        self.on_ptt_audio_file = on_ptt_audio_file
+        self.start_ptt = start_ptt
+        self.finish_ptt = finish_ptt
 
         self._lock = threading.Lock()
         self._latest_jpeg: bytes | None = None
@@ -131,68 +132,75 @@ class LiveStreamer:
         uri = _ws_url(self.base_url, "/ws/device/audio")
         while self._running:
             try:
-                async with await _ws_connect(uri, self.device_token) as ws:
+                async with await _ws_connect(uri, self.device_token, max_size=MAX_CHUNK, max_queue=2) as ws:
                     logger.info("[LiveStreamer] Đã kết nối WebSocket nhận đàm thoại Push-to-Talk (%s).", uri)
-                    active_mime = "audio/webm"
-                    chunks: list[bytes] = []
-                    total_bytes = 0
-                    max_ptt_bytes = 8 * 1024 * 1024
-                    receiving = False
-
-                    while self._running:
-                        msg = await ws.recv()
-                        if isinstance(msg, str):
-                            data = json.loads(msg)
-                            mtype = data.get("type")
-                            if mtype == "start":
-                                active_mime = str(data.get("mime") or "audio/webm")
-                                chunks.clear()
-                                total_bytes = 0
-                                receiving = True
-                                logger.info("[LiveStreamer] Bắt đầu nhận luồng giọng nói trực tiếp (%s)...", active_mime)
-                            elif mtype == "stop":
-                                if receiving and chunks:
-                                    self._dispatch_ptt_buffer(b"".join(chunks), active_mime)
-                                chunks.clear()
-                                total_bytes = 0
-                                receiving = False
-                        elif isinstance(msg, (bytes, bytearray)) and receiving:
-                            if total_bytes + len(msg) <= max_ptt_bytes:
-                                chunks.append(bytes(msg))
-                                total_bytes += len(msg)
-                            else:
-                                logger.warning("[LiveStreamer] Gói đàm thoại vượt giới hạn 8 MB -> phát phần đã nhận.")
-                                self._dispatch_ptt_buffer(b"".join(chunks), active_mime)
-                                chunks.clear()
-                                total_bytes = 0
-                                receiving = False
+                    await self._receive_audio(ws)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 if self._running:
                     logger.debug("[LiveStreamer] Kết nối lại /ws/device/audio sau 3s (%s)", exc)
-                    await asyncio.sleep(3.0)
+                    await asyncio.sleep(3)
 
-    def _dispatch_ptt_buffer(self, raw_audio: bytes, mime: str) -> None:
-        if not raw_audio or self.on_ptt_audio_file is None:
-            return
-        import os
-        ext = ".ogg" if "ogg" in mime.lower() else ".webm"
-        fd: int | None = None
-        path: Path | None = None
+    async def _receive_audio(self, ws):
+        loop = asyncio.get_running_loop()
+        stream = None
+        session = None
+        deadline = 0
+        total = 0
+
+        def finish():
+            nonlocal stream
+            if stream is not None:
+                (self.finish_ptt or LiveInput.close)(stream)
+                stream = None
+
+        async def reply(kind):
+            await asyncio.wait_for(ws.send(json.dumps({"type": kind, "session": session})), 0.5)
+
         try:
-            fd, tmp_name = tempfile.mkstemp(prefix="annha_ptt_", suffix=ext)
-            path = Path(tmp_name)
-            with os.fdopen(fd, "wb") as fh:
-                fd = None
-                fh.write(raw_audio)
-            self.on_ptt_audio_file(path, mime)
-        except Exception as exc:
-            if fd is not None:
+            while self._running:
                 try:
-                    os.close(fd)
-                except OSError:
-                    pass
-            if path is not None:
-                path.unlink(missing_ok=True)
-            logger.warning("[LiveStreamer] Lỗi lưu đệm đàm thoại Push-to-Talk: %s", exc)
+                    timeout = max(0, min(3, deadline - loop.time())) if stream else None
+                    msg = await asyncio.wait_for(ws.recv(), timeout)
+                except asyncio.TimeoutError:
+                    finish()
+                    await reply("unavailable")
+                    continue
+                if isinstance(msg, str):
+                    data = json.loads(msg)
+                    if data.get("type") == "start":
+                        finish()
+                        session = data.get("session")
+                        if not session:
+                            continue
+                        total = 0
+                        deadline = loop.time() + SESSION_SECONDS
+                        try:
+                            if self.start_ptt is not None:
+                                starting = asyncio.create_task(asyncio.to_thread(self.start_ptt, data.get("mime")))
+                                try:
+                                    stream = await asyncio.shield(starting)
+                                except asyncio.CancelledError:
+                                    stream = await starting
+                                    raise
+                        except (OSError, ValueError):
+                            logger.exception("[LiveStreamer] Không mở được đầu ra Push-to-Talk.")
+                        await reply("ready" if stream else "unavailable")
+                    elif data.get("type") == "stop" and data.get("session") == session:
+                        finish()
+                elif stream:
+                    total += len(msg)
+                    try:
+                        if not msg or len(msg) > MAX_CHUNK or total > MAX_SESSION_BYTES:
+                            raise ValueError("Push-to-Talk vượt giới hạn kích thước.")
+                        await stream.write(msg)
+                    except (OSError, ValueError):
+                        finish()
+                        await reply("unavailable")
+                    else:
+                        await reply("received")
+                elif session:
+                    await reply("unavailable")
+        finally:
+            finish()

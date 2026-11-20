@@ -946,7 +946,7 @@ def config_ack(payload:m.ConfigAck,current:Device):
         camera=conn.execute('SELECT * FROM cameras WHERE id=?',(current['id'],)).fetchone()
         if not conn.execute('SELECT 1 FROM configurations WHERE camera_id=? AND version=?',(current['id'],payload.version)).fetchone(): raise HTTPException(422,'Không có phiên bản cấu hình này.')
         if payload.version<camera['applied_version']: raise HTTPException(409,'Phản hồi cấu hình cũ.')
-        if payload.success: conn.execute('UPDATE cameras SET applied_version=?,config_error=NULL WHERE id=?',(payload.version,current['id']))
+        if payload.success: conn.execute('UPDATE cameras SET applied_version=?,config_error=? WHERE id=?',(payload.version,payload.error or None,current['id']))
         else: conn.execute('UPDATE cameras SET config_error=? WHERE id=?',(payload.error or 'Thiết bị từ chối cấu hình',current['id']))
     return {'message':'Đã ghi nhận phản hồi.'}
 
@@ -983,7 +983,7 @@ def command_ack(command_id:str,payload:m.CommandAck,current:Device):
         if not row: raise HTTPException(404,'Không tìm thấy lệnh cho thiết bị.')
         if row['status'] in ('executed','failed','expired'):
             if row['status']==payload.status: return {'status':row['status']}
-            raise HTTPException(409,'Lệnh đã kết thúc.')
+            raise HTTPException(409,{'message':'Lệnh đã kết thúc.','status':row['status']})
         if row['expires']<time.time() and row['status']!='executing': raise HTTPException(409,'Lệnh đã hết hạn.')
         stages={'pending':0,'accepted':1,'executing':2,'executed':3,'failed':3}
         if stages.get(row['status'],0)>stages[payload.status]: raise HTTPException(409,'Không được lùi trạng thái lệnh.')

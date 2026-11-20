@@ -11,10 +11,14 @@ Bao gồm:
 from __future__ import annotations
 
 from collections import deque
+from contextlib import closing
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
 import logging
 from pathlib import Path
+import sqlite3
+import tempfile
 import threading
 import time
 from typing import Any, Callable
@@ -29,6 +33,14 @@ except ImportError:  # pragma: no cover
     mqtt = None  # type: ignore[assignment]
 
 logger = logging.getLogger("annha.edge.client")
+
+MAX_PENDING_AUDIO_RECEIPTS = 512
+MAX_RECONCILED_AUDIO_RECEIPTS = 256
+
+ASSET_EXTENSIONS = {
+    "audio/wav": ".wav", "audio/x-wav": ".wav", "audio/mpeg": ".mp3",
+    "audio/ogg": ".ogg", "audio/webm": ".webm",
+}
 
 ALLOWED_OBSERVATIONS = {"unknown", "clear", "no_person", "occluded", "camera_error"}
 
@@ -136,6 +148,11 @@ class DeviceClient:
         self.assets_dir.mkdir(parents=True, exist_ok=True)
 
         self._session = requests.Session()
+        self._prefetch = ThreadPoolExecutor(max_workers=1, thread_name_prefix="annha-assets")
+        self._asset_job: Future | None = None
+        self._asset_index = 0
+        self._config_ack: tuple[int, str] | None = None
+        self._stopping = threading.Event()
         self._lock = threading.Lock()
 
         self.applied_version: int = 0
@@ -144,11 +161,34 @@ class DeviceClient:
             self.applied_version = int(self.current_config["version"])
 
         self._config_listeners: list[Callable[[dict[str, Any]], None]] = []
-        self._command_handler: Callable[[dict[str, Any]], tuple[bool, str]] | None = None
+        self._command_handler: Callable[[dict[str, Any]], tuple[bool, str] | Future] | None = None
         self._processed_commands: deque[str] = deque(maxlen=256)
         self._outbox_telemetry: deque[dict[str, Any]] = deque(maxlen=200)
         self._outbox_events: deque[dict[str, Any]] = deque(maxlen=200)
-        self._outbox_executions: deque[dict[str, Any]] = deque(maxlen=200)
+        self._audio_db = self.cache_dir / "audio_outbox.sqlite3"
+        self._audio_store_ok = True
+        try:
+            with closing(sqlite3.connect(self._audio_db)) as db, db:
+                db.execute("""CREATE TABLE IF NOT EXISTS reports (
+                    reminder_id TEXT, occurrence TEXT, body TEXT, attempts INTEGER DEFAULT 0,
+                    retry_at REAL DEFAULT 0, rejected INTEGER DEFAULT 0,
+                    PRIMARY KEY(reminder_id, occurrence)
+                )""")
+                db.execute("UPDATE reports SET retry_at=0 WHERE retry_at=-1")
+                db.execute("""CREATE TABLE IF NOT EXISTS command_receipts (
+                    id TEXT PRIMARY KEY, status TEXT NOT NULL, detail TEXT NOT NULL)""")
+                columns = {row[1] for row in db.execute("PRAGMA table_info(command_receipts)")}
+                if "backend_status" not in columns:
+                    db.execute("ALTER TABLE command_receipts ADD COLUMN backend_status TEXT")
+                if "retry_at" not in columns:
+                    db.execute("ALTER TABLE command_receipts ADD COLUMN retry_at REAL NOT NULL DEFAULT 0")
+                self._prune_reconciled_audio_receipts(db)
+                db.execute("""UPDATE command_receipts SET status='failed',detail=?
+                              WHERE status='executing'""",
+                           ("Thiết bị đã khởi động lại trước khi ghi nhận kết quả phát.",))
+        except sqlite3.Error:
+            self._audio_store_ok = False
+            logger.exception("[DeviceClient] Không mở được kho báo cáo âm thanh cục bộ.")
 
         self.tb = ThingsBoardPublisher(
             enabled=thingsboard_enabled,
@@ -162,6 +202,8 @@ class DeviceClient:
         return self
 
     def stop(self) -> None:
+        self._stopping.set()
+        self._prefetch.shutdown(wait=True, cancel_futures=True)
         self.tb.stop()
         self._session.close()
 
@@ -174,7 +216,7 @@ class DeviceClient:
             except Exception as exc:
                 logger.warning("[DeviceClient] Lỗi áp dụng config cache ban đầu: %s", exc)
 
-    def set_command_handler(self, handler: Callable[[dict[str, Any]], tuple[bool, str]]) -> None:
+    def set_command_handler(self, handler: Callable[[dict[str, Any]], tuple[bool, str] | Future]) -> None:
         """Đăng ký hàm thực thi lệnh từ Web (`play_audio`, `test_speaker`, `silence`, `ptz_*`)."""
         self._command_handler = handler
 
@@ -265,6 +307,8 @@ class DeviceClient:
             desired = int(result.get("desired_version") or 0)
             if desired > self.applied_version or (desired >= 1 and not self.current_config):
                 self.sync_config()
+            else:
+                self._sync_asset_readiness()
             self._flush_outbox()
             return result
         except Exception as exc:
@@ -290,11 +334,6 @@ class DeviceClient:
             cfg = resp.json()
             version = int(cfg.get("version") or 0)
 
-            # Tải sẵn các file âm thanh của lịch nhắc đang bật để chạy Offline
-            for rem in cfg.get("reminders") or []:
-                if rem.get("enabled") and rem.get("asset_id"):
-                    self.ensure_asset_cached(str(rem["asset_id"]))
-
             errors: list[str] = []
             for listener in self._config_listeners:
                 try:
@@ -315,19 +354,35 @@ class DeviceClient:
 
             self.current_config = cfg
             self._save_cached_config(cfg)
-            if version >= 1:
-                ack_resp = self._request(
-                    "POST",
-                    "/api/device/config/ack",
-                    json_body={"version": version, "success": True, "error": ""},
-                )
-                if ack_resp.status_code in (200, 409):
-                    self.applied_version = max(self.applied_version, version)
-                    logger.info("[DeviceClient] Đã đồng bộ & xác nhận cấu hình phiên bản v%d.", version)
+            self._sync_asset_readiness()
             return cfg
         except Exception as exc:
             logger.warning("[DeviceClient] Lỗi đồng bộ cấu hình: %s", exc)
             return None
+
+    def _sync_asset_readiness(self) -> None:
+        if self._stopping.is_set():
+            return
+        version = int(self.current_config.get("version") or 0)
+        if not version:
+            return
+        missing = sorted({
+            str(rem["asset_id"]) for rem in self.current_config.get("reminders", [])
+            if rem.get("enabled", True) and rem.get("asset_id")
+            and self._cached_asset(str(rem["asset_id"])) is None
+        })
+        warning = f"Thiết bị đang thiếu {len(missing)} file âm thanh lịch nhắc." if missing else ""
+        if self._config_ack != (version, warning):
+            ack = self._request("POST", "/api/device/config/ack", json_body={
+                "version": version, "success": True, "error": warning,
+            })
+            if ack.status_code in (200, 409):
+                self.applied_version = max(self.applied_version, version)
+                self._config_ack = (version, warning)
+        if missing and (self._asset_job is None or self._asset_job.done()):
+            asset = missing[self._asset_index % len(missing)]
+            self._asset_index += 1
+            self._asset_job = self._prefetch.submit(self.ensure_asset_cached, asset)
 
     # ------------------------------------------------------------------
     # 2. Telemetry Môi trường (AnNhà REST + ThingsBoard MQTT Dual-Pipeline)
@@ -438,71 +493,156 @@ class DeviceClient:
     # 4. Tải Cache Âm thanh, Báo cáo Lịch nhắc & Xử lý Lệnh Thủ công
     # ------------------------------------------------------------------
 
+    def _cached_asset(self, asset_id: str) -> Path | None:
+        if not asset_id or Path(asset_id).name != asset_id:
+            return None
+        for ext in dict.fromkeys(ASSET_EXTENSIONS.values()):
+            path = self.assets_dir / (asset_id + ext)
+            if path.is_file() and not path.is_symlink() and path.stat().st_size > 0:
+                return path
+        return None
+
     def ensure_asset_cached(self, asset_id: str) -> Path | None:
-        """Tải file âm thanh từ `/api/device/assets/{asset_id}` về đĩa cục bộ của Pi 4."""
+        """Tải file âm thanh từ backend vào bộ nhớ đệm cục bộ."""
         import re
         safe_id = (asset_id or "").strip()
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", safe_id):
-            logger.warning("[DeviceClient] Từ chối asset_id không hợp lệ: %r", asset_id)
             return None
-        assets_root = self.assets_dir.resolve()
-        for candidate in self.assets_dir.iterdir():
-            if candidate.stem == safe_id and candidate.resolve().parent == assets_root and candidate.stat().st_size > 0:
-                return candidate
+        cached = self._cached_asset(safe_id)
+        if cached is not None:
+            return cached
+        if not self.device_token or self._stopping.is_set():
+            return None
 
+        temp_path = None
         try:
-            resp = self._request("GET", f"/api/device/assets/{urllib.parse.quote(safe_id)}", stream=True)
-            if resp.status_code != 200:
-                logger.warning("[DeviceClient] Chưa tải được asset %s (HTTP %d)", safe_id, resp.status_code)
-                return None
-            mime = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-            ext_map = {
-                "audio/wav": ".wav",
-                "audio/x-wav": ".wav",
-                "audio/mpeg": ".mp3",
-                "audio/ogg": ".ogg",
-                "audio/webm": ".webm",
-            }
-            ext = ext_map.get(mime, ".wav")
-            dest = (self.assets_dir / f"{safe_id}{ext}").resolve()
-            if dest.parent != assets_root:
-                return None
-            tmp = self.assets_dir / f".{safe_id}.part"
-            with tmp.open("wb") as fh:
-                for chunk in resp.iter_content(chunk_size=16384):
-                    if chunk:
-                        fh.write(chunk)
-            tmp.replace(dest)
-            return dest
-        except Exception as exc:
+            with self._request("GET", f"/api/device/assets/{urllib.parse.quote(safe_id)}", stream=True) as resp:
+                if resp.status_code != 200:
+                    return None
+                mime = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                ext = ASSET_EXTENSIONS.get(mime)
+                if ext is None:
+                    return None
+                dest = self.assets_dir / f"{safe_id}{ext}"
+                deadline = time.monotonic() + 20
+                size = 0
+                with tempfile.NamedTemporaryFile(dir=self.assets_dir, prefix=".download-", delete=False) as tmp:
+                    temp_path = Path(tmp.name)
+                    for chunk in resp.iter_content(chunk_size=16384):
+                        size += len(chunk)
+                        if size > 25 * 1024 * 1024 or time.monotonic() > deadline or self._stopping.is_set():
+                            return None
+                        tmp.write(chunk)
+                if size:
+                    temp_path.replace(dest)
+                    return dest
+        except (OSError, requests.RequestException) as exc:
             logger.warning("[DeviceClient] Lỗi tải asset %s: %s", safe_id, exc)
-            return None
+        finally:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
+        return None
 
-    def report_execution(
-        self,
-        reminder_id: str,
-        occurrence: str,
-        status: str,
-        detail: str = "",
-    ) -> bool:
-        body = {
-            "reminder_id": reminder_id,
-            "occurrence": occurrence[:200],
-            "status": status,
-            "detail": detail[:1000],
-        }
+    def begin_execution(self, reminder_id: str, occurrence: str) -> None:
+        self._write_execution(reminder_id, occurrence, "failed",
+                              "Thiết bị đã khởi động lại trước khi xác nhận kết quả phát.", retry_at=-1)
+
+    def report_execution(self, reminder_id: str, occurrence: str, status: str, detail: str = "") -> bool:
+        self._write_execution(reminder_id, occurrence, status, detail, retry_at=0)
+        return True
+
+    def _write_execution(self, reminder_id, occurrence, status, detail, retry_at):
+        body = {"reminder_id": reminder_id, "occurrence": occurrence[:200],
+                "status": status, "detail": detail[:1000]}
+        with closing(sqlite3.connect(self._audio_db)) as db, db:
+            db.execute("""INSERT INTO reports(reminder_id, occurrence, body, retry_at) VALUES(?,?,?,?)
+                          ON CONFLICT(reminder_id, occurrence) DO UPDATE
+                          SET body=excluded.body,retry_at=excluded.retry_at
+                          WHERE reports.retry_at=-1""",
+                       (reminder_id, body["occurrence"], json.dumps(body), retry_at))
+
+    def _flush_executions(self) -> None:
+        with closing(sqlite3.connect(self._audio_db)) as db:
+            rows = db.execute("""SELECT reminder_id, occurrence, body, attempts FROM reports
+                               WHERE rejected=0 AND retry_at BETWEEN 0 AND ? ORDER BY retry_at LIMIT 5""",
+                              (time.time(),)).fetchall()
+            for reminder, occurrence, body, attempts in rows:
+                try:
+                    response = self._request("POST", "/api/device/executions", json_body=json.loads(body))
+                    status = response.status_code
+                except requests.RequestException:
+                    status = 503
+                with db:
+                    if 200 <= status < 300:
+                        db.execute("DELETE FROM reports WHERE reminder_id=? AND occurrence=?", (reminder, occurrence))
+                    elif status in (400, 404, 409, 422):
+                        db.execute("UPDATE reports SET rejected=1 WHERE reminder_id=? AND occurrence=?",
+                                   (reminder, occurrence))
+                        logger.warning("[DeviceClient] Báo cáo lời nhắc bị từ chối HTTP %d.", status)
+                    else:
+                        backoff = min(900, 5 * (2 ** min(attempts, 8)))
+                        db.execute("""UPDATE reports SET attempts=attempts+1,retry_at=?
+                                      WHERE reminder_id=? AND occurrence=?""",
+                                   (time.time() + backoff, reminder, occurrence))
+                        break
+
+    @staticmethod
+    def _prune_reconciled_audio_receipts(db: sqlite3.Connection) -> None:
+        db.execute("""DELETE FROM command_receipts WHERE rowid IN (
+                          SELECT rowid FROM command_receipts WHERE backend_status IS NOT NULL
+                          ORDER BY rowid DESC LIMIT -1 OFFSET ?
+                      )""", (MAX_RECONCILED_AUDIO_RECEIPTS,))
+
+    def _reserve_audio_receipt(self, command_id: str) -> bool:
+        with closing(sqlite3.connect(self._audio_db)) as db, db:
+            result = db.execute("""INSERT OR IGNORE INTO command_receipts(id,status,detail)
+                                   SELECT ?, 'executing', '' WHERE (
+                                       SELECT count(*) FROM command_receipts WHERE backend_status IS NULL
+                                   ) < ?""", (command_id, MAX_PENDING_AUDIO_RECEIPTS))
+            return result.rowcount == 1
+
+    def _store_audio_receipt(self, command_id: str, status: str, detail: str = "") -> None:
+        with closing(sqlite3.connect(self._audio_db)) as db, db:
+            db.execute("""INSERT INTO command_receipts(id,status,detail) VALUES(?,?,?)
+                          ON CONFLICT(id) DO UPDATE SET status=excluded.status,detail=excluded.detail""",
+                       (command_id, status, detail[:1000]))
+
+    def _complete_audio_command(self, command_id: str, future: Future) -> None:
         try:
-            resp = self._request("POST", "/api/device/executions", json_body=body)
-            return resp.status_code == 200
-        except Exception:
-            with self._lock:
-                self._outbox_executions.append(body)
-            return False
+            ok, detail = future.result()
+        except Exception as exc:
+            ok, detail = False, str(exc) or "Lệnh phát đã bị hủy."
+        self._store_audio_receipt(command_id, "executed" if ok else "failed", detail)
+
+    def _flush_audio_receipts(self) -> None:
+        with closing(sqlite3.connect(self._audio_db)) as db:
+            receipts = db.execute("""SELECT id,status,detail FROM command_receipts
+                                     WHERE status!='executing' AND backend_status IS NULL AND retry_at<=?
+                                     ORDER BY retry_at,rowid LIMIT 8""", (time.time(),)).fetchall()
+            for command_id, status, detail in receipts:
+                confirmed = self._send_command_ack(command_id, status, detail)
+                with db:
+                    if confirmed == status:
+                        db.execute("DELETE FROM command_receipts WHERE id=?", (command_id,))
+                        self._processed_commands.append(command_id)
+                    elif confirmed in ("executed", "failed", "expired"):
+                        db.execute("UPDATE command_receipts SET backend_status=? WHERE id=?",
+                                   (confirmed, command_id))
+                        self._prune_reconciled_audio_receipts(db)
+                        logger.warning("[DeviceClient] ACK âm thanh xung đột (%s / %s).", status, confirmed)
+                    else:
+                        db.execute("UPDATE command_receipts SET retry_at=? WHERE id=?",
+                                   (time.time() + 60, command_id))
+                        # A missing command need not delay other receipts. Transport failures do.
+                        if confirmed is None:
+                            break
 
     def poll_and_execute_commands(self) -> int:
-        """Nhận danh sách lệnh đang chờ từ Web và thực thi tuần tự với đầy đủ ACK."""
+        """Nhận lệnh và gửi ACK cuối khi worker đã ghi kết quả xuống đĩa."""
         if self._command_handler is None:
             return 0
+        if self._audio_store_ok:
+            self._flush_audio_receipts()
         try:
             resp = self._request("GET", "/api/device/commands")
             if resp.status_code != 200:
@@ -511,46 +651,80 @@ class DeviceClient:
         except Exception:
             return 0
 
+        recorded = set()
+        if self._audio_store_ok:
+            with closing(sqlite3.connect(self._audio_db)) as db:
+                recorded = {row[0] for row in db.execute("SELECT id FROM command_receipts")}
         handled = 0
         now_epoch = time.time()
         for cmd in commands:
             cmd_id = str(cmd.get("id") or "")
-            if not cmd_id or cmd_id in self._processed_commands:
+            if not cmd_id or cmd_id in self._processed_commands or cmd_id in recorded:
                 continue
             expires = float(cmd.get("expires") or 0)
             if expires and expires <= now_epoch:
                 continue
 
-            # Tiến trình bắt buộc: pending -> accepted -> executing -> executed/failed
+            durable = cmd.get("kind") in ("play_audio", "test_speaker")
+            if durable and not self._audio_store_ok:
+                self._ack_command(cmd_id, "failed", "Không ghi được trạng thái lệnh trên thiết bị.")
+                continue
+
+            if durable and not self._reserve_audio_receipt(cmd_id):
+                # Leave the command pending on the server until capacity returns or it expires.
+                continue
             if cmd.get("status") == "pending":
                 self._ack_command(cmd_id, "accepted", "")
-            self._ack_command(cmd_id, "executing", "")
+            if not self._ack_command(cmd_id, "executing", ""):
+                if durable:
+                    self._store_audio_receipt(cmd_id, "failed", "Thiết bị không nhận được xác nhận bắt đầu phát.")
+                    self._processed_commands.append(cmd_id)
+                continue
 
             try:
-                ok, detail = self._command_handler(cmd)
+                result = self._command_handler(cmd)
+                if isinstance(result, Future):
+                    result.add_done_callback(lambda done, command_id=cmd_id: self._complete_audio_command(command_id, done))
+                    handled += 1
+                    continue
+                ok, detail = result
             except Exception as exc:
                 ok, detail = False, str(exc)
 
-            self._ack_command(cmd_id, "executed" if ok else "failed", detail)
+            if durable:
+                self._store_audio_receipt(cmd_id, "executed" if ok else "failed", detail)
+            else:
+                self._ack_command(cmd_id, "executed" if ok else "failed", detail)
             self._processed_commands.append(cmd_id)
             handled += 1
         return handled
 
-    def _ack_command(self, command_id: str, status: str, detail: str) -> None:
+    def _ack_command(self, command_id: str, status: str, detail: str) -> bool:
+        return self._send_command_ack(command_id, status, detail) == status
+
+    def _send_command_ack(self, command_id: str, status: str, detail: str) -> str | None:
         try:
-            self._request(
+            response = self._request(
                 "POST",
                 f"/api/device/commands/{urllib.parse.quote(command_id)}/ack",
                 json_body={"status": status, "detail": (detail or "")[:1000]},
             )
-        except Exception as exc:
+            if response.status_code == 200 and response.json().get("status") == status:
+                return status
+            if response.status_code == 409:
+                conflict = response.json().get("detail")
+                if isinstance(conflict, dict) and conflict.get("status") in ("executed", "failed", "expired"):
+                    return conflict["status"] if conflict["status"] != status else "unconfirmed"
+            if response.status_code in (404, 409):
+                return "unconfirmed"
+        except (requests.RequestException, ValueError, AttributeError) as exc:
             logger.debug("[DeviceClient] Lỗi ACK command %s (%s): %s", command_id, status, exc)
+        return None
 
     def _flush_outbox(self) -> None:
         with self._lock:
             ev_batch = [self._outbox_events.popleft() for _ in range(min(10, len(self._outbox_events)))]
             tel_batch = [self._outbox_telemetry.popleft() for _ in range(min(10, len(self._outbox_telemetry)))]
-            exe_batch = [self._outbox_executions.popleft() for _ in range(min(10, len(self._outbox_executions)))]
         for item in ev_batch:
             try:
                 r = self._request("POST", "/api/device/events", json_body=item)
@@ -573,10 +747,5 @@ class DeviceClient:
                 with self._lock:
                     self._outbox_telemetry.appendleft(item)
                 break
-        for item in exe_batch:
-            try:
-                self._request("POST", "/api/device/executions", json_body=item)
-            except Exception:
-                with self._lock:
-                    self._outbox_executions.appendleft(item)
-                break
+        if self._audio_store_ok:
+            self._flush_executions()
