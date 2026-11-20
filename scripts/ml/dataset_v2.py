@@ -14,7 +14,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'fall_detect'))
 from ml.dataset import read_keypoints_csv
 from ml.features import SPEC
-from ml.integrity import build_dataset, decoded_video_digest, digest, preflight_sources, read_sources, verify_dataset
+from ml.integrity import approve_subset, build_dataset, decoded_video_digest, digest, preflight_sources, read_sources, verify_dataset
 
 VIDEO_SUFFIXES = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
 SKIP_DIRS = {'.git', 'node_modules', 'venv', '.venv', '__pycache__', '.secrets'}
@@ -110,10 +110,19 @@ def main():
     verify = commands.add_parser('verify')
     verify.add_argument('dataset', type=Path)
     verify.add_argument('--verify-sources', action='store_true')
+    approve = commands.add_parser('approve-subset')
+    approve.add_argument('dataset', type=Path)
+    approve.add_argument('--sha256', required=True)
+    approve.add_argument('--reviewer', required=True)
+    approve.add_argument('--evidence', required=True)
     options = parser.parse_args()
     try:
         if options.command == 'audit':
             output = inventory(options.root.resolve(strict=True))
+        elif options.command == 'approve-subset':
+            approve_subset(options.dataset, expected_sha256=options.sha256,
+                           reviewer=options.reviewer, evidence=options.evidence)
+            output = {'scope':'G3_SUBSET','dataset_sha256':options.sha256}
         elif options.command == 'preflight':
             admitted, rejected, _ = preflight_sources(read_sources(options.sources), mode=options.mode, stride=options.stride)
             output = {'mode': options.mode, 'eligible': [row['video_id'] for row in admitted], 'rejected': rejected}

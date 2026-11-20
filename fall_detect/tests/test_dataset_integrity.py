@@ -6,7 +6,7 @@ import pytest
 
 from ml.dataset import write_keypoints_csv
 from ml.features import SPEC
-from ml.integrity import Source, assign_splits, build_dataset, digest, verify_dataset
+from ml.integrity import Source, approve_subset, assign_splits, build_dataset, digest, verify_dataset
 from ml.training_data import DataLoader
 
 
@@ -118,6 +118,11 @@ def test_tampered_assignment_and_test_for_tuning_fail(tmp_path):
     manifest = build_dataset(sources(tmp_path), root, version='v2', seed=42)
     with pytest.raises(ValueError, match='final_evaluation'):
         DataLoader(root, 'test', purpose='threshold_selection')
+    with pytest.raises(ValueError, match='explicit G3 subset approval'):
+        DataLoader(root, 'test', purpose='final_evaluation')
+    with pytest.raises(ValueError, match='SHA-256'):
+        approve_subset(root, expected_sha256='0'*64, reviewer='fixture reviewer', evidence='fixture evidence')
+    approve_subset(root, expected_sha256=manifest['dataset_sha256'], reviewer='fixture reviewer', evidence='fixture evidence')
     assert len(DataLoader(root, 'test', purpose='final_evaluation'))
     row = manifest['sources'][0]
     row['split'] = 'val' if row['split'] != 'val' else 'test'

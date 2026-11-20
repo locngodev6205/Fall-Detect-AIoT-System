@@ -473,3 +473,31 @@ def verify_dataset(root, *, verify_sources=False):
     if paths != {p.resolve() for p in root.rglob('*.npy')}:
         raise ValueError('Unlisted NPY files in dataset')
     return manifest
+
+
+def approve_subset(root, *, expected_sha256, reviewer, evidence):
+    """Record an explicit subset approval after checking all source artifacts."""
+    if not reviewer.strip() or not evidence.strip():
+        raise ValueError('Approval requires reviewer identity and independent evidence')
+    root = Path(root)
+    manifest = verify_dataset(root, verify_sources=True)
+    if not manifest['g3_eligible']:
+        raise ValueError('Research-only dataset cannot be approved for official Test')
+    if manifest['dataset_sha256'] != expected_sha256:
+        raise ValueError('Approval SHA-256 does not match the verified dataset')
+    with (root / 'g3-subset-approval.json').open('x', encoding='utf-8') as stream:
+        json.dump({'scope':'G3_SUBSET','dataset_sha256':expected_sha256,'test_lock':manifest['test_lock'],
+                   'reviewer':reviewer.strip(),'evidence':evidence.strip()},stream,indent=2)
+
+
+def require_subset_approval(root, manifest):
+    path = Path(root) / 'g3-subset-approval.json'
+    if not path.is_file():
+        raise ValueError('Official Test requires explicit G3 subset approval')
+    approval = json.loads(path.read_text(encoding='utf-8'))
+    if (approval.get('scope') != 'G3_SUBSET'
+            or approval.get('dataset_sha256') != manifest['dataset_sha256']
+            or approval.get('test_lock') != manifest['test_lock']
+            or not all(isinstance(approval.get(key),str) and approval[key].strip()
+                       for key in ('reviewer','evidence'))):
+        raise ValueError('G3 subset approval does not match the locked Test manifest')

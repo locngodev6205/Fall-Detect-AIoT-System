@@ -6,7 +6,7 @@ import numpy as np
 
 from .dataset import jitter_coordinates
 from .features import normalize_sequence
-from .integrity import SPLITS, verify_dataset
+from .integrity import SPLITS, require_subset_approval, verify_dataset
 
 
 class DataLoader:
@@ -21,6 +21,8 @@ class DataLoader:
             allowed = 'final_evaluation' if manifest['g3_eligible'] else 'research_evaluation'
             if purpose != allowed:
                 raise ValueError(f'{manifest["mode"]} Test is reserved for {allowed}')
+            if manifest['g3_eligible']:
+                require_subset_approval(self.root, manifest)
         self.dataset_sha256 = manifest['dataset_sha256']
         if expected_sha256 is not None and expected_sha256 != self.dataset_sha256:
             raise ValueError('Dataset does not match the locked manifest SHA-256')
