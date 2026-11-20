@@ -18,6 +18,8 @@ def maintenance_guard(function):
             elif function.__name__ != '_evaluate_local_autonomous_safety' and time.monotonic() < self.maintenance_until:
                 return False, 'Thiết bị đang chuẩn bị cập nhật'
             result = function(self, *args, **kwargs)
+            if function.__name__ == '_evaluate_local_autonomous_safety':
+                self.last_safety_check = time.monotonic()
             if self.local_danger:
                 self.maintenance_until = 0
             return result
@@ -39,11 +41,14 @@ class UpdateStatusServer:
 
     def status(self):
         r = self.runtime
-        fresh = time.monotonic() - r.last_camera_frame < 5
-        safety_fresh = time.monotonic() - r.last_safety_check < 5
-        healthy = fresh and r.model_inference_ok
+        now = time.monotonic()
+        camera_stamp = r.last_camera_frame
+        safety_stamp = getattr(r, 'last_safety_check', 0)
+        fresh = camera_stamp > 0 and 0 <= now - camera_stamp < 5
+        safety_fresh = safety_stamp > 0 and 0 <= now - safety_stamp < 5
+        healthy = fresh and safety_fresh and r.model_inference_ok and not r.force_mock_hardware
         busy = r.audio.is_busy()
-        ready = healthy and safety_fresh and not r.local_danger and not r.unreported_alert and not busy
+        ready = healthy and not r.local_danger and not r.unreported_alert and not busy
         reason = '' if ready else ('Nguy hiểm hoặc cảnh báo chưa gửi' if r.local_danger or r.unreported_alert else
             'Âm thanh đang phát' if busy else 'Camera, model hoặc giám sát an toàn chưa sẵn sàng')
         return {'current_version': self.version, 'model_sha256': self.model_sha256,

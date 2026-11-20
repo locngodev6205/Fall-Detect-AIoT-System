@@ -327,7 +327,6 @@ class AnNhaEdgeRuntime:
     @maintenance_guard
     def _evaluate_local_autonomous_safety(self, readings: dict[str, dict[str, Any]]) -> None:
         """Kiểm tra ngưỡng khí gas độc lập ngay tại biên mỗi 1.5s — hú còi tại chỗ kể cả khi rớt mạng!"""
-        self.last_safety_check = time.monotonic()
         gas_info = readings.get("gas") or {}
         self.local_danger = gas_info.get("quality") != "valid"
         if gas_info.get("quality") == "valid" and gas_info.get("value") is not None:

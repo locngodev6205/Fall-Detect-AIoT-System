@@ -177,17 +177,29 @@ class LocalReadinessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / 'requirements.txt').write_text('runtime')
-            runtime = SimpleNamespace(last_camera_frame=0, last_safety_check=time.monotonic(),
+            runtime = SimpleNamespace(force_mock_hardware=False, last_camera_frame=0, last_safety_check=time.monotonic(),
                 model_inference_ok=True, local_danger=False, unreported_alert=False,
                 maintenance_until=0, update_lock=threading.RLock(), audio=SimpleNamespace(is_busy=lambda: False))
             status = UpdateStatusServer(runtime, root)
             self.assertFalse(status.status()['healthy'])
             runtime.last_camera_frame = time.monotonic()
             self.assertTrue(status.status()['ready'])
+            for attribute, invalid in (
+                ('last_camera_frame', time.monotonic()-6), ('model_inference_ok', False),
+                ('last_safety_check', time.monotonic()-6), ('last_safety_check', 0),
+                ('force_mock_hardware', True),
+            ):
+                with self.subTest(attribute=attribute, invalid=invalid), patch.object(runtime, attribute, invalid):
+                    self.assertFalse(status.status()['healthy'])
+                    self.assertFalse(status.status()['ready'])
+            runtime.last_safety_check = time.monotonic()
+            self.assertTrue(status.status()['healthy'])
             runtime.audio.is_busy = lambda: True
+            self.assertTrue(status.status()['healthy'])
             self.assertFalse(status.status()['ready'])
             runtime.audio.is_busy = lambda: False
             runtime.unreported_alert = True
+            self.assertTrue(status.status()['healthy'])
             self.assertFalse(status.status()['ready'])
 
     def test_interrupted_install_restores_old_release(self):
@@ -361,3 +373,49 @@ class TransportTests(unittest.TestCase):
             self.assertEqual(updater.current(),'0.0.0')
             self.assertTrue(updater.target('1.0.0').exists())
             self.assertEqual((shared/'app.env').read_text(),'fixture')
+
+
+class JournalPhaseTests(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        root = Path(folder.name)
+        (root/'shared').mkdir()
+        (root/'shared/updater.json').write_text(json.dumps(
+            {'backend_url':'http://localhost','device_token':'fixture'}))
+        self.updater = Updater(root)
+        self.addCleanup(self.updater.lock.close)
+        self.job = {'id':'job','version':'1.0.0'}
+
+    def test_safety_revoked_after_claim_never_touches_service(self):
+        updater = self.updater
+        for ready, maintenance in ((False, False), (False, True), (True, False)):
+            with self.subTest(ready=ready, maintenance=maintenance), patch.object(updater,'current',return_value='0.0.0'), patch.object(updater,'report') as report, patch.object(updater,'local',return_value={'ready':ready,'maintenance_active':maintenance}), patch.object(updater,'service') as service, patch.object(updater,'switch') as switch:
+                with self.assertRaises(RuntimeError):
+                    updater.install(self.job)
+                service.assert_not_called()
+                switch.assert_not_called()
+                self.assertEqual([call.args[1] for call in report.call_args_list], ['installing','failed'])
+
+    def test_restart_phase_controls_rollback(self):
+        updater = self.updater
+        for phase in ('claim_pending','claimed','modifying','switched','restored'):
+            with self.subTest(phase=phase):
+                atomic_json(updater.journal,{'phase':phase,'job':self.job,'old':'0.0.0',
+                                            'claimed':phase != 'claim_pending'})
+                with patch.object(updater,'request',return_value={'job':{**self.job,'status':'installing'}}), patch.object(updater,'report',side_effect=OSError('offline')), patch.object(updater,'service') as service, patch.object(updater,'switch') as switch, patch.object(updater,'healthy',return_value=True):
+                    with self.assertRaises(OSError):
+                        updater.recover()
+                    outcome = json.loads(updater.journal.read_text())
+                    self.assertEqual(outcome['phase'],'report_pending')
+                    if phase in ('modifying','switched'):
+                        self.assertEqual([call.args[0] for call in service.call_args_list],['stop','start'])
+                        switch.assert_called_once_with('0.0.0')
+                    else:
+                        service.assert_not_called()
+                        switch.assert_not_called()
+                    self.assertEqual(outcome['outcome'],'failed' if phase in ('claim_pending','claimed') else 'rolled_back')
+                    with patch.object(updater,'report'):
+                        updater.recover()
+                    self.assertFalse(updater.journal.exists())
+                    self.assertEqual(switch.call_count,int(phase in ('modifying','switched')))

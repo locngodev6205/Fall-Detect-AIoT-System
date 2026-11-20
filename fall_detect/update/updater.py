@@ -272,6 +272,7 @@ class Updater:
         job = journal['job']
         if journal.get('outcome'):
             if journal.get('local_verified'):
+                atomic_json(self.previous_file, {'version': journal['old']})
                 self.report(job, 'health_check')
                 self.heartbeat()
             if journal['outcome'] == 'rolled_back':
@@ -289,16 +290,25 @@ class Updater:
             except OSError:
                 pass
             return
+        if journal.get('phase') in ('claim_pending', 'claimed'):
+            journal.update(phase='report_pending', outcome='failed',
+                           message='Đã dừng cập nhật trước khi thay đổi ứng dụng')
+            atomic_json(self.journal, journal)
+            self.recover()
+            return
         try:
-            self.service('stop')
-            self.switch(journal['old'])
-            self.service('start')
+            if journal.get('phase') != 'restored':
+                self.service('stop')
+                self.switch(journal['old'])
+                self.service('start')
+                journal['phase'] = 'restored'
+                atomic_json(self.journal, journal)
             healthy = self.healthy(journal['old'], require_backend=False)
             outcome = 'rolled_back' if healthy else 'failed'
             message = 'Đã phục hồi bản trước' if healthy else 'Bản trước chưa vượt qua health check. Cần kiểm tra thiết bị.'
         except Exception:
             outcome, message = 'failed', 'Không phục hồi được service. Cần kiểm tra thiết bị.'
-        journal.update(outcome=outcome, message=message)
+        journal.update(phase='report_pending', outcome=outcome, message=message)
         atomic_json(self.journal, journal)
         self.recover()
 
@@ -306,27 +316,31 @@ class Updater:
         old = self.current()
         if old == 'unmanaged':
             raise ValueError('Cần cài nền cập nhật trước khi dùng OTA')
-        journal = {'job': job, 'old': old}
+        journal = {'job': job, 'old': old, 'phase': 'claim_pending'}
         atomic_json(self.journal, journal)
         try:
             self.report(job, 'installing')
-            journal['claimed'] = True
+            journal.update(claimed=True, phase='claimed')
             atomic_json(self.journal, journal)
             final = self.local()
             if not final.get('ready') or not final.get('maintenance_active'):
                 raise RuntimeError('Điều kiện cập nhật đã thay đổi')
+            journal['phase'] = 'modifying'
+            atomic_json(self.journal, journal)
             self.service('stop')
             self.switch(job['version'])
+            journal['phase'] = 'switched'
+            atomic_json(self.journal, journal)
             self.service('start')
             if not self.healthy(job['version'], require_backend=False):
                 raise RuntimeError('Bản mới không đạt health check trong 120 giây')
-            atomic_json(self.previous_file, {'version': old})
-            journal.update(outcome='succeeded', local_verified=True, message='Ứng dụng mới đã sẵn sàng')
+            journal.update(phase='report_pending', outcome='succeeded', local_verified=True,
+                           message='Ứng dụng mới đã sẵn sàng')
             atomic_json(self.journal, journal)
-            self.recover()
         except Exception:
             self.recover()
             raise
+        self.recover()
 
     def cleanup(self):
         keep = {self.current()}
