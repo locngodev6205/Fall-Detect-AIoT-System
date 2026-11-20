@@ -33,7 +33,7 @@ def device_sample(start, cpu, frames):
                 frames=frames, rss_kib=int(rss) if rss else None, temperature_c=temp)
 
 
-def benchmark(source, model, complexity, *, live=False, limit=None, confirmations=1):
+def benchmark(source, model, complexity, *, live=False, limit=None, confirmations=1, preview=None):
     import cv2
     import mediapipe as mp
     cv2.setNumThreads(1)
@@ -45,6 +45,8 @@ def benchmark(source, model, complexity, *, live=False, limit=None, confirmation
     height = width = 0
     valid = windows = scored = frames = interruptions = no_landmarks = 0
     alerts, score_grid, transitions = [], [], []
+    max_score = None
+    presence, presence_transitions = None, []
     stream = Stream(model, confirmations=confirmations)
     recovery = []
     outage_started = None
@@ -88,13 +90,18 @@ def benchmark(source, model, complexity, *, live=False, limit=None, confirmation
                 points = extract_keypoints(landmarks)
                 no_landmarks += int(landmarks is None)
                 pose.append((time.monotonic()-t)*1000)
-                valid += int(normalize_sequence([points])[0,2::3].any())
+                present = bool(normalize_sequence([points])[0,2::3].any())
+                valid += int(present)
+                if present != presence:
+                    presence_transitions.append(dict(source_time=stamp, pose_valid=present))
+                    presence = present
                 results = stream.push(stamp,points)
                 preprocessing.append(stream.preprocess_ms)
                 windows += len(results)
                 for row in results:
                     if row.score is not None:
                         scored += 1
+                        max_score = row.score if max_score is None else max(max_score, row.score)
                         score_grid.append(row.end)
                         inference.append(row.inference_ms)
                     for event, when in row.events:
@@ -105,6 +112,8 @@ def benchmark(source, model, complexity, *, live=False, limit=None, confirmation
                         if event == 'simulated_alert':
                             alerts.append([when,row.arrival])
                             delivery.append((time.monotonic()-arrived)*1000)
+                if preview is not None:
+                    preview(frame, present)
                 frames += 1
                 pipeline.append((time.monotonic()-start)*1000)
     finally:
@@ -126,7 +135,8 @@ def benchmark(source, model, complexity, *, live=False, limit=None, confirmation
                 pose_ms=quantiles(pose), pipeline_ms=quantiles(pipeline),
                 preprocessing_ms=quantiles(preprocessing), inference_ms=quantiles(inference), simulated_alert_delivery_ms=quantiles(delivery),
                 valid_pose_frames=valid, no_landmark_frames=no_landmarks, windows=windows, scored=scored, alerts=alerts, score_grid=score_grid,
-                transitions=transitions, interruptions=interruptions,
+                transitions=transitions, pose_validity_transitions=presence_transitions,
+                max_fall_probability=max_score, interruptions=interruptions,
                 recovery_ms=quantiles(recovery), model_errors=stream.model_errors,
                 invalid_poses=stream.invalid_poses,
                 timestamp_resets=sum(reason == 'timestamp_gap' for reason, _ in stream.resets),
