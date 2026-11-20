@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="vi">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ghi mốc té ngã</title>
+<style>
+body { margin: 2rem auto; padding: 0 1rem; max-width: 760px; font: 16px system-ui; color: #172623; background: #f6faf9; }
+video { display: block; width: 100%; max-height: 55vh; background: #111; margin: 1rem 0; }
+label { display: block; margin: .6rem 0; }
+button, input, select { padding: .45rem; font: inherit; }
+button { margin: .2rem; }
+#status { min-height: 1.5em; }
+</style>
+<h1>Ghi mốc té ngã</h1>
+<p>Chọn video gốc, đánh dấu lúc người bắt đầu mất thăng bằng và lúc chuyển động ngã kết thúc. Dùng “Chưa xác minh” nếu mốc còn mơ hồ. Các tệp chỉ được đọc trong trình duyệt.</p>
+<label>Video <input id="source" type="file" accept="video/*,.mp4"></label>
+<label>Lịch sử đã xuất <input id="import" type="file" accept="application/json,.json"></label>
+<label>Đề xuất chuyển động <input id="proposals" type="file" accept="application/json,.json"></label>
+<video id="player" controls playsinline></video>
+<div>
+<button id="back" type="button">Lùi 0,1 giây</button><button id="forward" type="button">Tiến 0,1 giây</button>
+<button id="applyProposal" type="button" disabled>Gợi ý khoảng cần xem</button>
+<button id="markStart" type="button">Đặt mốc bắt đầu</button><button id="markEnd" type="button">Đặt mốc kết thúc</button>
+</div>
+<form id="annotation">
+<label>Nhãn kiểm tra <select id="label"><option value="fall">Fall</option><option value="no_fall">No Fall</option></select></label>
+<label>Bắt đầu (giây) <input id="start" type="number" min="0" step="0.001"></label>
+<label>Kết thúc (giây) <input id="end" type="number" min="0" step="0.001"></label>
+<label>Chạm đất nếu quan sát được (giây) <input id="impact" type="number" min="0" step="0.001"></label>
+<label>Trạng thái sau ngã <input id="postfall" placeholder="Nằm yên, tự đứng dậy, hoặc không quan sát được"></label>
+<label>Người xem xác minh <input id="reviewer" required></label>
+<label>Nguồn annotation hoặc ghi chú <input id="note" required></label>
+<label>Trạng thái <select id="decision"><option value="UNVERIFIED">Chưa xác minh</option><option value="HUMAN_VERIFIED">Đã xem và xác minh nhãn</option></select></label>
+<button type="submit">Thêm lần ghi</button>
+<button id="download" type="button">Xuất lịch sử JSON</button>
+</form>
+<p id="status" role="status"></p>
+<script>
+const field = id => document.getElementById(id);
+const player = field('player');
+const status = field('status');
+let history = [];
+let proposals = new Map();
+let current;
+let videoUrl;
+let dirty = false;
+function renderHistory() {
+  const previous = history.filter(entry => entry.video_sha256 === current?.hash).at(-1);
+  field('start').value = previous?.fall_start_time ?? '';
+  field('end').value = previous?.fall_end_time ?? '';
+  field('note').value = previous?.annotation_source ?? '';
+  field('decision').value = previous?.annotation_status ?? 'UNVERIFIED';
+  field('label').value = previous?.review_label ?? 'fall';
+  field('impact').value = previous?.impact_s ?? '';
+  field('postfall').value = previous?.post_fall ?? '';
+  field('applyProposal').disabled = !current || !proposals.has(current.hash);
+  status.textContent = current
+    ? current.file.name + ' · ' + history.filter(entry => entry.video_sha256 === current.hash).length + ' lần ghi'
+    : 'Đã nạp ' + history.length + ' lần ghi';
+}
+field('source').onchange = async event => {
+  const file = event.target.files[0];
+  if (!file) return;
+  current = undefined;
+  if (videoUrl) URL.revokeObjectURL(videoUrl);
+  videoUrl = URL.createObjectURL(file);
+  player.src = videoUrl;
+  try {
+    const bytes = await file.arrayBuffer();
+    const hash = await crypto.subtle.digest('SHA-256', bytes);
+    if (field('source').files[0] !== file) return;
+    current = {file, hash: Array.from(new Uint8Array(hash), x => x.toString(16).padStart(2, '0')).join('')};
+    renderHistory();
+  } catch {
+    status.textContent = 'Không tính được SHA-256. Mở trang bằng Chrome hoặc Firefox trên máy.';
+  }
+};
+field('import').onchange = async event => {
+  if (!event.target.files[0]) return;
+  if (dirty) {
+    status.textContent = 'Hãy xuất lịch sử hiện tại trước khi nhập tệp khác.';
+    return;
+  }
+  try {
+    const document = JSON.parse(await event.target.files[0].text());
+    if (document.schema !== 'annha-fall-annotation-history-v1' || !Array.isArray(document.revisions) ||
+        !document.revisions.every(entry => /^[a-f0-9]{64}$/.test(entry.video_sha256 ?? '') &&
+          ['UNVERIFIED','HUMAN_VERIFIED'].includes(entry.annotation_status) &&
+          typeof entry.reviewer === 'string' && typeof entry.annotation_source === 'string' &&
+          (entry.annotation_status === 'UNVERIFIED' || entry.review_label === 'no_fall' || (Number.isFinite(entry.fall_start_time) &&
+            Number.isFinite(entry.fall_end_time) && entry.fall_start_time >= 0 &&
+            entry.fall_end_time > entry.fall_start_time)))) throw Error();
+    history = document.revisions;
+    renderHistory();
+  } catch {
+    status.textContent = 'Tệp lịch sử không đúng định dạng.';
+  }
+};
+field('proposals').onchange = async event => {
+  const file = event.target.files[0];
+  if (!file) return;
+  try {
+    const data = JSON.parse(await file.text());
+    if (data.schema !== 'annha-motion-proposals-v1' || !Array.isArray(data.proposals)
+        || !data.proposals.every(item => /^[a-f0-9]{64}$/.test(item.video_sha256 ?? '')
+          && item.status === 'UNVERIFIED_MOTION_PROPOSAL' && Number.isFinite(item.start)
+          && Number.isFinite(item.end) && item.start >= 0 && item.end > item.start)) throw Error();
+    proposals = new Map(data.proposals.map(item => [item.video_sha256, item]));
+    field('applyProposal').disabled = !current || !proposals.has(current.hash);
+    status.textContent = 'Đã nạp ' + proposals.size + ' đề xuất chưa xác minh.';
+  } catch {
+    status.textContent = 'Tệp đề xuất không đúng định dạng.';
+  }
+};
+field('applyProposal').onclick = () => {
+  const item = current && proposals.get(current.hash);
+  if (!item || !Number.isFinite(player.duration) || item.end > player.duration + .001) {
+    status.textContent = 'Không thể đặt đề xuất trên timeline của video này.';
+    return;
+  }
+  field('start').value = item.start.toFixed(3);
+  field('end').value = item.end.toFixed(3);
+  field('decision').value = 'UNVERIFIED';
+  field('label').value = 'fall';
+  field('impact').value = '';
+  field('postfall').value = '';
+  field('note').value = 'Đề xuất từ vận tốc hông, chưa đối chiếu video';
+  player.currentTime = item.start;
+  status.textContent = 'Đề xuất chưa xác minh. Xem đoạn video và chỉnh hai mốc trước khi xác nhận.';
+};
+field('back').onclick = () => { player.currentTime = Math.max(0, player.currentTime - 0.1); };
+field('forward').onclick = () => { if (Number.isFinite(player.duration)) player.currentTime = Math.min(player.duration, player.currentTime + 0.1); };
+field('markStart').onclick = () => { field('start').value = player.currentTime.toFixed(3); };
+field('markEnd').onclick = () => { field('end').value = player.currentTime.toFixed(3); };
+field('annotation').onsubmit = event => {
+  event.preventDefault();
+  if (!current || !Number.isFinite(player.duration)) {
+    status.textContent = 'Chờ video và SHA-256 sẵn sàng.';
+    return;
+  }
+  const start = field('start').valueAsNumber;
+  const end = field('end').valueAsNumber;
+  const decision = field('decision').value;
+  const label = field('label').value;
+  const impact = field('impact').valueAsNumber;
+  if (label === 'no_fall' && [start,end,impact].some(Number.isFinite)) {
+    status.textContent = 'Xóa các mốc ngã trước khi lưu nhãn No Fall.';
+    return;
+  }
+  if (Number.isFinite(impact) && !(impact >= start && impact <= end)) {
+    status.textContent = 'Mốc chạm đất phải nằm giữa mốc bắt đầu và kết thúc.';
+    return;
+  }
+  if ((Number.isFinite(start) || Number.isFinite(end) || (decision === 'HUMAN_VERIFIED' && label === 'fall')) &&
+      !(start >= 0 && end > start && end <= player.duration + 0.0005)) {
+    status.textContent = 'Hai mốc phải tăng dần và nằm trong thời lượng video.';
+    return;
+  }
+  const reviewer = field('reviewer').value.trim();
+  const source = field('note').value.trim();
+  if (!reviewer || !source) {
+    status.textContent = 'Nhập người xem và nguồn annotation hoặc ghi chú.';
+    return;
+  }
+  history.push({
+    video_file: current.file.name, video_sha256: current.hash, reviewer, review_label: label,
+    impact_s: Number.isFinite(impact) ? impact : null, post_fall: field('postfall').value.trim(),
+    reviewed_at: new Date().toISOString(), annotation_source: source,
+    annotation_status: decision, annotation_confidence: decision === 'HUMAN_VERIFIED' ? 'manual_review' : 'unverified',
+    fall_start_time: Number.isFinite(start) ? start : null, fall_end_time: Number.isFinite(end) ? end : null
+  });
+  dirty = true;
+  renderHistory();
+};
+field('download').onclick = () => {
+  const data = JSON.stringify({schema: 'annha-fall-annotation-history-v1', revisions: history}, null, 2);
+  const url = URL.createObjectURL(new Blob([data], {type: 'application/json'}));
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = 'annha-annotation-history-' + Date.now() + '.json';
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  dirty = false;
+};
+addEventListener('beforeunload', event => {
+  if (dirty) { event.preventDefault(); event.returnValue = ''; }
+});
+</script>
+</html>

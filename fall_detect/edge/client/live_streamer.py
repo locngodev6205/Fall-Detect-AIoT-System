@@ -30,12 +30,12 @@ def _ws_url(http_base_url: str, path: str) -> str:
     return f"ws://{base}{path}"
 
 
-async def _ws_connect(uri: str, token: str) -> Any:
+async def _ws_connect(uri: str, token: str, *, compression: str | None = "deflate") -> Any:
     headers = {"Authorization": f"Bearer {token}"}
     try:
-        return await websockets.connect(uri, additional_headers=headers, max_size=2 * 1024 * 1024)
+        return await websockets.connect(uri, additional_headers=headers, max_size=2 * 1024 * 1024, compression=compression)
     except TypeError:
-        return await websockets.connect(uri, extra_headers=headers, max_size=2 * 1024 * 1024)
+        return await websockets.connect(uri, extra_headers=headers, max_size=2 * 1024 * 1024, compression=compression)
 
 
 class LiveStreamer:
@@ -46,31 +46,37 @@ class LiveStreamer:
         base_url: str,
         device_token: str,
         *,
-        fps_limit: float = 5.0,
+        fps_limit: float = 8.0,
         on_ptt_audio_file: Callable[[Path, str], None] | None = None,
     ) -> None:
         self.base_url = base_url
         self.device_token = device_token.strip()
-        self.min_frame_interval = 1.0 / max(1.0, min(5.5, float(fps_limit)))
+        self.min_frame_interval = 1.0 / max(1.0, min(8.0, float(fps_limit)))
         self.on_ptt_audio_file = on_ptt_audio_file
 
         self._lock = threading.Lock()
         self._latest_jpeg: bytes | None = None
+        self._latest_preview: bytes | None = None
         self._latest_seq: int = 0
         self._running = False
         self._thread: threading.Thread | None = None
 
-    def update_frame_jpeg(self, jpeg_bytes: bytes) -> None:
+    def update_frame_jpeg(self, jpeg_bytes: bytes, *, preview_jpeg: bytes | None = None) -> None:
         """Cập nhật khung hình JPEG mới nhất từ luồng Camera AI (không nghẽn luồng AI)."""
         if not jpeg_bytes or not jpeg_bytes.startswith(JPEG_SOI) or len(jpeg_bytes) > MAX_FRAME_BYTES:
             return
         with self._lock:
             self._latest_jpeg = jpeg_bytes
+            self._latest_preview = preview_jpeg
             self._latest_seq += 1
 
     def get_latest_jpeg(self) -> bytes | None:
         with self._lock:
             return self._latest_jpeg
+
+    def get_preview_jpeg(self) -> bytes | None:
+        with self._lock:
+            return self._latest_preview or self._latest_jpeg
 
     def start(self) -> "LiveStreamer":
         if self._running or not self.device_token or websockets is None:
@@ -108,16 +114,18 @@ class LiveStreamer:
         sent_seq = 0
         while self._running:
             try:
-                async with await _ws_connect(uri, self.device_token) as ws:
+                async with await _ws_connect(uri, self.device_token, compression=None) as ws:
                     logger.info("[LiveStreamer] Đã kết nối WebSocket truyền hình trực tiếp (%s).", uri)
                     while self._running:
                         with self._lock:
                             seq = self._latest_seq
                             frame = self._latest_jpeg
                         if frame is not None and seq != sent_seq:
+                            loop = asyncio.get_running_loop()
+                            started = loop.time()
                             await ws.send(frame)
                             sent_seq = seq
-                            await asyncio.sleep(self.min_frame_interval)
+                            await asyncio.sleep(max(0.0, self.min_frame_interval - (loop.time() - started)))
                         else:
                             await asyncio.sleep(0.05)
             except asyncio.CancelledError:

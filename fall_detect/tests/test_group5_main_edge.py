@@ -149,8 +149,14 @@ print(json.dumps({"home_id": hid, "room_id": rid, "session": sess, "csrf": csrf,
                     jpeg_evidence=evidence_jpg,
                 )
 
-                events = web.get(f"{base_url}/api/homes/{meta['home_id']}/events", timeout=5).json()
-                fall_events = [e for e in events if e["kind"] == "fall"]
+                deadline = time.monotonic() + 8
+                fall_events = []
+                while time.monotonic() < deadline:
+                    events = web.get(f"{base_url}/api/homes/{meta['home_id']}/events", timeout=5).json()
+                    fall_events = [e for e in events if e["kind"] == "fall" and e["evidence"]]
+                    if fall_events:
+                        break
+                    time.sleep(0.1)
                 self.assertGreaterEqual(len(fall_events), 1)
                 self.assertGreaterEqual(len(fall_events[0]["evidence"]), 1)
                 self.assertTrue(any(h.get("label") == "emergency_fall" for h in runtime.audio.history))

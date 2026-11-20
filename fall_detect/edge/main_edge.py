@@ -160,6 +160,7 @@ def render_synthetic_hud_jpeg(
 
 
 from edge.update_status import UpdateStatusServer, maintenance_guard
+from edge.fall_alerts import FallAlerts
 
 
 class AnNhaEdgeRuntime:
@@ -178,7 +179,7 @@ class AnNhaEdgeRuntime:
         bt_speaker_mac: str = "",
         bt_speaker_name: str = "",
         camera_id: int = 0,
-        live_fps: float = 5.0,
+        live_fps: float = 8.0,
         heartbeat_interval_s: float = 10.0,
         telemetry_interval_s: float = 10.0,
         command_poll_interval_s: float = 2.0,
@@ -259,17 +260,22 @@ class AnNhaEdgeRuntime:
         self.last_camera_frame = 0.0
         self.last_safety_check = 0.0
         self.local_danger = False
-        self.unreported_alert = False
         self.model_inference_ok = False
         self.update_status = UpdateStatusServer(self, FALL_DETECT_DIR)
         self._stop_event = threading.Event()
+        self.fall_alerts = FallAlerts(self.audio, self.client, self._stop_event)
         self._workers: list[threading.Thread] = []
 
+        self.show_landmarks = True
+        self.preview_enabled = os.getenv("EDGE_LOCAL_PREVIEW", "false").lower() == "true"
+        self.tb_vision = None
         self.client.on_config_updated(self._on_config_updated)
         self.client.set_command_handler(self._on_web_command)
 
     def _on_config_updated(self, cfg: dict[str, Any]) -> None:
-        self.tracker.update_smart_modes(cfg.get("smart_modes"))
+        modes = cfg.get("smart_modes")
+        self.show_landmarks = modes.get("show_landmarks", True) is not False if isinstance(modes, dict) else True
+        self.tracker.update_smart_modes(modes)
         self.scheduler.apply_config(cfg)
         env = cfg.get("environment")
         if isinstance(env, dict):
@@ -352,34 +358,22 @@ class AnNhaEdgeRuntime:
                             reason=f"Nồng độ khí gas vượt ngưỡng nguy hiểm ({gas_val:.0f} >= {gas_high:.0f}).",
                         )
 
+    @property
+    def unreported_alert(self) -> bool:
+        return self.fall_alerts.has_pending()
+
     @maintenance_guard
     def handle_fall_detected(self, confidence: float, reason: str, jpeg_evidence: bytes | None = None) -> None:
-        """Xử lý tức thời khi AI phát hiện té ngã: Hú còi tại phòng trước -> Gửi Event + Ảnh lên Backend."""
-        if not self.tracker.is_fall_detection_enabled():
-            return
-        self.unreported_alert = True
-        # 1. Còi báo động tại chỗ NGAY LẬP TỨC (0 độ trễ mạng)
-        self.audio.trigger_emergency_siren("fall", "Cảnh báo! Phát hiện người thân có dấu hiệu té ngã!")
+        if self.tracker.is_fall_detection_enabled():
+            self.fall_alerts.submit(confidence, reason, jpeg_evidence)
 
-        # 2. Đẩy sự kiện & ảnh bằng chứng lên Backend AnNhà (nếu có cấu hình token)
-        if not self.device_token:
-            return
-        ev = self.client.send_event(
-            kind="fall",
-            severity="critical",
-            observation="abnormal",
-            reason=reason,
-            confidence=confidence,
-        )
-        if ev and ev.get("id"):
-            self.unreported_alert = False
-        if ev and ev.get("id") and jpeg_evidence:
-            self.client.upload_evidence(
-                jpeg_evidence,
-                mime_type="image/jpeg",
-                filename="fall_evidence.jpg",
-                internal_event_id=str(ev["id"]),
+    def make_fall_callback(self, evidence):
+        def on_fall(confidence: float, confidence_text: str) -> None:
+            self.handle_fall_detected(
+                confidence, "Mô hình AI phát hiện dấu hiệu té ngã (" + confidence_text + ").",
+                jpeg_evidence=evidence(),
             )
+        return on_fall
 
     def _safety_loop(self) -> None:
         """Luồng giám sát an toàn rò rỉ khí gas độc lập hoàn toàn (1.5s), không bị nghẽn bởi I/O mạng hay lệnh âm thanh."""
@@ -394,6 +388,7 @@ class AnNhaEdgeRuntime:
     def _background_io_loop(self) -> None:
         next_hb = 0.0
         next_tel = 0.0
+        next_tb = 0.0
         next_cmd = 0.0
         next_sched = 0.0
         next_snap = time.monotonic() + 2.0
@@ -401,6 +396,11 @@ class AnNhaEdgeRuntime:
         while not self._stop_event.is_set():
             now = time.monotonic()
             try:
+                if self.client.tb.enabled and now >= next_tb:
+                    next_tb = now + 2.0
+                    sample = self.tb_vision
+                    if sample and now - sample[0] < 5:
+                        self.client.tb.publish(sample[1])
                 # 1. Gửi Telemetry môi trường định kỳ
                 if self.device_token and now >= next_tel:
                     readings = self.bridge.get_telemetry_readings()
@@ -416,6 +416,7 @@ class AnNhaEdgeRuntime:
                         speaker_ok=self.bt.is_speaker_ready(),
                         sensors_ok=sensors_ok,
                         bluetooth=self.bt.get_bluetooth_report(),
+                        show_landmarks=self.show_landmarks,
                     )
                     next_hb = now + self.heartbeat_interval_s
 
@@ -445,31 +446,29 @@ class AnNhaEdgeRuntime:
             self._stop_event.wait(0.25)
 
     def _vision_loop(self) -> None:
-        """Luồng thu hình Camera + AI Pose + Pan-Tilt Tracking (tự chuyển sang HUD Mock nếu thiếu Webcam/OpenCV)."""
-        use_real_camera = not self.force_mock_hardware and cv2 is not None
-        cap = None
-        if use_real_camera:
-            try:
-                cap = cv2.VideoCapture(self.camera_id)
-                if not cap.isOpened():
-                    cap.release()
-                    cap = None
-            except Exception:
-                cap = None
-
-        if cap is not None:
-            w_cam = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            h_cam = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            logger.info("[Vision] Mở camera thành công: kích thước nguyên bản %dx%d px (tỷ lệ %.2f:1).", w_cam, h_cam, w_cam / h_cam if h_cam else 1.0)
-            if mp is not None:
-                logger.info("[Vision] Đang chạy luồng Camera thực + MediaPipe Pose (camera_id=%d).", self.camera_id)
-                self._run_opencv_mediapipe_loop(cap)
-            else:
-                logger.info("[Vision] Đang chạy luồng Camera thực không MediaPipe (Live Stream + Web PTZ).")
-                self._run_opencv_stream_loop(cap)
-        else:
-            logger.info("[Vision] Không phát hiện Webcam -> Tự động chạy bộ tạo hình trực tiếp HUD Mock.")
+        """Run live camera processing, retrying a missing camera outside mock mode."""
+        if self.force_mock_hardware:
             self._run_mock_hud_loop()
+            return
+
+        while not self._stop_event.is_set():
+            cap = cv2.VideoCapture(self.camera_id) if cv2 is not None else None
+            if cap is None or not cap.isOpened():
+                if cap is not None:
+                    cap.release()
+                if self._observation != "camera_error":
+                    logger.warning("[Vision] DEGRADED: CAMERA_ERROR, retrying camera %s", self.camera_id)
+                self._camera_ok = False
+                self._observation = "camera_error"
+                self.model_inference_ok = False
+                self._stop_event.wait(5)
+                continue
+
+            if mp is None:
+                logger.warning("[Vision] DEGRADED: POSE_UNAVAILABLE; streaming camera without pose")
+                self._run_opencv_stream_loop(cap)
+            else:
+                self._run_opencv_mediapipe_loop(cap)
 
     def _run_opencv_stream_loop(self, cap: Any) -> None:
         """Thu hình trực tiếp từ USB Webcam khi không dùng MediaPipe (vẫn truyền Live Stream & Web PTZ đầy đủ)."""
@@ -477,14 +476,19 @@ class AnNhaEdgeRuntime:
         fps_t0 = time.monotonic()
         current_fps = 0.0
         last_log_ts = time.monotonic()
+        read_failures = 0
         try:
             while not self._stop_event.is_set():
                 ok, frame = cap.read()
                 if not ok:
+                    read_failures += 1
+                    if read_failures >= 6:
+                        return
                     self._camera_ok = False
                     self._observation = "camera_error"
                     self._stop_event.wait(0.5)
                     continue
+                read_failures = 0
                 self._camera_ok = True
                 self.last_camera_frame = time.monotonic()
                 self._observation = "clear"
@@ -499,7 +503,7 @@ class AnNhaEdgeRuntime:
                 if now_m - last_log_ts >= 2.0:
                     last_log_ts = now_m
                     servo_st = self.bridge.get_servo_state()
-                    logger.info("[Vision] 🎥 FPS: %4.1f | Pan=%d° Tilt=%d°", current_fps, int(servo_st.get("pan", 90)), int(servo_st.get("tilt", 90)))
+                    logger.info("[Vision] 🎥 Pi FPS: %4.1f | Pan=%d° Tilt=%d°", current_fps, int(servo_st.get("pan", 90)), int(servo_st.get("tilt", 90)))
 
                 # Vẽ OSD FPS ở góc dưới bên phải
                 h_f, w_f = frame.shape[:2]
@@ -507,7 +511,7 @@ class AnNhaEdgeRuntime:
                 bx1, by1 = max(10, w_f - box_w - 15), max(10, h_f - box_h - 15)
                 cv2.rectangle(frame, (bx1, by1), (bx1 + box_w, by1 + box_h), (18, 28, 36), -1)
                 cv2.rectangle(frame, (bx1, by1), (bx1 + box_w, by1 + box_h), (0, 230, 150), 1)
-                cv2.putText(frame, f"FPS: {current_fps:4.1f}", (bx1 + 14, by1 + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 180), 1, cv2.LINE_AA)
+                cv2.putText(frame, f"Pi FPS: {current_fps:4.1f}", (bx1 + 14, by1 + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 180), 1, cv2.LINE_AA)
 
                 ok_enc, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                 if ok_enc:
@@ -527,16 +531,21 @@ class AnNhaEdgeRuntime:
             if candidate.exists():
                 model_path = str(candidate)
 
-        latest_jpg_holder: dict[str, bytes | None] = {"jpg": None}
+        next_video_frame = time.monotonic()
+        evidence_frame = None
 
-        def _on_fall(confidence: float = 0.92, **_kw: Any) -> None:
-            self.handle_fall_detected(
-                confidence=float(confidence),
-                reason="Mô hình AI phát hiện chuyển động té ngã trên camera.",
-                jpeg_evidence=latest_jpg_holder["jpg"],
-            )
+        def encode_fall_frame():
+            if evidence_frame is None:
+                return None
+            try:
+                ok, encoded = cv2.imencode(".jpg", evidence_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+                return encoded.tobytes() if ok else None
+            except Exception:
+                logger.warning("[Vision] Không thể mã hóa ảnh tại thời điểm phát hiện té ngã")
+                return None
 
         detector = None
+        self.model_inference_ok = False
         if os.path.exists(model_path):
             try:
                 detector = FallDetector(
@@ -545,7 +554,7 @@ class AnNhaEdgeRuntime:
                     num_features=NUM_FEATURES,
                     confidence_threshold=fd_cfg.FALL_CONFIDENCE_THRESHOLD,
                     event_cooldown=fd_cfg.FALL_EVENT_COOLDOWN,
-                    on_fall_alert=_on_fall,
+                    on_fall_alert=self.make_fall_callback(encode_fall_frame),
                 )
                 # Probe inference without triggering event callbacks or requiring a person.
                 import numpy as np
@@ -554,7 +563,10 @@ class AnNhaEdgeRuntime:
                 detector.interpreter.invoke()
                 self.model_inference_ok = True
             except Exception as exc:
-                logger.warning("[Vision] Không khởi tạo được TFLite FallDetector (%s) -> chỉ chạy Pose Tracking.", exc)
+                detector = None
+                logger.warning("[Vision] DEGRADED: MODEL_UNAVAILABLE (%s)", type(exc).__name__)
+        else:
+            logger.warning("[Vision] DEGRADED: MODEL_UNAVAILABLE (missing file)")
 
         mp_pose = mp.solutions.pose
         mp_drawing = getattr(mp, "solutions", None) and getattr(mp.solutions, "drawing_utils", None)
@@ -564,6 +576,7 @@ class AnNhaEdgeRuntime:
         current_fps = 0.0
         last_log_ts = time.monotonic()
 
+        read_failures = 0
         try:
             with mp_pose.Pose(
                 static_image_mode=False,
@@ -575,11 +588,15 @@ class AnNhaEdgeRuntime:
                 while not self._stop_event.is_set():
                     ok, frame = cap.read()
                     if not ok:
+                        read_failures += 1
+                        if read_failures >= 6:
+                            return
                         self._camera_ok = False
                         self._observation = "camera_error"
                         self._stop_event.wait(0.5)
                         continue
 
+                    read_failures = 0
                     self._camera_ok = True
                     self.last_camera_frame = time.monotonic()
                     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -605,7 +622,7 @@ class AnNhaEdgeRuntime:
                     if now_m - last_log_ts >= 2.0:
                         last_log_ts = now_m
                         logger.info(
-                            "[Vision] 🎥 FPS: %4.1f | Người: %s | Servo: Pan=%d° Tilt=%d° | Bám: %s",
+                            "[Vision] 🎥 Pi FPS: %4.1f | Người: %s | Servo: Pan=%d° Tilt=%d° | Bám: %s",
                             current_fps,
                             "CÓ NGƯỜI" if present else "TRỐNG",
                             pan_val,
@@ -619,20 +636,52 @@ class AnNhaEdgeRuntime:
                     except Exception as exc:
                         logger.warning("[Vision] Lỗi tracking: %s", exc)
 
-                    if detector is not None and self.tracker.is_fall_detection_enabled():
+                    result = None
+                    ai_enabled = self.tracker.is_fall_detection_enabled()
+                    if detector is not None and ai_enabled:
                         try:
-                            detector.update_pose(pose_res.pose_landmarks, present, self.last_camera_frame)
+                            evidence_frame = frame
+                            try:
+                                result = detector.update_pose(pose_res.pose_landmarks, present, self.last_camera_frame)
+                            finally:
+                                evidence_frame = None
                         except Exception as exc:
                             self.model_inference_ok = False
                             logger.warning("[Vision] Lỗi FallDetector: %s", exc)
                     elif detector is not None:
                         detector.reset_pose_stream()
 
+                    if self.client.tb.enabled:
+                        sample = {
+                            "status": "ONLINE",
+                            "fps": round(current_fps, 1),
+                            "person_present": present,
+                            "person_status": "CÓ NGƯỜI" if present else "TRỐNG",
+                            "target_audience": fd_cfg.TARGET_AUDIENCE,
+                            "ai_state": result.label.upper() if result else ("DISABLED" if not ai_enabled else "UNAVAILABLE"),
+                        }
+                        if result is not None:
+                            sample["fall_prob"] = result.raw_fall_prob
+                            sample["immobile_seconds"] = result.immobile_duration
+                        self.tb_vision = (time.monotonic(), sample)
+
+                    # Keep every pose sample for inference; only render frames the stream can use.
+                    video_now = time.monotonic()
+                    if video_now < next_video_frame:
+                        continue
+                    interval = self.streamer.min_frame_interval
+                    next_video_frame = (video_now if video_now - next_video_frame >= interval else next_video_frame) + interval
+
                     # 1. Vẽ khung xương MediaPipe lên khung hình khi phát hiện người
-                    if present and pose_res.pose_landmarks and mp_drawing and mp_styles:
+                    web_landmarks = self.show_landmarks and present
+                    preview_frame = None
+                    if (web_landmarks or self.preview_enabled) and pose_res.pose_landmarks and mp_drawing and mp_styles:
+                        landmark_frame = frame if web_landmarks else frame.copy()
+                        if not web_landmarks:
+                            preview_frame = landmark_frame
                         try:
                             mp_drawing.draw_landmarks(
-                                frame,
+                                landmark_frame,
                                 pose_res.pose_landmarks,
                                 mp_pose.POSE_CONNECTIONS,
                                 landmark_drawing_spec=mp_styles.get_default_pose_landmarks_style(),
@@ -640,29 +689,54 @@ class AnNhaEdgeRuntime:
                         except Exception:
                             pass
 
-                    # 2. Vẽ OSD hiển thị FPS, trạng thái và góc Servo góc dưới bên phải (vùng tối)
-                    osd_text = f"FPS: {current_fps:4.1f} | Pan: {pan_val}d | Tilt: {tilt_val}d"
+                    # OpenCV's built-in font supports ASCII only.
+                    if result is not None and (result.is_fall or result.is_alert_active):
+                        status, color = "FALL", (55, 75, 255)
+                    elif not present:
+                        status, color = "KHONG CO NGUOI", (190, 190, 190)
+                    elif not ai_enabled:
+                        status, color = "CO NGUOI (AI OFF)", (0, 210, 255)
+                    elif result is None or result.status_text.startswith("Prediction Error"):
+                        status, color = "CO NGUOI (AI LOI)", (0, 210, 255)
+                    else:
+                        status, color = "CO NGUOI", (0, 230, 150)
+
+                    osd_text = f"Pi FPS: {current_fps:4.1f} | {status}"
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    (text_width, _), _ = cv2.getTextSize(osd_text, font, 0.55, 1)
                     h_f, w_f = frame.shape[:2]
-                    box_w, box_h = 320, 32
+                    box_w, box_h = text_width + 24, 32
                     bx1, by1 = max(10, w_f - box_w - 15), max(10, h_f - box_h - 15)
                     cv2.rectangle(frame, (bx1, by1), (bx1 + box_w, by1 + box_h), (18, 28, 36), -1)
-                    cv2.rectangle(frame, (bx1, by1), (bx1 + box_w, by1 + box_h), (0, 230, 150), 1)
-                    cv2.putText(
-                        frame,
-                        osd_text,
-                        (bx1 + 12, by1 + 22),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.55,
-                        (0, 255, 180),
-                        1,
-                        cv2.LINE_AA,
-                    )
+                    cv2.rectangle(frame, (bx1, by1), (bx1 + box_w, by1 + box_h), color, 1)
+                    cv2.putText(frame, osd_text, (bx1 + 12, by1 + 22), font, 0.55, color, 1, cv2.LINE_AA)
 
                     ok_enc, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                     if ok_enc:
                         jpg_bytes = buf.tobytes()
-                        latest_jpg_holder["jpg"] = jpg_bytes
-                        self.streamer.update_frame_jpeg(jpg_bytes)
+                        preview_jpeg = None
+                        if self.preview_enabled:
+                            if preview_frame is None:
+                                preview_frame = frame.copy()
+                            else:
+                                # Reuse the same status overlay on the local image.
+                                rows = slice(by1, by1 + box_h + 1)
+                                cols = slice(bx1, bx1 + box_w + 1)
+                                preview_frame[rows, cols] = frame[rows, cols]
+                            if result is not None and result.status_text.startswith(("FALL (", "NO_FALL (")):
+                                score = f"{result.raw_fall_prob:.1%}"
+                            else:
+                                score = "--"
+                            diagnostic = f"P(Fall): {score} | Nguong: {fd_cfg.FALL_CONFIDENCE_THRESHOLD:.0%}"
+                            if detector is not None:
+                                diagnostic = f"P(Fall): {score} | Nguong: {detector.confidence_threshold:.0%}"
+                            (width, _), _ = cv2.getTextSize(diagnostic, font, 0.55, 1)
+                            cv2.rectangle(preview_frame, (10, 10), (width + 34, 42), (18, 28, 36), -1)
+                            cv2.putText(preview_frame, diagnostic, (22, 32), font, 0.55, color, 1, cv2.LINE_AA)
+                            preview_ok, preview_buf = cv2.imencode(".jpg", preview_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+                            if preview_ok:
+                                preview_jpeg = preview_buf.tobytes()
+                        self.streamer.update_frame_jpeg(jpg_bytes, preview_jpeg=preview_jpeg)
         finally:
             cap.release()
 
@@ -708,10 +782,17 @@ class AnNhaEdgeRuntime:
         t_safe = threading.Thread(target=self._safety_loop, name="annha-edge-safety", daemon=True)
         t_io = threading.Thread(target=self._background_io_loop, name="annha-edge-io", daemon=True)
         t_vis = threading.Thread(target=self._vision_loop, name="annha-edge-vision", daemon=True)
+        alert_workers = self.fall_alerts.start()
         t_safe.start()
         t_io.start()
         t_vis.start()
-        self._workers = [t_safe, t_io, t_vis]
+        self._workers = [t_safe, t_io, t_vis, *alert_workers]
+        if self.preview_enabled:
+            from edge.local_preview import show_preview
+            preview = threading.Thread(target=show_preview, args=(self.streamer, self._stop_event),
+                                       name="annha-desktop-preview", daemon=True)
+            preview.start()
+            self._workers.append(preview)
         return self
 
     def stop(self) -> None:
@@ -779,6 +860,12 @@ def main(argv: list[str] | None = None) -> int:
             args.env_file,
         )
 
+    # Older installations keep ThingsBoard credentials next to the Edge env file.
+    from dotenv import dotenv_values
+    legacy = dotenv_values(env_path.parent / ".env")
+    def tb_setting(key: str, default: str) -> str:
+        return os.environ.get(key, legacy.get(key) or default)
+
     runtime = AnNhaEdgeRuntime(
         base_url=base_url or "http://localhost:8188",
         device_token=token,
@@ -790,15 +877,15 @@ def main(argv: list[str] | None = None) -> int:
         bt_speaker_mac=os.getenv("BT_SPEAKER_MAC", ""),
         bt_speaker_name=os.getenv("BT_SPEAKER_NAME", ""),
         camera_id=int(os.getenv("CAMERA_ID", "0")),
-        live_fps=float(os.getenv("LIVE_STREAM_FPS", "5.0")),
+        live_fps=float(os.getenv("LIVE_STREAM_FPS", "8.0")),
         heartbeat_interval_s=float(os.getenv("HEARTBEAT_INTERVAL_S", "10.0")),
         telemetry_interval_s=float(os.getenv("TELEMETRY_INTERVAL_S", "10.0")),
         command_poll_interval_s=float(os.getenv("COMMAND_POLL_INTERVAL_S", "2.0")),
         snapshot_interval_s=float(os.getenv("SNAPSHOT_INTERVAL_S", "30.0")),
         thingsboard_enabled=os.getenv("THINGSBOARD_ENABLED", "false").lower() == "true",
-        tb_host=os.getenv("TB_HOST", "127.0.0.1"),
-        tb_port=int(os.getenv("TB_PORT", "1883")),
-        tb_token=os.getenv("TB_TOKEN", ""),
+        tb_host=tb_setting("TB_HOST", "127.0.0.1"),
+        tb_port=int(tb_setting("TB_PORT", "1883")),
+        tb_token=tb_setting("TB_TOKEN", ""),
         force_mock_hardware=bool(args.mock),
     )
 

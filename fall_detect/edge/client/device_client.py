@@ -67,10 +67,14 @@ class ThingsBoardPublisher:
                 client = mqtt.Client()
             client.username_pw_set(self.access_token)
 
+            logged_connection = False
+
             def _on_connect(_c: Any, _u: Any, _f: Any, rc: Any, *_a: Any) -> None:
+                nonlocal logged_connection
                 code = rc if isinstance(rc, int) else getattr(rc, "value", 0)
                 self._connected = code == 0
-                if self._connected:
+                if self._connected and not logged_connection:
+                    logged_connection = True
                     logger.info("[ThingsBoard] Đã kết nối MQTT %s:%d", self.host, self.port)
 
             def _on_disconnect(*_a: Any) -> None:
@@ -94,8 +98,13 @@ class ThingsBoardPublisher:
                 flat[key] = item["value"]
         if len(flat) <= 1:
             return False
+        return self.publish(flat)
+
+    def publish(self, values: dict[str, Any]) -> bool:
+        if not self._connected or self._client is None:
+            return False
         try:
-            info = self._client.publish(self.topic, json.dumps(flat), qos=1)
+            info = self._client.publish(self.topic, json.dumps(values, allow_nan=False), qos=1)
             return bool(info.rc == 0)
         except Exception as exc:
             logger.debug("[ThingsBoard] Gửi MQTT lỗi: %s", exc)
@@ -244,6 +253,7 @@ class DeviceClient:
         speaker_ok: bool = True,
         sensors_ok: bool = True,
         bluetooth: dict[str, Any] | None = None,
+        show_landmarks: bool | None = None,
     ) -> dict[str, Any] | None:
         obs = observation if observation in ALLOWED_OBSERVATIONS else "unknown"
         body: dict[str, Any] = {
@@ -254,6 +264,8 @@ class DeviceClient:
                 "sensors": bool(sensors_ok),
             },
         }
+        if show_landmarks is not None:
+            body["capabilities"]["show_landmarks"] = show_landmarks
         if bluetooth is not None:
             body["bluetooth"] = bluetooth
         try:
@@ -379,6 +391,7 @@ class DeviceClient:
         duration_s: float | None = None,
         confidence: float | None = None,
         observed_at: str | None = None,
+        queue_on_failure: bool = True,
     ) -> dict[str, Any] | None:
         src_id = event_id or f"{kind}-{uuid.uuid4().hex[:16]}"
         body: dict[str, Any] = {
@@ -400,9 +413,12 @@ class DeviceClient:
             resp = self._request("POST", "/api/device/events", json_body=body)
             if resp.status_code in (200, 201):
                 return resp.json()
-            logger.warning("[DeviceClient] Gửi sự kiện HTTP %d: %s", resp.status_code, resp.text[:240])
+            if queue_on_failure:
+                logger.warning("[DeviceClient] Gửi sự kiện HTTP %d: %s", resp.status_code, resp.text[:240])
             return None
         except Exception as exc:
+            if not queue_on_failure:
+                return None
             logger.warning("[DeviceClient] Đứt mạng khi gửi sự kiện '%s' -> Xếp vào Outbox (%s).", kind, exc)
             with self._lock:
                 self._outbox_events.append(body)
