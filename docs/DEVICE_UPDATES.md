@@ -118,3 +118,22 @@ Nghiệm thu trên Pi thật gồm cập nhật ngay, tải trước/hẹn giờ
 - Web kiểm thử dùng database SQLite và tài khoản giả lập riêng đã hiển thị/chọn được phiên bản `0.0.2` qua API thật.
 - 22 kiểm thử SQLite/nghiệp vụ/OTA và frontend build đã thành công. Kiểm tra PostgreSQL riêng xác nhận migration, role giới hạn và chặn cập nhật khi còn cảnh báo.
 - Chưa nghiệm thu cài đặt hoặc rollback trên Pi thật vì chưa có thiết bị. Khi có Pi, chỉ chép folder `fall_detect` rồi bootstrap theo hướng dẫn. Installer dò virtualenv giống launcher hiện tại.
+
+## Nghiệm thu OTA trên Pi 4
+
+- Dùng thiết bị và backend thử nghiệm với hai bản ứng dụng đã ký, cùng model và môi trường Python. Kiểm tra trước bản đang chạy, bản rollback, camera, thông tin ghép đôi và dung lượng.
+- URL backend ngoài LAN dùng HTTPS. HTTP chỉ dùng localhost hoặc địa chỉ IP loopback, RFC1918, IPv6 ULA hay CGNAT. Dùng HTTPS cho hostname LAN. API updater từ chối mọi redirect.
+- Tạo lịch, kiểm tra tiến độ và thử hủy hay để hết hạn trước claim. Thử chặn cài bằng cảnh báo đang mở, âm thanh đang phát và nguy hiểm local.
+- Mô phỏng mất mạng lúc tải hoặc khi báo trạng thái. Sau nối lại, kiểm tra không tải lại bundle còn đúng SHA-256 và journal chỉ bị xóa sau khi backend xác nhận.
+- Thử restart updater sau khi claim và sau khi đổi symlink trong môi trường thử nghiệm. Xác nhận service trở lại bản cũ và cấu hình, model, cache và pairing vẫn đọc được.
+- Thử bản mới không có camera thật hoặc probe inference lỗi. Xác nhận rollback thay vì báo thành công. Với bản hợp lệ, xác nhận camera, inference, phiên bản trên web và rollback thủ công.
+
+Chạy các lệnh dưới đây **chỉ trên Pi thử nghiệm đã được phép bootstrap**. Đường dẫn cấu hình phải trỏ tới backend thử nghiệm tách biệt. Kiểm tra camera, âm thanh và sensor bằng UI đang chạy trước khi đổi service. Thư mục backup chứa dữ liệu ghép đôi, giữ riêng trên Pi.
+
+```bash
+scripts/ota-pi-acceptance.sh preflight ~/ota-before ~/test/fall_detect ~/test/venv/bin/python
+cd ~/test/fall_detect
+bash update/install.sh --public-key /path/to/test-release.pub
+```
+
+Sau bootstrap, dùng web của backend thử nghiệm để cài hai bản đã ký. Xác nhận bản lành báo thành công sau camera/inference thật. Với bản thử đã chuẩn bị để fail health check, xác nhận phiên bản cũ hoạt động trở lại trong systemd và trên web. Lặp với ngắt mạng và restart updater ở các mốc đã nêu. Từ repo chạy `scripts/ota-pi-acceptance.sh evidence ~/ota-after`. Nếu service account thiếu quyền đọc journal, thu log bằng tài khoản được cấp quyền và giữ trong thư mục riêng.

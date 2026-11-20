@@ -61,6 +61,7 @@ async def release_worker():
                 rows = conn.execute('SELECT payload FROM update_jobs').fetchall()
             pinned = {j['release']['manifest']['sha256'] for row in rows
                 if (j := json.loads(row['payload'])).get('release') and j['status'] not in TERMINAL}
+            # Release the database lease before making GitHub requests.
             catalog.sync(pinned)
         try:
             await asyncio.to_thread(sync_pinned)
@@ -95,12 +96,15 @@ def state(conn, camera):
     return dict(json.loads(row['payload']), last_seen=row['last_seen']) if row else None
 
 
-def blocked(camera):
+def blocked(camera, connection=None, *, home=None):
     if PG:
-        with db.connect('auth') as conn:
-            home = conn.execute('SELECT home_id FROM annha.cameras WHERE id=%s', (camera,)).fetchone()['home_id']
+        if home is None:
+            with db.connect('auth') as conn:
+                home = conn.execute('SELECT home_id FROM annha.cameras WHERE id=%s', (camera,)).fetchone()['home_id']
         with db.connect('device', home=home, camera=camera) as conn:
             return bool(conn.execute("SELECT 1 FROM annha.events WHERE camera_id=%s AND status IN ('OPEN','ACKNOWLEDGED') LIMIT 1", (camera,)).fetchone())
+    if connection is not None:
+        return bool(connection.execute("SELECT 1 FROM events WHERE camera_id=? AND status IN ('OPEN','ACKNOWLEDGED') LIMIT 1", (camera,)).fetchone())
     with db.connect() as conn:
         return bool(conn.execute("SELECT 1 FROM events WHERE camera_id=? AND status IN ('OPEN','ACKNOWLEDGED') LIMIT 1", (camera,)).fetchone())
 
@@ -196,7 +200,7 @@ def heartbeat(body: AgentState, camera=Depends(security.device)):
 def offer(camera=Depends(security.device)):
     with transaction(camera['id']) as conn:
         pending = next((j for j in jobs(conn, camera['id']) if j['status'] not in TERMINAL), None)
-    return {'job': pending, 'blocked': blocked(camera['id'])}
+    return {'job': pending, 'blocked': blocked(camera['id'], home=camera.get('home_id'))}
 
 
 @router.post('/device/updates/{job_id}/progress')
@@ -205,8 +209,10 @@ def progress(job_id: str, body: Progress, camera=Depends(security.device)):
         job = next((j for j in jobs(conn, camera['id']) if j['id'] == job_id), None)
         if not job:
             raise HTTPException(404, 'Không tìm thấy lệnh.')
+        if job['status'] == body.status and body.status in {'installing', 'health_check'}:
+            return {'status': job['status']}
         if job['status'] in TERMINAL:
-            if body.status == job['status']:
+            if body.status == job['status'] or (job['status'], body.status) in {('rolled_back', 'rolling_back'), ('succeeded', 'health_check')}:
                 return {'status': job['status']}
             raise HTTPException(409, 'Lệnh đã kết thúc.')
         allowed = {
@@ -222,8 +228,11 @@ def progress(job_id: str, body: Progress, camera=Depends(security.device)):
             raise HTTPException(409, 'Chuyển trạng thái không hợp lệ.')
         if body.status == 'installing':
             device = state(conn, camera['id'])
-            if time.time() < job['scheduled_at'] or not device or time.time() - device['last_seen'] > 45 or not device['ready'] or blocked(camera['id']):
+            if time.time() < job['scheduled_at'] or not device or time.time() - device['last_seen'] > 45 or not device['ready']:
                 raise HTTPException(409, 'Chưa đủ điều kiện an toàn để cài đặt.')
+            # The device pool is separate. Never reacquire the held auth pool.
+            if blocked(camera['id'], conn, home=camera['home_id'] if PG else None):
+                raise HTTPException(409, 'Còn cảnh báo đang xử lý.')
         job.update(status=body.status, message=body.message, progress=body.progress, updated_at=time.time())
         save(conn, job)
     return {'status': job['status']}

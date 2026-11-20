@@ -205,3 +205,159 @@ class LocalReadinessTests(unittest.TestCase):
                 self.assertEqual(report.call_args_list[-1].args[1], 'rolled_back')
             self.assertFalse(updater.journal.exists())
             updater.lock.close()
+
+
+class TransportTests(unittest.TestCase):
+    def test_backend_transport(self):
+        from fall_detect.update.updater import validate_backend_url
+        for url in ('http://localhost:8188', 'http://192.168.1.2:8188',
+                    'http://[::1]', 'http://100.64.1.2', 'https://example.com'):
+            self.assertEqual(validate_backend_url(url), url)
+        for url in ('http://example.com', 'http://8.8.8.8', 'https://user:pass@example.com',
+                    'https://example.com?q=secret'):
+            with self.assertRaises(ValueError):
+                validate_backend_url(url)
+
+    def test_retry_transient_errors_but_not_rejected_claim(self):
+        from urllib.error import HTTPError
+        from fall_detect.update.updater import TemporaryNetworkError
+        updater = object.__new__(Updater)
+        throttle = HTTPError('https://example.com', 429, '', {}, None)
+        with patch.object(updater, 'request_once', side_effect=[TimeoutError(), throttle, {}]), patch('fall_detect.update.updater.time.sleep') as sleep:
+            self.assertEqual(updater.request('job'), {})
+            self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2])
+        rejected = HTTPError('https://example.com', 409, '', {}, None)
+        with patch.object(updater, 'request_once', side_effect=rejected) as request:
+            with self.assertRaises(HTTPError):
+                updater.request('job')
+            request.assert_called_once()
+        with patch.object(updater, 'request_once', side_effect=ConnectionResetError), patch('fall_detect.update.updater.time.sleep'):
+            with self.assertRaises(TemporaryNetworkError):
+                updater.request('job')
+
+    def test_parallel_claims_do_not_nest_auth_pool_leases(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from contextlib import contextmanager
+        from threading import Lock
+        pool = Lock()
+
+        @contextmanager
+        def lease(*args):
+            if not pool.acquire(timeout=1):
+                raise AssertionError('Nested or exhausted auth pool')
+            try:
+                yield object()
+            finally:
+                pool.release()
+
+        def safety(camera, connection, *, home):
+            self.assertTrue(pool.locked())
+            self.assertEqual(home, 'home')
+            return False
+
+        def claim(index):
+            return updates.progress(str(index), updates.Progress(status='installing'),
+                                    camera={'id': str(index), 'home_id': 'home'})['status']
+
+        def jobs(_, camera):
+            return [dict(id=camera, status='ready', scheduled_at=0)]
+
+        with patch.object(updates, 'PG', True), patch.object(updates, 'transaction', lease), patch.object(updates, 'blocked', safety), patch.object(updates, 'jobs', jobs), patch.object(updates, 'state', return_value={'last_seen': time.time(), 'ready': True}), patch.object(updates, 'save'):
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                self.assertEqual(list(executor.map(claim, range(8))), ['installing'] * 8)
+
+    def test_claimed_restart_rolls_back_even_when_backend_is_offline(self):
+        from fall_detect.update.updater import TemporaryNetworkError
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'shared').mkdir()
+            (root / 'shared/updater.json').write_text(json.dumps(
+                {'backend_url': 'http://localhost', 'device_token': 'test'}))
+            updater = Updater(root)
+            self.addCleanup(updater.lock.close)
+            atomic_json(updater.journal, {'job': {'id': 'job'}, 'old': '0.0.0', 'claimed': True})
+            with patch.object(updater, 'report', side_effect=TemporaryNetworkError), patch.object(updater, 'switch') as switch, patch.object(updater, 'service'), patch.object(updater, 'healthy', return_value=True):
+                with self.assertRaises(TemporaryNetworkError):
+                    updater.recover()
+                switch.assert_called_once_with('0.0.0')
+                self.assertEqual(json.loads(updater.journal.read_text())['outcome'], 'rolled_back')
+                with patch.object(updater, 'report'):
+                    updater.recover()
+                switch.assert_called_once()
+                self.assertFalse(updater.journal.exists())
+
+    def test_updater_declines_redirect_without_forwarding_token(self):
+        from urllib.error import HTTPError
+        from urllib.request import Request
+        updater = object.__new__(Updater)
+        updater.base, updater.token = 'https://example.com', 'test-token'
+        redirect = HTTPError(updater.base, 302, '', {}, None)
+
+        def build(handler):
+            request = Request(updater.base, headers={'Authorization': 'Bearer test-token'})
+            self.assertIsNone(handler.redirect_request(
+                request, None, 302, '', {}, 'https://other.example'))
+            class Opener:
+                def open(self, request, timeout):
+                    raise redirect
+            return Opener()
+
+        with patch('fall_detect.update.updater.urllib.request.build_opener', side_effect=build) as opener:
+            with self.assertRaises(HTTPError):
+                updater.request('job')
+            opener.assert_called_once()
+
+    def test_install_health_and_reporting_are_independent(self):
+        from fall_detect.update.updater import TemporaryNetworkError
+        for locally_healthy in (True, False):
+            with self.subTest(locally_healthy=locally_healthy), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root/'shared').mkdir()
+                (root/'shared/updater.json').write_text(json.dumps(
+                    {'backend_url':'http://localhost','device_token':'test'}))
+                with (root/'shared/updater.lock').open('a'):
+                    updater = Updater(root)
+                def report(job,status,*args):
+                    if status != 'installing':
+                        raise TemporaryNetworkError('offline')
+                try:
+                    with patch.object(updater,'current',return_value='0.0.0'), patch.object(updater,'local',return_value={'ready':True,'maintenance_active':True}), patch.object(updater,'report',side_effect=report), patch.object(updater,'healthy',side_effect=[locally_healthy,True]) as healthy, patch.object(updater,'switch') as switch, patch.object(updater,'service'):
+                        with self.assertRaises(TemporaryNetworkError):
+                            updater.install({'id':'test','version':'1.0.0'})
+                        saved = json.loads(updater.journal.read_text())
+                        self.assertEqual(saved['outcome'],'succeeded' if locally_healthy else 'rolled_back')
+                        self.assertEqual(healthy.call_args_list[0].kwargs,{'require_backend':False})
+                        self.assertEqual([c.args[0] for c in switch.call_args_list],
+                                         ['1.0.0'] if locally_healthy else ['1.0.0','0.0.0'])
+                finally:
+                    updater.lock.close()
+
+    def test_interrupted_download_leaves_job_retriable(self):
+        from fall_detect.update.updater import TemporaryNetworkError
+        updater = object.__new__(Updater)
+        job = {'id':'test','status':'downloading'}
+        with patch.object(updater,'recover'), patch.object(updater,'heartbeat',return_value={}), patch.object(updater,'request',return_value={'job':job}), patch.object(updater,'prepare',side_effect=TemporaryNetworkError), patch.object(updater,'report') as report:
+            updater.tick()
+            report.assert_called_once_with(job,'downloading')
+
+    def test_restart_after_symlink_switch_preserves_releases_and_shared(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shared = root/'shared'
+            shared.mkdir()
+            (shared/'updater.json').write_text(json.dumps(
+                {'backend_url':'http://localhost','device_token':'test'}))
+            (shared/'app.env').write_text('fixture')
+            updater = Updater(root)
+            self.addCleanup(updater.lock.close)
+            for version in ('0.0.0','1.0.0'):
+                target = updater.target(version)
+                target.mkdir()
+                (target/'release.json').write_text('{}')
+            updater.switch('1.0.0')
+            atomic_json(updater.journal,{'job':{'id':'test'},'old':'0.0.0','claimed':True})
+            with patch.object(updater,'service'), patch.object(updater,'healthy',return_value=True), patch.object(updater,'report'):
+                updater.recover()
+            self.assertEqual(updater.current(),'0.0.0')
+            self.assertTrue(updater.target('1.0.0').exists())
+            self.assertEqual((shared/'app.env').read_text(),'fixture')

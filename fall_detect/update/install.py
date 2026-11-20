@@ -54,6 +54,8 @@ def install(args):
         backend = backend or paired.get('base_url')
     if not backend or not token:
         raise SystemExit('Cần ANNHA_BASE_URL/BACKEND_URL và DEVICE_TOKEN của thiết bị đã ghép đôi.')
+    from updater import validate_backend_url
+    backend = validate_backend_url(backend)
     user = getpass.getuser()
     subprocess.run(['sudo', 'install', '-d', '-o', user, '-m', '700', str(root)], check=True)
     shared = root / 'shared'

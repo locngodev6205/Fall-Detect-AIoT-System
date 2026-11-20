@@ -11,6 +11,7 @@ import time
 import urllib.request
 import urllib.error
 
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -41,6 +42,8 @@ def download(url, limit, token=None, binary=True):
 class ReleaseCatalog:
     def __init__(self):
         self.releases = {}
+        self.retry_after = 0
+        self.failures = 0
         self.error = None
         self.checked_at = None
         self.lock = threading.Lock()
@@ -56,7 +59,7 @@ class ReleaseCatalog:
         raise ValueError('Gói chưa được xác minh trong cache')
 
     def sync(self, pinned=()):
-        if not self.lock.acquire(blocking=False):
+        if time.monotonic() < self.retry_after or not self.lock.acquire(blocking=False):
             return
         try:
             repo = os.getenv('DEVICE_RELEASE_REPO', '')
@@ -103,8 +106,16 @@ class ReleaseCatalog:
                         temporary.replace(path)
                     accepted[version] = {'manifest': manifest, 'manifest64': base64.b64encode(raw).decode(),
                         'signature': base64.b64encode(signature).decode(), 'notes': (item.get('body') or '')[:4000]}
-                except Exception:
+                except urllib.error.HTTPError as exc:
+                    if exc.code in (403, 429) or exc.code >= 500:
+                        raise
                     invalid.append(tag)
+                except OSError:
+                    raise
+                except (ValueError, KeyError, TypeError, InvalidSignature):
+                    invalid.append(tag)
+            self.failures = 0
+            self.retry_after = 0
             self.releases = accepted
             self.error = ('Bản phát hành thiếu asset hoặc xác minh thất bại: ' + ', '.join(invalid)) if invalid else None
             keep = {r['manifest']['sha256'] + '.tar.gz' for r in accepted.values()} | {digest + '.tar.gz' for digest in pinned}
@@ -112,12 +123,20 @@ class ReleaseCatalog:
                 if path.name not in keep:
                     path.unlink(missing_ok=True)
         except urllib.error.HTTPError as exc:
+            if exc.code in (403, 429) or exc.code >= 500:
+                self.backoff()
             self.error = f'GitHub HTTP {exc.code}. Kiểm tra token, quyền đọc repo và hạn mức API.'
         except Exception as exc:
+            if isinstance(exc, OSError):
+                self.backoff()
             self.error = str(exc) if isinstance(exc, ValueError) else 'Không kết nối được GitHub để đồng bộ phiên bản.'
         finally:
             self.checked_at = time.time()
             self.lock.release()
+
+    def backoff(self):
+        self.failures = min(self.failures + 1, 4)
+        self.retry_after = time.monotonic() + 120 * 2 ** self.failures
 
     def public(self):
         return [dict(r['manifest'], notes=r['notes']) for _, r in sorted(self.releases.items(), key=lambda item: tuple(map(int, item[0].split('.'))), reverse=True)]

@@ -552,7 +552,6 @@ class AnNhaEdgeRuntime:
                 tensor = detector.input_details[0]
                 detector.interpreter.set_tensor(tensor["index"], np.zeros(tuple(tensor["shape"]), dtype=tensor["dtype"]))
                 detector.interpreter.invoke()
-                self.model_inference_ok = True
             except Exception as exc:
                 logger.warning("[Vision] Không khởi tạo được TFLite FallDetector (%s) -> chỉ chạy Pose Tracking.", exc)
 
@@ -585,6 +584,13 @@ class AnNhaEdgeRuntime:
                     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     rgb.flags.writeable = False
                     pose_res = pose.process(rgb)
+                    if detector is not None and not self.model_inference_ok and not self.force_mock_hardware:
+                        try:
+                            detector.interpreter.invoke()
+                            self.model_inference_ok = True
+                        except Exception:
+                            logger.warning("[Vision] OTA inference probe failed")
+
 
                     present = is_person_present(pose_res.pose_landmarks)
                     self._observation = "clear" if present else "no_person"

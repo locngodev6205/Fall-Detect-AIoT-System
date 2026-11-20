@@ -4,6 +4,8 @@ import argparse
 import base64
 import fcntl
 import hashlib
+import http.client
+import ipaddress
 import json
 import logging
 import os
@@ -12,15 +14,44 @@ import platform
 import re
 import shutil
 import socket
+import ssl
 import subprocess
 import tarfile
 import time
 import urllib.request
 import urllib.error
+from urllib.parse import urlsplit
 
 LOG = logging.getLogger('annha-updater')
 VERSION = re.compile(r'^\d{1,6}\.\d{1,6}\.\d{1,6}$')
 TERMINAL = {'succeeded', 'failed', 'rolled_back', 'cancelled', 'expired'}
+
+
+LOCAL_NETWORKS = tuple(ipaddress.ip_network(value) for value in (
+    '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8',
+    '::1/128', 'fc00::/7', '100.64.0.0/10',
+))
+
+
+def validate_backend_url(value):
+    url = urlsplit(value)
+    if (url.scheme not in ('http', 'https') or not url.hostname or
+            url.username is not None or url.password is not None or
+            url.query or url.fragment or value != value.strip()):
+        raise ValueError('Backend URL không hợp lệ')
+    _ = url.port
+    if url.scheme == 'http' and url.hostname != 'localhost':
+        try:
+            address = ipaddress.ip_address(url.hostname)
+        except ValueError:
+            raise ValueError('Backend từ xa yêu cầu HTTPS') from None
+        if not any(address in network for network in LOCAL_NETWORKS):
+            raise ValueError('Backend từ xa yêu cầu HTTPS')
+    return value.rstrip('/')
+
+
+class TemporaryNetworkError(RuntimeError):
+    pass
 
 
 def atomic_json(path, data):
@@ -67,9 +98,7 @@ class Updater:
         self.staging.mkdir(parents=True, exist_ok=True)
         self.releases.mkdir(parents=True, exist_ok=True)
         self.config = json.loads((self.shared / 'updater.json').read_text())
-        self.base = self.config['backend_url'].rstrip('/')
-        if not self.base.startswith(('https://', 'http://')):
-            raise ValueError('Backend URL không hợp lệ')
+        self.base = validate_backend_url(self.config['backend_url'])
         self.token = self.config['device_token']
         self.journal = self.shared / 'update-journal.json'
         self.previous_file = self.shared / 'previous.json'
@@ -78,6 +107,22 @@ class Updater:
         fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     def request(self, path, body=None):
+        for attempt in range(3):
+            try:
+                return self.request_once(path, body)
+            except urllib.error.HTTPError as exc:
+                if exc.code != 429 and not 500 <= exc.code < 600:
+                    raise
+            except urllib.error.URLError as exc:
+                if isinstance(exc.reason, ssl.SSLCertVerificationError):
+                    raise ValueError('Không xác minh được chứng chỉ backend') from None
+            except (OSError, http.client.IncompleteRead):
+                pass
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+        raise TemporaryNetworkError('Backend tạm thời không phản hồi')
+
+    def request_once(self, path, body=None):
         headers = {'Authorization': 'Bearer ' + self.token}
         data = None
         if body is not None:
@@ -172,11 +217,15 @@ class Updater:
             raise ValueError('Kích thước manifest không hợp lệ')
         if shutil.disk_usage(self.root).free < 256 * 1024 * 1024 + manifest['bytes'] * 2:
             raise ValueError('Không đủ dung lượng trống để cập nhật')
-        data = self.request(job['id'] + '/bundle')
+        bundle = self.staging / (manifest['sha256'] + '.tar.gz')
+        data = bundle.read_bytes() if bundle.is_file() and bundle.stat().st_size == manifest['bytes'] else b''
+        if hashlib.sha256(data).hexdigest() != manifest['sha256']:
+            data = self.request(job['id'] + '/bundle')
         if len(data) != manifest['bytes'] or hashlib.sha256(data).hexdigest() != manifest['sha256']:
             raise ValueError('Sai SHA-256 hoặc kích thước gói')
-        bundle = self.staging / 'bundle.tar.gz'
-        bundle.write_bytes(data)
+        temporary = bundle.with_suffix('.tmp')
+        temporary.write_bytes(data)
+        temporary.replace(bundle)
         directory = self.staging / ('release-' + job['id'])
         if directory.exists():
             shutil.rmtree(directory)
@@ -193,15 +242,22 @@ class Updater:
         if destination.exists():
             if self.current() == version:
                 raise ValueError('Đang chạy bản đích')
+            previous = json.loads(self.previous_file.read_text()).get('version') if self.previous_file.exists() else None
+            if previous == version:
+                existing = json.loads((destination / 'release.json').read_text())
+                if existing != metadata:
+                    raise ValueError('Không thể ghi đè bản rollback')
+                shutil.rmtree(directory)
+                return destination
             shutil.rmtree(destination)
         directory.replace(destination)
         return destination
 
-    def healthy(self, version):
+    def healthy(self, version, *, require_backend=True):
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             try:
-                local = self.heartbeat()
+                local = self.heartbeat() if require_backend else self.local()
                 if local.get('current_version') == version and local.get('healthy'):
                     return True
             except Exception:
@@ -215,12 +271,17 @@ class Updater:
         journal = json.loads(self.journal.read_text())
         job = journal['job']
         if journal.get('outcome'):
+            if journal.get('local_verified'):
+                self.report(job, 'health_check')
+                self.heartbeat()
+            if journal['outcome'] == 'rolled_back':
+                self.report(job, 'rolling_back', 'Đã phục hồi bản trước')
             self.report(job, journal['outcome'], journal.get('message', ''), 100)
             self.journal.unlink()
             return
-        offer = self.request('job')
+        offer = self.request('job') if not journal.get('claimed') else {}
         active = offer.get('job')
-        if not active or active['id'] != job['id'] or active['status'] in ('pending', 'ready', 'deferred', 'downloading'):
+        if not journal.get('claimed') and (not active or active['id'] != job['id'] or active['status'] in ('pending', 'ready', 'deferred', 'downloading')):
             # Intent was written before the server claim, but the server did not claim it.
             self.journal.unlink()
             try:
@@ -228,12 +289,11 @@ class Updater:
             except OSError:
                 pass
             return
-        self.report(job, 'rolling_back', 'Phục hồi sau gián đoạn cài đặt')
         try:
             self.service('stop')
             self.switch(journal['old'])
             self.service('start')
-            healthy = self.healthy(journal['old'])
+            healthy = self.healthy(journal['old'], require_backend=False)
             outcome = 'rolled_back' if healthy else 'failed'
             message = 'Đã phục hồi bản trước' if healthy else 'Bản trước chưa vượt qua health check. Cần kiểm tra thiết bị.'
         except Exception:
@@ -250,17 +310,18 @@ class Updater:
         atomic_json(self.journal, journal)
         try:
             self.report(job, 'installing')
+            journal['claimed'] = True
+            atomic_json(self.journal, journal)
             final = self.local()
             if not final.get('ready') or not final.get('maintenance_active'):
                 raise RuntimeError('Điều kiện cập nhật đã thay đổi')
             self.service('stop')
             self.switch(job['version'])
             self.service('start')
-            self.report(job, 'health_check')
-            if not self.healthy(job['version']):
+            if not self.healthy(job['version'], require_backend=False):
                 raise RuntimeError('Bản mới không đạt health check trong 120 giây')
             atomic_json(self.previous_file, {'version': old})
-            journal.update(outcome='succeeded', message='Ứng dụng mới đã sẵn sàng')
+            journal.update(outcome='succeeded', local_verified=True, message='Ứng dụng mới đã sẵn sàng')
             atomic_json(self.journal, journal)
             self.recover()
         except Exception:
@@ -299,8 +360,10 @@ class Updater:
                 if exc.code == 409:
                     return
                 raise
-            except Exception as exc:
-                self.report(job, 'failed', str(exc)[:300])
+            except TemporaryNetworkError:
+                return
+            except Exception:
+                self.report(job, 'failed', 'Chuẩn bị gói cập nhật thất bại')
                 return
         if time.time() < job['scheduled_at']:
             return
