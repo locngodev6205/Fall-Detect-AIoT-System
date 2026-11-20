@@ -14,7 +14,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'fall_detect'))
 from ml.dataset import read_keypoints_csv
 from ml.features import SPEC
-from ml.integrity import build_dataset, decoded_video_digest, digest, read_sources, verify_dataset
+from ml.integrity import build_dataset, decoded_video_digest, digest, preflight_sources, read_sources, verify_dataset
 
 VIDEO_SUFFIXES = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
 SKIP_DIRS = {'.git', 'node_modules', 'venv', '.venv', '__pycache__', '.secrets'}
@@ -101,6 +101,12 @@ def main():
     build.add_argument('--version', required=True)
     build.add_argument('--seed', type=int, required=True)
     build.add_argument('--stride', type=int, default=3)
+    build.add_argument('--mode', choices=('official', 'research'), default='official')
+    build.add_argument('--preflight-report', type=Path)
+    preflight = commands.add_parser('preflight')
+    preflight.add_argument('sources', type=Path)
+    preflight.add_argument('--mode', choices=('official', 'research'), default='official')
+    preflight.add_argument('--stride', type=int, default=3)
     verify = commands.add_parser('verify')
     verify.add_argument('dataset', type=Path)
     verify.add_argument('--verify-sources', action='store_true')
@@ -108,15 +114,20 @@ def main():
     try:
         if options.command == 'audit':
             output = inventory(options.root.resolve(strict=True))
+        elif options.command == 'preflight':
+            admitted, rejected, _ = preflight_sources(read_sources(options.sources), mode=options.mode, stride=options.stride)
+            output = {'mode': options.mode, 'eligible': [row['video_id'] for row in admitted], 'rejected': rejected}
         else:
             if options.command == 'build':
                 manifest = build_dataset(read_sources(options.sources), options.destination, version=options.version,
-                                         seed=options.seed, stride=options.stride)
+                                         seed=options.seed, stride=options.stride, mode=options.mode,
+                                         preflight_report=options.preflight_report)
             else:
                 manifest = verify_dataset(options.dataset, verify_sources=options.verify_sources)
             groups = Counter((item['split'], item['label']) for item in manifest['sources'] if not item['duplicate_of'])
             windows = Counter((item['split'], item['label']) for item in manifest['windows'])
-            output = {'dataset_sha256': manifest['dataset_sha256'],
+            output = {'dataset_sha256': manifest['dataset_sha256'], 'mode': manifest['mode'],
+                      'g3_eligible': manifest['g3_eligible'], 'g3_status': manifest['g3_status'], 'preflight': manifest['preflight'],
                       'totals': {split: {label: {'videos': groups[split, index], 'windows': windows[split, index]}
                                          for index, label in enumerate(('no_fall', 'fall'))}
                                  for split in ('train', 'val', 'test')}}

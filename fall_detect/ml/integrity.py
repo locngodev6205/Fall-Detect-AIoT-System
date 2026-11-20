@@ -19,6 +19,8 @@ from .features import NUM_FEATURES, SPEC, normalize_sequence, resample_keypoints
 SPLITS = ('train', 'val', 'test')
 RATIOS = (.70, .15, .15)
 SHAPE = (SPEC.window_size, NUM_FEATURES)
+FALL_WINDOW_RULE = 'onset_and_min_overlap_v1'
+ANNOTATION_STATUSES = {'HUMAN_VERIFIED', 'UPSTREAM_VERIFIED'}
 
 
 @dataclass(frozen=True)
@@ -36,6 +38,17 @@ class Source:
     scene_id: str | None = None
     camera_id: str | None = None
     annotation_version: str | None = None
+    provenance_status: str | None = None
+    source_ref: str | None = None
+    expected_video_sha256: str | None = None
+    group_status: str | None = None
+    group_evidence: str | None = None
+    annotation_status: str | None = None
+    annotation_source: str | None = None
+    reviewer: str | None = None
+    cross_source_group: str | None = None
+    cross_source_evidence: str | None = None
+    fingerprint: bool = False
 
 
 def digest(path):
@@ -60,17 +73,19 @@ def read_sources(path, *, fingerprint=True):
     path = Path(path)
     with path.open(encoding='utf-8-sig', newline='') as stream:
         for row in csv.DictReader(stream):
-            video = (path.parent / row['source_file']).resolve(strict=True)
-            keypoints = (path.parent / row['keypoint_csv']).resolve(strict=True)
+            video = (path.parent / row['source_file']).resolve()
+            keypoints = (path.parent / row['keypoint_csv']).resolve()
             label = {'fall': 1, 'no_fall': 0}.get(row['label'].strip().lower())
             if label is None:
                 raise ValueError(f"Invalid label for {row['video_id']}")
             optional = {key: row.get(key, '').strip() or None for key in
-                        ('subject_id', 'source_group', 'scene_id', 'camera_id', 'annotation_version')}
+                        ('subject_id', 'source_group', 'scene_id', 'camera_id', 'annotation_version',
+                         'provenance_status', 'source_ref', 'expected_video_sha256', 'group_status', 'group_evidence',
+                         'annotation_status', 'annotation_source', 'reviewer', 'cross_source_group', 'cross_source_evidence')}
             event = {key: float(row[key]) if row.get(key, '').strip() else None
                      for key in ('event_start', 'event_end')}
             yield Source(row['video_id'].strip(), video, keypoints, label, row['source_dataset'].strip(),
-                         decoded_sha256=decoded_video_digest(video) if fingerprint else None,
+                         fingerprint=fingerprint,
                          **optional, **event)
 
 
@@ -102,18 +117,18 @@ def _group_records(records):
                     duplicate.append(prior['duplicate_of'] or prior['video_id'])
                     join(video, prior['video_id'])
         item['duplicate_of'] = min(duplicate, default=None)
-        for kind in ('subject_id', 'source_group'):
+        for kind in ('subject_id', 'source_group', 'cross_source_group'):
             value = item[kind]
             if value:
-                scope = item['source_dataset'] if kind == 'subject_id' else ''
+                scope = '' if kind == 'cross_source_group' else item['source_dataset']
                 prior = identities.setdefault((kind, scope, value), video)
                 join(video, prior)
     for item in records:
         item['group_id'] = root(item['video_id'])
 
 
-def _split_records(records, seed):
-    _group_records(records)
+def _split_records(records, seed, context=()):
+    _group_records([*records, *context])
     groups = {}
     for item in records:
         counts = groups.setdefault(item['group_id'], np.zeros(2, dtype=np.int64))
@@ -146,27 +161,75 @@ def _split_records(records, seed):
     return {r['video_id']: r for r in records}
 
 
-def assign_splits(sources, *, seed):
-    records = []
-    for source in sorted(sources, key=lambda row: row.video_id):
-        if not source.video_id or not source.source_dataset or source.label not in (0, 1):
-            raise ValueError(f'Invalid source record: {source.video_id}')
-        if source.decoded_sha256 and not re.fullmatch('[a-f0-9]{64}', source.decoded_sha256):
-            raise ValueError(f'Invalid decoded SHA-256: {source.video_id}')
-        if source.label == 1:
-            start, end = source.event_start, source.event_end
-            if start is None or end is None or not (math.isfinite(start) and math.isfinite(end) and 0 <= start <= end):
-                raise ValueError(f'Fall annotation interval is required for {source.video_id}')
-        elif source.event_start is not None or source.event_end is not None:
-            raise ValueError(f'No Fall source has a Fall annotation: {source.video_id}')
-        item = asdict(source)
-        item['video_sha256'] = digest(source.video)
-        item['source_file'] = str(item.pop('video'))
-        item['keypoint_csv'] = str(item.pop('keypoints'))
-        records.append(item)
-    if len({r['video_id'] for r in records}) != len(records):
+def _validate_cross_source(item):
+    if item['cross_source_group'] and (
+        not item['cross_source_evidence'] or item['group_status'] != 'VERIFIED'
+    ):
+        raise ValueError(f'Verified cross-source group evidence required: {item["video_id"]}')
+
+
+def _source_record(source):
+    if not source.video_id or not source.source_dataset or source.label not in (0, 1):
+        raise ValueError(f'Invalid source record: {source.video_id}')
+    if source.decoded_sha256 and not re.fullmatch('[a-f0-9]{64}', source.decoded_sha256):
+        raise ValueError(f'Invalid decoded SHA-256: {source.video_id}')
+    if source.label == 1:
+        start, end = source.event_start, source.event_end
+        if start is None or end is None or not (math.isfinite(start) and math.isfinite(end) and 0 <= start < end):
+            raise ValueError(f'Fall annotation interval is required for {source.video_id}')
+    elif source.event_start is not None or source.event_end is not None:
+        raise ValueError(f'No Fall source has a Fall annotation: {source.video_id}')
+    item = asdict(source)
+    _validate_cross_source(item)
+    item['video_sha256'] = digest(source.video)
+    if source.expected_video_sha256 and source.expected_video_sha256 != item['video_sha256']:
+        raise ValueError(f'Video checksum mismatch: {source.video_id}')
+    if item.pop('fingerprint'):
+        item['decoded_sha256'] = decoded_video_digest(source.video)
+    item['source_file'] = str(item.pop('video'))
+    item['keypoint_csv'] = str(item.pop('keypoints'))
+    return item
+
+
+def _ordered(sources):
+    rows = sorted(sources, key=lambda row: row.video_id)
+    if len({r.video_id for r in rows}) != len(rows):
         raise ValueError('Duplicate video ID in source records')
-    return _split_records(records, seed)
+    return rows
+
+
+def assign_splits(sources, *, seed):
+    return _split_records([_source_record(row) for row in _ordered(sources)], seed)
+
+
+def _provenance_errors(item):
+    missing = []
+    def present(key):
+        return isinstance(item.get(key), str) and bool(item[key].strip())
+    if (item['provenance_status'] != 'VERIFIED' or not present('source_ref')
+            or not present('expected_video_sha256') or item['expected_video_sha256'] != item.get('video_sha256')):
+        missing.append('provenance or verified video hash')
+    if item['group_status'] != 'VERIFIED' or not present('source_group') or not present('group_evidence'):
+        missing.append('source_group or lineage evidence')
+    if item['annotation_status'] not in ANNOTATION_STATUSES or not present('annotation_source') or not present('reviewer'):
+        missing.append('verified annotation, source or reviewer')
+    return missing
+
+
+def fall_window(timestamps, event_start, event_end):
+    """Require onset, >= 0.3 s overlap, and at least three event grid samples.
+
+    Require at least half the annotated duration, capped at 0.6 s. Durations
+    shorter than 0.3 s cannot qualify with this conservative label contract.
+    """
+    times = np.asarray(timestamps)
+    eps = 1e-8
+    duration = event_end - event_start
+    required = max(.3, min(.6, duration / 2))
+    overlap = min(float(times[-1]), event_end) - max(float(times[0]), event_start)
+    return bool(times[0] <= event_start + eps <= times[-1] + eps
+                and overlap >= required - eps
+                and np.count_nonzero((times >= event_start - eps) & (times <= event_end + eps)) >= 3)
 
 
 def _manifest_digest(manifest):
@@ -202,27 +265,75 @@ def _windows(item, raw, normalized, stride):
     for start in range(0, len(raw) - SPEC.window_size + 1, stride):
         stop = start + SPEC.window_size
         stamps = [item['first_timestamp'] + i / SPEC.sample_rate_hz for i in range(start, stop)]
-        if item['label'] and not (stamps[0] <= item['event_end'] and stamps[-1] >= item['event_start']):
+        if item['label'] and not fall_window(stamps, item['event_start'], item['event_end']):
             continue
         if not normalized[start:stop, 2::3].any(axis=1).all():
             continue
         yield start, stamps, raw[start:stop], normalized[start:stop]
 
 
-def build_dataset(sources, output, *, version, seed, stride=3):
+def preflight_sources(sources, *, mode='official', stride=3):
+    if mode not in ('official', 'research') or stride < 1:
+        raise ValueError('Expected official/research mode and positive stride')
+    eligible, rejected, context = [], [], []
+    for source in _ordered(sources):
+        identity = {'video_id': source.video_id, 'label': source.label}
+        try:
+            item = _source_record(source)
+        except (ValueError, OSError, subprocess.SubprocessError) as exc:
+            rejected.append({**identity, 'reason': 'INVALID_SOURCE', 'detail': str(exc)})
+            continue
+        evidence = _provenance_errors(item)
+        if mode == 'official' and evidence:
+            rejected.append({**identity, 'reason': 'UNVERIFIED_PROVENANCE', 'detail': ', '.join(evidence)})
+            continue
+        try:
+            _, raw = _read_source(item)
+        except (ValueError, OSError, KeyError) as exc:
+            rejected.append({**identity, 'reason': 'INVALID_KEYPOINTS', 'detail': str(exc)})
+            context.append(item)
+            continue
+        normalized = normalize_sequence(raw)
+        if len(raw) < SPEC.window_size:
+            reason = 'TOO_SHORT'
+        elif not any(normalized[i:i+SPEC.window_size, 2::3].any(axis=1).all()
+                     for i in range(0, len(raw)-SPEC.window_size+1, stride)):
+            reason = 'NO_CONTIGUOUS_POSE_WINDOW'
+        elif next(_windows(item, raw, normalized, stride), None) is None:
+            reason = 'INSUFFICIENT_EVENT_OVERLAP'
+        else:
+            eligible.append(item)
+            continue
+        rejected.append({**identity, 'reason': reason, 'detail': f'{len(raw)} grid samples at {SPEC.sample_rate_hz} Hz'})
+        context.append(item)
+    return eligible, rejected, context
+
+
+def build_dataset(sources, output, *, version, seed, stride=3, mode='official', preflight_report=None):
     output = Path(output)
     if output.exists() or output.is_symlink():
         raise FileExistsError(output)
     if not version.strip() or stride < 1:
         raise ValueError('Version and positive stride are required')
-    plan = assign_splits(sources, seed=seed)
+    eligible, rejected, context = preflight_sources(sources, mode=mode, stride=stride)
+    preflight = {'eligible': len(eligible), 'rejected': rejected}
+    if preflight_report is not None:
+        with Path(preflight_report).open('x', encoding='utf-8') as stream:
+            json.dump(preflight, stream, indent=2)
+    if not eligible:
+        detail = '; '.join(dict.fromkeys(r['detail'] for r in rejected))
+        raise ValueError(f'No eligible sources after preflight: {detail}')
+    plan = _split_records(eligible, seed, context)
     output.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(prefix='.annha-dataset-', dir=output.parent) as directory:
         root = Path(directory) / 'dataset'
         root.mkdir()
         windows = []
         for item in plan.values():
+            prior = item['keypoint_sha256'], item['sidecar_sha256']
             _, raw = _read_source(item)
+            if prior != (item['keypoint_sha256'], item['sidecar_sha256']) or digest(item['source_file']) != item['video_sha256']:
+                raise ValueError(f'Source changed after preflight: {item["video_id"]}')
             if item['duplicate_of']:
                 item['sequence_count'] = 0
                 continue
@@ -242,7 +353,10 @@ def build_dataset(sources, output, *, version, seed, stride=3):
                 raise ValueError(f'No valid labeled windows for {item["video_id"]}; inspect timestamps and pose coverage')
         manifest = {'dataset_version': version, 'feature_schema_version': SPEC.schema_version, 'feature_spec': _feature_spec(),
                     'seed': seed, 'ratios': dict(zip(SPLITS, RATIOS)), 'stride': stride, 'sources': list(plan.values()),
-                    'windows': windows, 'test_lock': sorted({r['group_id'] for r in plan.values() if r['split'] == 'test'})}
+                    'windows': windows, 'mode': mode, 'g3_eligible': mode == 'official',
+                    'g3_status': 'REVIEW_REQUIRED' if mode == 'official' else 'BLOCKED_RESEARCH_ONLY',
+                    'fall_window_rule': FALL_WINDOW_RULE, 'preflight': preflight, 'group_context': context,
+                    'test_lock': sorted({r['group_id'] for r in plan.values() if r['split'] == 'test'}) if mode == 'official' else []}
         manifest['dataset_sha256'] = _manifest_digest(manifest)
         (root / 'manifest.json').write_text(json.dumps(manifest, indent=2, allow_nan=False), encoding='utf-8')
         verify_dataset(root)
@@ -264,6 +378,11 @@ def verify_dataset(root, *, verify_sources=False):
         raise ValueError('Dataset feature schema does not match annha-pose-v2')
     if _manifest_digest(manifest) != manifest['dataset_sha256']:
         raise ValueError('Dataset manifest hash mismatch')
+    mode = manifest.get('mode')
+    if (mode not in ('official', 'research') or manifest.get('g3_eligible') is not (mode == 'official')
+            or manifest.get('g3_status') != ('REVIEW_REQUIRED' if mode == 'official' else 'BLOCKED_RESEARCH_ONLY')
+            or manifest.get('fall_window_rule') != FALL_WINDOW_RULE):
+        raise ValueError('Missing dataset quality mode or current Fall label rule')
     index = {}
     sources = {}
     for row in manifest['sources']:
@@ -272,6 +391,9 @@ def verify_dataset(root, *, verify_sources=False):
         sources[row['video_id']] = row
         if row['label'] not in (0, 1) or row['split'] not in SPLITS:
             raise ValueError(f'Invalid label or split for {row["video_id"]}')
+        _validate_cross_source(row)
+        if mode == 'official' and _provenance_errors(row):
+            raise ValueError(f'Official Test provenance gate failed: {row["video_id"]}')
         if verify_sources:
             csv_path = Path(row['keypoint_csv'])
             for path, key in ((row['source_file'], 'video_sha256'), (csv_path, 'keypoint_sha256'),
@@ -280,16 +402,32 @@ def verify_dataset(root, *, verify_sources=False):
                     raise ValueError(f'Source checksum mismatch: {path}')
             if row['decoded_sha256'] and decoded_video_digest(row['source_file']) != row['decoded_sha256']:
                 raise ValueError(f'Decoded source checksum mismatch: {row["video_id"]}')
-        for field in ('video_id', 'video_sha256', 'decoded_sha256', 'group_id', 'source_group'):
+        for field in ('video_id', 'video_sha256', 'decoded_sha256', 'group_id', 'cross_source_group'):
             if row[field]:
                 _partition(index, (field, row[field]), row['split'], field)
+        if row['source_group']:
+            _partition(index, ('source_group', row['source_dataset'], row['source_group']), row['split'], 'source_group')
         if row['subject_id']:
             _partition(index, ('subject', row['source_dataset'], row['subject_id']), row['split'], 'subject')
-    replay = _split_records([dict(row) for row in sorted(sources.values(), key=lambda x: x['video_id'])], manifest['seed'])
+    context = [dict(row) for row in manifest['group_context']]
+    context_ids = {row['video_id'] for row in context}
+    rejected_rows = manifest['preflight']['rejected']
+    rejected_ids = {row['video_id'] for row in rejected_rows}
+    if (manifest['preflight']['eligible'] != len(sources) or rejected_ids & sources.keys()
+            or len(rejected_ids) != len(rejected_rows)
+            or not context_ids <= rejected_ids or len(context_ids) != len(context)):
+        raise ValueError('Invalid preflight grouping context')
+    for row in context:
+        _validate_cross_source(row)
+        if mode == 'official' and _provenance_errors(row):
+            raise ValueError('Unverified provenance in grouping context')
+    replay = _split_records([dict(row) for row in sorted(sources.values(), key=lambda x: x['video_id'])],
+                            manifest['seed'], context)
     if any(any(replay[key][field] != row[field] for field in ('split', 'group_id', 'duplicate_of'))
            for key, row in sources.items()):
         raise ValueError('Stored split does not reproduce from seed and video groups')
-    if sorted({r['group_id'] for r in sources.values() if r['split'] == 'test'}) != manifest['test_lock']:
+    test_lock = sorted({r['group_id'] for r in sources.values() if r['split'] == 'test'}) if mode == 'official' else []
+    if test_lock != manifest['test_lock']:
         raise ValueError('Test group lock mismatch')
     classes = {split: set() for split in SPLITS}
     counts = Counter()
@@ -320,7 +458,7 @@ def verify_dataset(root, *, verify_sources=False):
                 or not np.allclose(timestamps, source['first_timestamp'] + (start + np.arange(SPEC.window_size)) / SPEC.sample_rate_hz,
                                    rtol=0, atol=1e-8)
                 or timestamps[-1] > source['last_timestamp'] + 1e-8
-                or (source['label'] and not (timestamps[0] <= source['event_end'] and timestamps[-1] >= source['event_start']))):
+                or (source['label'] and not fall_window(timestamps, source['event_start'], source['event_end']))):
             raise ValueError(f'Invalid or unlabeled window timestamps: {window["path"]}')
         if feature_labels.setdefault(feature_hash, window['label']) != window['label']:
             raise ValueError('Identical normalized sequences have conflicting labels')

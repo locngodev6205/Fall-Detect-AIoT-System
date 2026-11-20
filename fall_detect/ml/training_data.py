@@ -15,10 +15,12 @@ class DataLoader:
             raise ValueError('Unknown split or invalid batch size')
         if (augment or shuffle) and split != 'train':
             raise ValueError('Only the train split may be augmented or shuffled')
-        if split == 'test' and purpose != 'final_evaluation':
-            raise ValueError('Test split is reserved for final_evaluation')
         self.root = Path(root)
         manifest = verify_dataset(self.root)
+        if split == 'test':
+            allowed = 'final_evaluation' if manifest['g3_eligible'] else 'research_evaluation'
+            if purpose != allowed:
+                raise ValueError(f'{manifest["mode"]} Test is reserved for {allowed}')
         self.dataset_sha256 = manifest['dataset_sha256']
         if expected_sha256 is not None and expected_sha256 != self.dataset_sha256:
             raise ValueError('Dataset does not match the locked manifest SHA-256')

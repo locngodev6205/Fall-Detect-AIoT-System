@@ -113,3 +113,26 @@ def test_model_manifest_routes_npy_window_and_live_pose_to_same_tensor(tmp_path,
         runtime.update_pose(pose, True, float(t))
     interpreter.set_tensor.assert_called_once()
     np.testing.assert_allclose(interpreter.set_tensor.call_args.args[1][0], normalize_sequence(raw), atol=1e-5)
+
+
+def test_live_and_offline_segments_match_after_missing_frame_and_long_gap():
+    from ml.features import SHAPE
+    times = [0, .1, .2, .31, .4, .88, .94, 1, 1.1, 1.2]
+    raw = [extract_keypoints(landmarks(t)) if i not in (2, 7) else np.zeros(SHAPE, np.float32)
+           for i, t in enumerate(times)]
+    offline = normalize_sequence(resample_keypoints(times, raw))
+    live = PoseSampler()
+    streamed = np.concatenate([live.push(t, pose) for t, pose in zip(times, raw, strict=True)])
+
+    def runs(rows):
+        splits = np.split(rows, np.flatnonzero(~rows[:, 2::3].any(axis=1)))
+        return [group[group[:, 2::3].any(axis=1)] for group in splits if group[:, 2::3].any()]
+
+    # Long runs of zero sentinel samples can be collapsed on Edge, but must reset the
+    # detector at the same point and preserve each continuous run and its values.
+    offline_runs, live_runs = runs(offline), runs(streamed)
+    assert len(offline_runs) == len(live_runs) >= 3
+    for left, right in zip(offline_runs, live_runs, strict=True):
+        np.testing.assert_allclose(left, right, atol=1e-5)
+    with pytest.raises(ValueError, match='strictly increasing'):
+        live.push(times[-1], raw[-1])
