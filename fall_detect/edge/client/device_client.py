@@ -34,6 +34,9 @@ except ImportError:  # pragma: no cover
 
 logger = logging.getLogger("annha.edge.client")
 
+MAX_PENDING_AUDIO_RECEIPTS = 512
+MAX_RECONCILED_AUDIO_RECEIPTS = 256
+
 ASSET_EXTENSIONS = {
     "audio/wav": ".wav", "audio/x-wav": ".wav", "audio/mpeg": ".mp3",
     "audio/ogg": ".ogg", "audio/webm": ".webm",
@@ -179,6 +182,7 @@ class DeviceClient:
                     db.execute("ALTER TABLE command_receipts ADD COLUMN backend_status TEXT")
                 if "retry_at" not in columns:
                     db.execute("ALTER TABLE command_receipts ADD COLUMN retry_at REAL NOT NULL DEFAULT 0")
+                self._prune_reconciled_audio_receipts(db)
                 db.execute("""UPDATE command_receipts SET status='failed',detail=?
                               WHERE status='executing'""",
                            ("Thiết bị đã khởi động lại trước khi ghi nhận kết quả phát.",))
@@ -582,6 +586,21 @@ class DeviceClient:
                                    (time.time() + backoff, reminder, occurrence))
                         break
 
+    @staticmethod
+    def _prune_reconciled_audio_receipts(db: sqlite3.Connection) -> None:
+        db.execute("""DELETE FROM command_receipts WHERE rowid IN (
+                          SELECT rowid FROM command_receipts WHERE backend_status IS NOT NULL
+                          ORDER BY rowid DESC LIMIT -1 OFFSET ?
+                      )""", (MAX_RECONCILED_AUDIO_RECEIPTS,))
+
+    def _reserve_audio_receipt(self, command_id: str) -> bool:
+        with closing(sqlite3.connect(self._audio_db)) as db, db:
+            result = db.execute("""INSERT OR IGNORE INTO command_receipts(id,status,detail)
+                                   SELECT ?, 'executing', '' WHERE (
+                                       SELECT count(*) FROM command_receipts WHERE backend_status IS NULL
+                                   ) < ?""", (command_id, MAX_PENDING_AUDIO_RECEIPTS))
+            return result.rowcount == 1
+
     def _store_audio_receipt(self, command_id: str, status: str, detail: str = "") -> None:
         with closing(sqlite3.connect(self._audio_db)) as db, db:
             db.execute("""INSERT INTO command_receipts(id,status,detail) VALUES(?,?,?)
@@ -609,6 +628,7 @@ class DeviceClient:
                     elif confirmed in ("executed", "failed", "expired"):
                         db.execute("UPDATE command_receipts SET backend_status=? WHERE id=?",
                                    (confirmed, command_id))
+                        self._prune_reconciled_audio_receipts(db)
                         logger.warning("[DeviceClient] ACK âm thanh xung đột (%s / %s).", status, confirmed)
                     else:
                         db.execute("UPDATE command_receipts SET retry_at=? WHERE id=?",
@@ -650,11 +670,11 @@ class DeviceClient:
                 self._ack_command(cmd_id, "failed", "Không ghi được trạng thái lệnh trên thiết bị.")
                 continue
 
-            # pending -> accepted -> executing -> executed/failed
+            if durable and not self._reserve_audio_receipt(cmd_id):
+                # Leave the command pending on the server until capacity returns or it expires.
+                continue
             if cmd.get("status") == "pending":
                 self._ack_command(cmd_id, "accepted", "")
-            if durable:
-                self._store_audio_receipt(cmd_id, "executing")
             if not self._ack_command(cmd_id, "executing", ""):
                 if durable:
                     self._store_audio_receipt(cmd_id, "failed", "Thiết bị không nhận được xác nhận bắt đầu phát.")

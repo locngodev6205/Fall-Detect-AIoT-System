@@ -101,3 +101,32 @@ Follow-up test commands and counts appear below. Earlier benchmarks above descri
 - Five targeted `PostgresTests` listed in the audit · 5 PASS using an isolated PostgreSQL 16 instance.
 - `python scripts/audio/benchmark_decoder.py` · PASS for both codecs. First PCM after startup was 11.3 ms median for WebM and 217.4 ms for Ogg on the development host. This run measures from the first input bytes after the startup probe and excludes microphone capture and Bluetooth.
 - `python -m compileall -q backend/src fall_detect/edge fall_detect/tests scripts/audio` and `git diff --check` · PASS.
+
+## Acceptance follow-up from `ba24c49671af18cefd02e3f445f5355571ae8207`
+
+### Safe preemption fixture
+
+`python -m unittest fall_detect.tests.test_audio_acceptance_fixtures` runs real child processes that ignore SIGTERM. A silent `true` process stands in for emergency playback. Timing starts at the emergency trigger. The completion measurement includes reaping the displaced processes, explicitly through the session owner for Push-to-Talk. The fixture budget is 500 ms. This measures process control on the development host and excludes Bluetooth discovery, audio-server scheduling and acoustic output.
+
+| Event and source | Prior emergency spawn | Updated emergency spawn | Updated completion | Result |
+| --- | ---: | ---: | ---: | --- |
+| Gas during file playback | 1004.5 ms | 1.5 ms | 3.2 ms | PASS |
+| Fall during file playback | 1003.9 ms | 3.9 ms | 7.1 ms | PASS |
+| Gas during Push-to-Talk | 0.3 ms | 0.3 ms | 1.1 ms | PASS |
+| Fall during Push-to-Talk | 0.4 ms | 0.3 ms | 1.3 ms | PASS |
+
+Both file scenarios failed the fixture budget before the fix because the player got a full SIGTERM grace period. Emergency preemption now kills the displaced file process immediately and waits briefly to reap it. Normal shutdown and silence retain their existing behavior.
+
+### Durable ACK capacity
+
+An atomic reservation limits new unconfirmed audio ACK receipts to 512. A command that cannot reserve space remains pending on the backend until the backlog drains or the command expires. Existing unconfirmed receipts are retained even if an upgraded device starts over the limit. Reconciled conflict history is capped at 256, ordered by local receipt insertion. Tests verify that saturation preserves unconfirmed data, ACK recovery restores capacity, and pruning touches only reconciled history. These are logical row limits for command receipts. SQLite can retain freed pages, and reminder execution reports use a separate table.
+
+### Raspberry Pi acceptance
+
+Read-only SSH reached the Pi and returned `Permission denied (publickey,password)` with batch mode and strict host-key validation. Inventory of runtime and dependencies, sink selection and audio output, TTS/WAV/MP3, offline reminders, browser-to-speaker streaming, Stop latency, Bluetooth disconnect and Pi CPU/RAM are **BLOCKED**. No physical alarm or audio fixture was run, no service was restarted and no code was deployed. Once key access and a separate test sink/runtime are available, follow the hardware procedure in the audit report. Physical preemption must include Bluetooth discovery and measure actual speaker output.
+
+### Acceptance regression results
+
+- `python -m unittest fall_detect.tests.test_audio_acceptance_fixtures fall_detect.tests.test_audio_hardening fall_detect.tests.test_group4_audio_scheduler` · 25 PASS. This run observed at most 6.5 ms for trigger-to-cleanup in the preemption fixture.
+- `python -m unittest fall_detect.tests.test_group1_sensors fall_detect.tests.test_group2_device_client fall_detect.tests.test_group3_tracking_ptz fall_detect.tests.test_group5_main_edge` · 11 PASS with the isolated SQLite Docker fixture.
+- `python -m compileall -q fall_detect/edge fall_detect/tests` and `git diff --check` · PASS.

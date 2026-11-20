@@ -83,11 +83,15 @@ def ensure_siren_wav(dest: Path) -> Path:
     return dest
 
 
-def _terminate_and_reap(proc: subprocess.Popen[bytes] | None) -> None:
+def _terminate_and_reap(proc: subprocess.Popen[bytes] | None, *, immediate: bool = False) -> None:
     if proc is None:
         return
     try:
         if proc.poll() is None:
+            if immediate:
+                proc.kill()
+                proc.wait(timeout=0.2)
+                return
             proc.terminate()
             try:
                 proc.wait(timeout=1.0)
@@ -318,7 +322,7 @@ class AudioPlayer:
                     if (self._current_is_gas and not is_gas) or priority < self._current_priority or priority == self._current_priority < 2:
                         return False, "Loa đang bận phát âm thanh."
                     self._interrupted.add(current)
-                    _terminate_and_reap(current)
+                    _terminate_and_reap(current, immediate=priority >= 2)
                 if self._live_input is not None:
                     if priority < 2:
                         return False, "Loa đang phát đàm thoại."
