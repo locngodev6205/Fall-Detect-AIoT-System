@@ -19,6 +19,20 @@ def quantiles(values):
     return dict(zip(('p50','p95','p99'), map(float,np.percentile(values,[50,95,99])))) if values else None
 
 
+def device_sample(start, cpu, frames):
+    try:
+        rss = next(line.split()[1] for line in Path('/proc/self/status').read_text().splitlines()
+                   if line.startswith('VmRSS:'))
+    except (OSError, StopIteration):
+        rss = None
+    try:
+        temp = int(Path('/sys/class/thermal/thermal_zone0/temp').read_text())/1000
+    except (OSError, ValueError):
+        temp = None
+    return dict(elapsed_s=time.monotonic()-start, cpu_s=time.process_time()-cpu,
+                frames=frames, rss_kib=int(rss) if rss else None, temperature_c=temp)
+
+
 def benchmark(source, model, complexity, *, live=False, limit=None, confirmations=1):
     import cv2
     import mediapipe as mp
@@ -32,7 +46,10 @@ def benchmark(source, model, complexity, *, live=False, limit=None, confirmation
     valid = windows = scored = frames = interruptions = no_landmarks = 0
     alerts, score_grid, transitions = [], [], []
     stream = Stream(model, confirmations=confirmations)
+    recovery = []
+    outage_started = None
     begin, cpu = time.monotonic(), time.process_time()
+    resources = [device_sample(begin, cpu, 0)]
     fps = cap.get(cv2.CAP_PROP_FPS)
     if not live and fps <= 0:
         cap.release()
@@ -43,15 +60,23 @@ def benchmark(source, model, complexity, *, live=False, limit=None, confirmation
                 start = time.monotonic()
                 ok, frame = cap.read()
                 arrived = time.monotonic()
+                if arrived-begin-resources[-1]['elapsed_s'] >= 5:
+                    resources.append(device_sample(begin, cpu, frames))
                 if not ok:
                     if not live:
                         break
-                    interruptions += 1
-                    stream.reset('camera_disconnect')
+                    if outage_started is None:
+                        interruptions += 1
+                        outage_started = arrived
+                        stream.reset('camera_disconnect')
+                        detector.reset()
                     cap.release()
                     time.sleep(.5)
                     cap = cv2.VideoCapture(source)
                     continue
+                if outage_started is not None:
+                    recovery.append((arrived-outage_started)*1000)
+                    outage_started = None
                 stamp = arrived-begin if live else video_frame_timestamp(
                     cap.get(cv2.CAP_PROP_POS_MSEC),fps,stamps[-1] if stamps else None)
                 height, width = frame.shape[:2]
@@ -73,7 +98,10 @@ def benchmark(source, model, complexity, *, live=False, limit=None, confirmation
                         score_grid.append(row.end)
                         inference.append(row.inference_ms)
                     for event, when in row.events:
-                        transitions.append(dict(event=event, grid=when, arrival=row.arrival))
+                        transitions.append(dict(event=event, grid=when, source_time=row.arrival,
+                                                capture_elapsed_s=arrived-begin,
+                                                inference_completed_elapsed_s=row.completed_monotonic-begin,
+                                                dispatch_elapsed_s=time.monotonic()-begin))
                         if event == 'simulated_alert':
                             alerts.append([when,row.arrival])
                             delivery.append((time.monotonic()-arrived)*1000)
@@ -82,6 +110,7 @@ def benchmark(source, model, complexity, *, live=False, limit=None, confirmation
     finally:
         cap.release()
     elapsed = time.monotonic()-begin
+    resources.append(device_sample(begin, cpu, frames))
     diffs = np.diff(stamps)
     throttled = None
     if shutil.which('vcgencmd'):
@@ -98,10 +127,12 @@ def benchmark(source, model, complexity, *, live=False, limit=None, confirmation
                 preprocessing_ms=quantiles(preprocessing), inference_ms=quantiles(inference), simulated_alert_delivery_ms=quantiles(delivery),
                 valid_pose_frames=valid, no_landmark_frames=no_landmarks, windows=windows, scored=scored, alerts=alerts, score_grid=score_grid,
                 transitions=transitions, interruptions=interruptions,
+                recovery_ms=quantiles(recovery), model_errors=stream.model_errors,
+                invalid_poses=stream.invalid_poses,
                 timestamp_resets=sum(reason == 'timestamp_gap' for reason, _ in stream.resets),
                 cpu_seconds=time.process_time()-cpu, peak_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
                 temperature_c=int(temp.read_text())/1000 if temp.is_file() else None,
-                throttled=throttled, dropped_frames=None)
+                throttled=throttled, resource_samples=resources, dropped_frames=None)
 
 
 def main():

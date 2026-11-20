@@ -81,3 +81,85 @@ def test_offline_streaming_fixture_and_early_fn():
         np.testing.assert_array_equal(x,result.inputs)
     report = evaluate_alerts((2.,3.),[1.9],False)
     assert (report['tp'],report['fn'],report['early'])==(0,1,1)
+
+
+def test_reconnect_keeps_alert_latch_and_clock():
+    score = .9
+    stream = Stream(lambda _: score)
+    def fill(start):
+        return [w for i in range(20) for w in stream.push(start+i/10, pose())][-1]
+    assert fill(0).events[-1][0] == 'simulated_alert'
+    stream.reset('camera_disconnect')
+    assert not fill(4).events
+    score = .1
+    stream.push(6.,pose())
+    stream.push(6.1,pose())
+    stream.push(6.2,pose())
+    score = .9
+    stream.push(6.3,pose())
+    stream.push(6.4,pose())
+    assert stream.push(6.5,pose())[0].events[-1][0] == 'simulated_alert'
+
+
+def test_invalid_pose_and_model_failure_never_emit_alert():
+    count = iter([float('nan'), .9])
+    stream = Stream(lambda _: next(count))
+    malformed = pose()
+    malformed[0,0] = np.inf
+    initial = [w for i in range(20) for w in stream.push(i/10, malformed if i==8 else pose())][0]
+    assert stream.invalid_poses == 1
+    assert (initial.score,initial.events,initial.error) == (None,(),'ValueError')
+    for stamp in (2.,2.1):
+        assert not stream.push(stamp,pose())
+    assert stream.push(2.2,pose())[0].events[-1][0] == 'simulated_alert'
+    assert stream.model_errors == 1
+
+
+def test_model_exception_is_counted_and_pending_confirmation_cleared():
+    def fail(_):
+        raise RuntimeError('message stays outside telemetry')
+    stream = Stream(fail)
+    windows = [w for i in range(20) for w in stream.push(i/10,pose())]
+    assert windows[0].error == 'RuntimeError' and not windows[0].events
+
+
+def test_cross_device_score_tolerance_still_rejects_alert_flip():
+    from research.parity import compare
+
+    reference = dict(checkpoint_sha256='same', model_errors=0,
+                     windows=[dict(start=0., end=1.9, mask=[True]*20,
+                                   tensor_sha256='same', score=.500001, events=[])])
+    changed = {**reference, 'windows': [{**reference['windows'][0], 'score': .499999}]}
+    assert compare(reference, changed)['passed']
+    changed['windows'][0]['events'] = [['simulated_alert',1.9]]
+    result = compare(reference, changed)
+    assert not result['passed']
+    assert result['scores_near_threshold'] == result['decision_mismatches'] == 1
+
+
+def test_disconnect_starts_new_grid_without_double_counting_gap():
+    stream = Stream(lambda _: .1)
+    stream.push(0.,pose())
+    stream.reset('camera_disconnect')
+    assert stream.push(5.,pose()) == []
+    assert [reason for reason,_ in stream.resets] == ['initial','camera_disconnect']
+
+
+def test_tensor_compare_accepts_small_cross_cpu_rounding():
+    from research.parity import compare
+    tensor = np.zeros((20,51),dtype=np.float32)
+    expected = dict(start=0.,end=1.9,mask=[True]*20,tensor_sha256='a',
+                    score=.49,events=[],tensor=tensor.tolist())
+    reference = dict(checkpoint_sha256='same',model_errors=0,windows=[expected])
+    tensor[0,0] = 1e-6
+    actual = dict(**{**expected, 'tensor_sha256':'b','tensor':tensor.tolist()})
+    observed = {**reference,'windows':[actual]}
+    assert compare(reference,observed)['passed']
+    tensor[0,0] = .01
+    actual['tensor'] = tensor.tolist()
+    assert compare(reference,observed)['tensor_mismatches'] == 1
+
+
+def test_missing_checkpoint_fails_before_model_loading(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        load_model(tmp_path/'missing.pt')

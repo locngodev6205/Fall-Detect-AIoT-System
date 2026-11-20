@@ -99,6 +99,8 @@ class Window:
     score: float | None
     events: tuple
     inference_ms: float
+    completed_monotonic: float | None
+    error: str | None
 
 
 class Stream:
@@ -108,13 +110,16 @@ class Stream:
         self.preprocess_ms = 0.
         self.last_stamp = None
         self.resets = []
+        self.model_errors = 0
+        self.invalid_poses = 0
+        self.engine = EventEngine(confirmations=confirmations)
         self.reset('initial')
 
     def reset(self, reason):
         self.resets.append((reason, self.last_stamp))
         self.sampler = _TimestampSampler(SPEC)
         self.buffer = deque(maxlen=SIZE)
-        self.engine = EventEngine(confirmations=self.confirmations)
+        self.engine.unavailable()
         self.empty_count = 0
 
     def push(self, stamp, pose):
@@ -122,9 +127,12 @@ class Stream:
             raise ValueError('Timestamps must be finite and strictly increasing')
         if pose is not None and np.shape(pose) != SHAPE:
             raise ValueError('Expected pose shape (17, 3)')
-        if self.last_stamp is not None and stamp-self.last_stamp > SPEC.max_gap_s:
+        if self.sampler.previous is not None and stamp-self.last_stamp > SPEC.max_gap_s:
             self.reset('timestamp_gap')
         self.last_stamp = stamp
+        if pose is not None and not np.isfinite(pose).all():
+            self.invalid_poses += 1
+            pose = None
         begin = time.perf_counter()
         first_index = self.sampler.index
         samples = self.sampler.push(stamp, EMPTY if pose is None else pose)
@@ -144,12 +152,23 @@ class Stream:
             end = self.sampler.origin + index/SPEC.sample_rate_hz
             start = self.sampler.origin + (index-SIZE+1)/SPEC.sample_rate_hz
             score, events, inference_ms = None, (), 0.
+            completed, error = None, None
             if valid_window(mask):
-                begin = time.perf_counter()
-                score = self.model(inputs)
-                inference_ms = (time.perf_counter()-begin)*1000
-                events = self.engine.update(end, score)
+                begin = time.monotonic()
+                try:
+                    score = float(self.model(inputs))
+                    if not math.isfinite(score) or not 0 <= score <= 1:
+                        raise ValueError('Invalid model probability')
+                except Exception as exc:
+                    error = type(exc).__name__
+                    self.model_errors += 1
+                    score = None
+                    self.engine.unavailable()
+                else:
+                    events = self.engine.update(end, score)
+                completed = time.monotonic()
+                inference_ms = (completed-begin)*1000
             else:
                 self.engine.unavailable()
-            windows.append(Window(start,end,stamp,mask,inputs,score,events,inference_ms))
+            windows.append(Window(start,end,stamp,mask,inputs,score,events,inference_ms,completed,error))
         return windows

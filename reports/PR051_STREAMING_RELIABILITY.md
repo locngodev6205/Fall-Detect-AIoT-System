@@ -1,0 +1,9 @@
+# PR-05.1 · Phục hồi streaming
+
+PR-05 thay toàn bộ EventEngine khi reset buffer, làm mất cooldown và latch của một cảnh báo đã phát. PR-05.1 reset grid, stride và rolling buffer nhưng giữ alert clock và latch. Camera disconnect hoặc gap timestamp > 0,25 giây hủy candidate chưa xác nhận. Khi camera quay lại, đợi 20 mẫu trước khi xét window. Nếu score vẫn cao thì giữ latch, tránh phát lặp vì reconnect. Score thấp xác nhận tái kích hoạt, hoặc sau 20 mẫu liên tiếp không có pose thì mở latch và vẫn giữ cooldown. Trade-off là một Fall mới có thể bị bỏ qua nếu luồng cũ đã alert, reconnect khi score vẫn cao và chưa quan sát được khoảng phân tách.
+
+Camera loop tính một interruption cho cả outage, reset tracker MediaPipe một lần và thử mở lại V4L2. Ghi thời gian từ lần đọc lỗi đầu đến frame thành công. Reconnect không đếm thêm gap cho cùng outage. Regression fixture phát alert, ngắt, reconnect với score cao, kiểm tra không tạo duplicate, rồi hạ score để kiểm tra tái kích hoạt. Đây là kiểm thử luồng pose, không chứng minh unplug/replug camera USB.
+
+Pose có NaN/Inf thành một mẫu mất, giữ chính sách gap. Shape sai và timestamp không tăng bị từ chối. Checkpoint thiếu hoặc sai hash không nạp. Exception hoặc score ngoài [0,1] tạo cửa sổ lỗi không alert, hủy candidate chưa đủ và giữ bộ đếm lỗi. Log chỉ ghi loại exception. Không tích hợp Telegram, Gmail, MQTT, backend, servo hoặc còi.
+
+Timeline có hai miền. Replay dùng PTS video làm source time, live dùng monotonic lúc read trả frame. Grid dùng source clock để xác định cửa sổ và cooldown. JSON transition phân biệt grid, source time của frame đã cấp dữ liệu, thời điểm read, thời điểm inference hoàn tất và thời điểm dispatch theo monotonic tương đối với đầu phiên. Latency camera đọc là thời gian gọi read, không đo timestamp sensor. Detection Delay được tính riêng theo annotation trên PTS.

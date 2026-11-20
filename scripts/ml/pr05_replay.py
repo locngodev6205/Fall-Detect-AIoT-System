@@ -16,9 +16,10 @@ from research.streaming import SIZE, STRIDE, EventEngine, Stream, load_model, va
 
 def offline(stamps, poses, model, confirmations=1):
     cuts = np.flatnonzero(np.diff(stamps)>SPEC.max_gap_s)+1
+    engine = EventEngine(confirmations=confirmations)
     for times, raw in zip(np.split(stamps,cuts),
                           np.split(poses,cuts)):
-        engine = EventEngine(confirmations=confirmations)
+        engine.unavailable()
         samples = normalize_sequence(resample_keypoints(times,raw))
         missing_run = 0
         for end_index, vector in enumerate(samples):
