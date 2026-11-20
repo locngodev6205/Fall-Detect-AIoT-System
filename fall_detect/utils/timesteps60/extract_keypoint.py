@@ -1,3 +1,13 @@
+# Versioned dataset generation is opt-in to protect historical artifacts.
+if __name__ == '__main__':
+    import sys
+    if '--canonical' in sys.argv:
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from ml.dataset import dataset_cli
+        dataset_cli('extract', 60)
+        raise SystemExit
+
 import os
 import cv2
 import mediapipe as mp

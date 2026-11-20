@@ -21,6 +21,9 @@ def build(version, commit, output, root=None):
     files = []
     for name in ('edge', 'modules', 'update'):
         files.extend(p for p in (root / name).rglob('*.py') if '__pycache__' not in p.parts)
+    features = root / 'ml/features.py'
+    if features.is_file():
+        files.append(features)
     files += [root / 'config.py', root / 'requirements.txt', root / 'run_edge.sh']
     bundle = output / 'annha-pi.tar.gz'
     with tarfile.open(bundle, 'w:gz') as archive:

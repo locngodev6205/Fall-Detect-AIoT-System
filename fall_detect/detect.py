@@ -44,7 +44,8 @@ import cv2
 import mediapipe as mp
 
 import config
-from modules.skeleton import is_person_present, extract_and_normalize_features, NUM_FEATURES
+from ml.features import video_frame_timestamp
+from modules.skeleton import is_person_present, NUM_FEATURES
 from modules.notifier import Notifier
 from modules.detector import FallDetector
 from modules.visualizer import Visualizer
@@ -135,11 +136,14 @@ def main(source_type="webcam", file_path=None, no_display=False, camera_id=0):
         notifier.log(f"Lỗi: Nguồn không hợp lệ: '{source_type}'")
         return
 
+    video_timestamp = None
+    video_fps = cap.get(cv2.CAP_PROP_FPS) if source_type == "file" and detector.feature_sampler else None
+
     # 6. Khởi tạo MediaPipe Pose
     mp_pose = mp.solutions.pose
     with mp_pose.Pose(
         static_image_mode=False,
-        model_complexity=1,
+        model_complexity=0 if detector.feature_sampler else 1,
         smooth_landmarks=True,
         min_detection_confidence=0.5,
         min_tracking_confidence=0.5
@@ -160,6 +164,7 @@ def main(source_type="webcam", file_path=None, no_display=False, camera_id=0):
                     notifier.log("Không nhận được khung hình từ webcam.")
                 break
 
+            captured_at = time.monotonic()
             # Tiền xử lý RGB cho MediaPipe Pose
             image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             image_rgb.flags.writeable = False
@@ -168,11 +173,10 @@ def main(source_type="webcam", file_path=None, no_display=False, camera_id=0):
             # Kiểm tra xem có người trong khung hình hay không
             person_present = is_person_present(pose_results.pose_landmarks)
 
-            # Trích xuất 17 khớp & Chuẩn hóa tọa độ không gian (chỉ khi có người)
-            features = extract_and_normalize_features(pose_results.pose_landmarks) if person_present else None
-
-            # Cập nhật bộ đệm và phán đoán qua mô hình TFLite
-            result = detector.update(features, person_present=person_present)
+            if video_fps is not None:
+                video_timestamp = video_frame_timestamp(cap.get(cv2.CAP_PROP_POS_MSEC), video_fps, video_timestamp)
+                captured_at = video_timestamp
+            result = detector.update_pose(pose_results.pose_landmarks, person_present, captured_at)
 
             # Tính FPS (làm mượt bằng trung bình trượt mũ) và in log định kỳ
             now_tick = time.perf_counter()

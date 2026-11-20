@@ -19,6 +19,9 @@ from dataclasses import dataclass
 import numpy as np
 import tflite_runtime.interpreter as tflite
 
+from ml.features import NUM_FEATURES, SPEC, PoseSampler, extract_keypoints
+
+
 @dataclass
 class DetectionResult:
     status_text: str          # Văn bản trạng thái hiển thị
@@ -75,12 +78,23 @@ class FallDetector:
         if not model_path.is_file():
             raise FileNotFoundError(model_path)
         self.model_sha256 = hashlib.sha256(model_path.read_bytes()).hexdigest()
+        self.feature_sampler = None
+        self.last_pose_result = None
         manifest = model_path.with_suffix(".manifest.json")
         if manifest.exists():
             metadata = json.loads(manifest.read_text(encoding="utf-8"))
             if metadata["sha256"] != self.model_sha256:
                 raise ValueError("Fall model SHA-256 does not match manifest")
             self.confidence_threshold = float(metadata["fall_threshold"])
+            schema = metadata.get("feature_schema_version", "legacy")
+            if schema == SPEC.schema_version:
+                if (metadata.get("sample_rate_hz") != SPEC.sample_rate_hz
+                        or metadata.get("window_size") != self.input_timesteps
+                        or self.num_features != NUM_FEATURES):
+                    raise ValueError("Fall model manifest disagrees with pose sampling or tensor dimensions")
+                self.feature_sampler = PoseSampler()
+            elif schema != "legacy":
+                raise ValueError(f"Unsupported fall feature schema: {schema}")
         else:
             logging.getLogger(__name__).warning(
                 "No fall model manifest; using legacy threshold %.3f (sha256=%s)",
@@ -106,6 +120,24 @@ class FallDetector:
                 f"Kích thước đầu vào TFLite {expected_shape} không khớp với cấu hình {target_shape}."
             )
         print(f"[Detector] Đã nạp thành công mô hình TFLite: {self.model_path}")
+
+    def update_pose(self, pose_landmarks, person_present, timestamp):
+        """Select preprocessing by the model manifest; legacy models keep their original path."""
+        if self.feature_sampler is None:
+            from modules.skeleton import extract_and_normalize_features
+            features = extract_and_normalize_features(pose_landmarks) if person_present else None
+            return self.update(features, person_present=person_present)
+
+        keypoints = extract_keypoints(pose_landmarks)
+        for vector in self.feature_sampler.push(timestamp, keypoints):
+            self.last_pose_result = self.update(vector, person_present=bool(vector[2::3].any()))
+        return self.last_pose_result
+
+    def reset_pose_stream(self):
+        if self.feature_sampler is not None:
+            self.feature_sampler = PoseSampler()
+            self.last_pose_result = None
+            self.update(None, person_present=False)
 
     def update(self, current_features, person_present=True):
         """

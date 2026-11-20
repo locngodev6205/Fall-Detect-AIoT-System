@@ -518,7 +518,7 @@ class AnNhaEdgeRuntime:
 
     def _run_opencv_mediapipe_loop(self, cap: Any) -> None:
         from modules.detector import FallDetector
-        from modules.skeleton import NUM_FEATURES, extract_and_normalize_features, is_person_present
+        from modules.skeleton import NUM_FEATURES, is_person_present
         import config as fd_cfg
 
         model_path = fd_cfg.MODEL_PATH
@@ -621,11 +621,12 @@ class AnNhaEdgeRuntime:
 
                     if detector is not None and self.tracker.is_fall_detection_enabled():
                         try:
-                            feats = extract_and_normalize_features(pose_res.pose_landmarks) if present else None
-                            detector.update(feats, person_present=present)
+                            detector.update_pose(pose_res.pose_landmarks, present, self.last_camera_frame)
                         except Exception as exc:
                             self.model_inference_ok = False
                             logger.warning("[Vision] Lỗi FallDetector: %s", exc)
+                    elif detector is not None:
+                        detector.reset_pose_stream()
 
                     # 1. Vẽ khung xương MediaPipe lên khung hình khi phát hiện người
                     if present and pose_res.pose_landmarks and mp_drawing and mp_styles:

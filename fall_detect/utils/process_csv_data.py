@@ -1,3 +1,13 @@
+# Versioned dataset generation is opt-in to protect historical artifacts.
+if __name__ == '__main__':
+    import sys
+    if '--canonical' in sys.argv:
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from ml.dataset import dataset_cli
+        dataset_cli('sequence', 30)
+        raise SystemExit
+
 import os
 import numpy as np
 import pandas as pd
