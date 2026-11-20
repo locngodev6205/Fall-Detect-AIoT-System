@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -10,10 +11,11 @@ from ml.integrity import Source, approve_subset, assign_splits, build_dataset, d
 from ml.training_data import DataLoader
 
 
-def sources(root):
+
+def sources(root, num_subjects=4):
     rows = []
     for label in (0, 1):
-        for index in range(4):
+        for index in range(num_subjects):
             key = f'{label}-{index}'
             video = root / f'{key}.mp4'
             video.write_bytes(key.encode())
@@ -256,3 +258,24 @@ def test_preflight_report_survives_insufficient_groups(tmp_path):
         build_dataset(rows[:2], tmp_path / 'blocked', version='test', seed=42, preflight_report=report)
     assert json.loads(report.read_text())['eligible'] == 2
     assert not (tmp_path / 'blocked').exists()
+
+
+def test_holdout_minimum_counts_subjects_and_replays_from_manifest(tmp_path):
+    with pytest.raises(ValueError, match='Too few groups per label'):
+        build_dataset(sources(tmp_path), tmp_path / 'rejected', version='v2.1', seed=42,
+                      min_holdout_groups=2)
+    fixture = tmp_path / 'larger'
+    fixture.mkdir()
+    root = tmp_path / 'v2.1'
+    rows = [replace(row, source_dataset='pilot') if row.subject_id == 'p-0' else row
+            for row in sources(fixture, num_subjects=6)]
+    manifest = build_dataset(rows, root, version='v2.1', seed=42,
+                             min_holdout_groups=2, train_only_sources=('pilot',))
+    assert {row['split'] for row in manifest['sources'] if row['source_dataset'] == 'pilot'} == {'train'}
+    assert manifest['train_only_sources'] == ['pilot']
+    assert manifest['min_holdout_groups'] == 2
+    for split in ('val', 'test'):
+        for label in (0, 1):
+            assert len({row['subject_id'] for row in manifest['sources']
+                        if row['split'] == split and row['label'] == label}) >= 2
+    assert verify_dataset(root)['dataset_sha256'] == manifest['dataset_sha256']

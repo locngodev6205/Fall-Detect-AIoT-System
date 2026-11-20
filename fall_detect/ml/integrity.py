@@ -127,7 +127,9 @@ def _group_records(records):
         item['group_id'] = root(item['video_id'])
 
 
-def _split_records(records, seed, context=()):
+def _split_records(records, seed, context=(), *, min_holdout_groups=1, train_only_sources=()):
+    if type(min_holdout_groups) is not int or min_holdout_groups < 1:
+        raise ValueError('Minimum holdout groups must be a positive integer')
     _group_records([*records, *context])
     groups = {}
     for item in records:
@@ -135,9 +137,18 @@ def _split_records(records, seed, context=()):
         if not item['duplicate_of']:
             counts[item['label']] += 1
     keys = sorted(groups)
+    train_only = {item['group_id'] for item in [*records, *context]
+                  if item['source_dataset'] in train_only_sources}
+    pinned = [index for index, key in enumerate(keys) if key in train_only]
     counts = np.array([groups[key] for key in keys])
     if len(keys) < 3 or (np.count_nonzero(counts, axis=0) < 3).any():
         raise ValueError('Each label needs at least three independent groups to cover train, val and test')
+    minimum = np.array([1, min_holdout_groups, min_holdout_groups])[:, None]
+    class_groups = counts > 0
+    holdout_groups = class_groups.sum(axis=0) - class_groups[pinned].sum(axis=0)
+    if ((class_groups.sum(axis=0) < minimum.sum()).any()
+            or (holdout_groups < 2 * min_holdout_groups).any()):
+        raise ValueError('Too few groups per label for the requested holdout minimum')
     rng = random.Random(seed)
     total = counts.sum(axis=0)
     target = np.asarray(RATIOS)[:, None] * total
@@ -145,10 +156,17 @@ def _split_records(records, seed, context=()):
     total_groups = len(keys)
     for _ in range(4096):
         assignments = rng.choices(range(3), weights=RATIOS, k=total_groups)
+        for index in pinned:
+            assignments[index] = 0
         observed = np.zeros((3, 2), dtype=np.int64)
         np.add.at(observed, assignments, counts)
         if not observed.all():
             continue
+        if min_holdout_groups > 1:
+            observed_groups = np.zeros((3, 2), dtype=np.int64)
+            np.add.at(observed_groups, assignments, class_groups)
+            if (observed_groups < minimum).any():
+                continue
         score = float((((observed - target) / total) ** 2).sum())
         candidate = (score, tuple(assignments))
         if best is None or candidate < best:
@@ -309,7 +327,8 @@ def preflight_sources(sources, *, mode='official', stride=3):
     return eligible, rejected, context
 
 
-def build_dataset(sources, output, *, version, seed, stride=3, mode='official', preflight_report=None):
+def build_dataset(sources, output, *, version, seed, stride=3, mode='official', preflight_report=None,
+                  min_holdout_groups=1, train_only_sources=()):
     output = Path(output)
     if output.exists() or output.is_symlink():
         raise FileExistsError(output)
@@ -323,7 +342,9 @@ def build_dataset(sources, output, *, version, seed, stride=3, mode='official', 
     if not eligible:
         detail = '; '.join(dict.fromkeys(r['detail'] for r in rejected))
         raise ValueError(f'No eligible sources after preflight: {detail}')
-    plan = _split_records(eligible, seed, context)
+    train_only_sources = sorted(set(train_only_sources))
+    plan = _split_records(eligible, seed, context, min_holdout_groups=min_holdout_groups,
+                          train_only_sources=train_only_sources)
     output.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(prefix='.annha-dataset-', dir=output.parent) as directory:
         root = Path(directory) / 'dataset'
@@ -357,6 +378,10 @@ def build_dataset(sources, output, *, version, seed, stride=3, mode='official', 
                     'g3_status': 'REVIEW_REQUIRED' if mode == 'official' else 'BLOCKED_RESEARCH_ONLY',
                     'fall_window_rule': FALL_WINDOW_RULE, 'preflight': preflight, 'group_context': context,
                     'test_lock': sorted({r['group_id'] for r in plan.values() if r['split'] == 'test'}) if mode == 'official' else []}
+        if min_holdout_groups != 1:
+            manifest['min_holdout_groups'] = min_holdout_groups
+        if train_only_sources:
+            manifest['train_only_sources'] = train_only_sources
         manifest['dataset_sha256'] = _manifest_digest(manifest)
         (root / 'manifest.json').write_text(json.dumps(manifest, indent=2, allow_nan=False), encoding='utf-8')
         verify_dataset(root)
@@ -422,7 +447,9 @@ def verify_dataset(root, *, verify_sources=False):
         if mode == 'official' and _provenance_errors(row):
             raise ValueError('Unverified provenance in grouping context')
     replay = _split_records([dict(row) for row in sorted(sources.values(), key=lambda x: x['video_id'])],
-                            manifest['seed'], context)
+                            manifest['seed'], context,
+                            min_holdout_groups=manifest.get('min_holdout_groups', 1),
+                            train_only_sources=manifest.get('train_only_sources', ()))
     if any(any(replay[key][field] != row[field] for field in ('split', 'group_id', 'duplicate_of'))
            for key, row in sources.items()):
         raise ValueError('Stored split does not reproduce from seed and video groups')

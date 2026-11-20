@@ -103,6 +103,10 @@ def main():
     build.add_argument('--stride', type=int, default=3)
     build.add_argument('--mode', choices=('official', 'research'), default='official')
     build.add_argument('--preflight-report', type=Path)
+    build.add_argument('--min-holdout-groups', type=int, default=1,
+                       help='Minimum independent groups per class in each of Validation and Test')
+    build.add_argument('--train-only-source', action='append', default=[],
+                       help='Keep this source dataset and linked groups in Train')
     preflight = commands.add_parser('preflight')
     preflight.add_argument('sources', type=Path)
     preflight.add_argument('--mode', choices=('official', 'research'), default='official')
@@ -130,7 +134,9 @@ def main():
             if options.command == 'build':
                 manifest = build_dataset(read_sources(options.sources), options.destination, version=options.version,
                                          seed=options.seed, stride=options.stride, mode=options.mode,
-                                         preflight_report=options.preflight_report)
+                                         preflight_report=options.preflight_report,
+                                         min_holdout_groups=options.min_holdout_groups,
+                                         train_only_sources=options.train_only_source)
             else:
                 manifest = verify_dataset(options.dataset, verify_sources=options.verify_sources)
             groups = Counter((item['split'], item['label']) for item in manifest['sources'] if not item['duplicate_of'])
