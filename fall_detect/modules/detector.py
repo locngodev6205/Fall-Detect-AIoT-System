@@ -8,12 +8,16 @@ Mô tả:
   thuật toán phát hiện té ngã và cơ chế giám sát nằm bất động kéo dài.
 """
 
+import hashlib
+import json
+import logging
+import math
+from pathlib import Path
 import time
 from collections import deque
 from dataclasses import dataclass
 import numpy as np
 import tflite_runtime.interpreter as tflite
-
 
 @dataclass
 class DetectionResult:
@@ -57,7 +61,8 @@ class FallDetector:
         self.sequence_buffer = deque(maxlen=self.input_timesteps)
 
         # Trạng thái thời gian
-        self.last_fall_event_time = 0.0
+        self.last_fall_event_time = None
+        self._last_callback_error = -math.inf
         self.prev_features = None
         self.immobility_start_time = None
         self.last_immobility_alert_time = 0.0
@@ -66,11 +71,34 @@ class FallDetector:
         self._init_model()
 
     def _init_model(self):
+        model_path = Path(self.model_path)
+        if not model_path.is_file():
+            raise FileNotFoundError(model_path)
+        self.model_sha256 = hashlib.sha256(model_path.read_bytes()).hexdigest()
+        manifest = model_path.with_suffix(".manifest.json")
+        if manifest.exists():
+            metadata = json.loads(manifest.read_text(encoding="utf-8"))
+            if metadata["sha256"] != self.model_sha256:
+                raise ValueError("Fall model SHA-256 does not match manifest")
+            self.confidence_threshold = float(metadata["fall_threshold"])
+        else:
+            logging.getLogger(__name__).warning(
+                "No fall model manifest; using legacy threshold %.3f (sha256=%s)",
+                self.confidence_threshold, self.model_sha256,
+            )
+        if not 0 < self.confidence_threshold <= 1:
+            raise ValueError("Fall threshold must be in (0, 1]")
         self.interpreter = tflite.Interpreter(model_path=self.model_path)
         self.interpreter.allocate_tensors()
         self.input_details = self.interpreter.get_input_details()
         self.output_details = self.interpreter.get_output_details()
 
+        if len(self.input_details) != 1 or len(self.output_details) != 1:
+            raise ValueError('Fall model requires one input and one output')
+        if any(tensor['dtype'] != np.float32 for tensor in (self.input_details[0], self.output_details[0])):
+            raise ValueError('Fall model requires float32 input and output')
+        if tuple(self.output_details[0]['shape']) != (1, 1):
+            raise ValueError('Fall output must have shape (1, 1)')
         expected_shape = tuple(self.input_details[0]['shape'])
         target_shape = (1, self.input_timesteps, self.num_features)
         if expected_shape != target_shape:
@@ -152,6 +180,8 @@ class FallDetector:
                 self.interpreter.invoke()
                 output_tensor = self.interpreter.get_tensor(self.output_details[0]['index'])
                 raw_fall_prob = float(output_tensor[0][0])
+                if not 0.0 <= raw_fall_prob <= 1.0:
+                    raise ValueError("Invalid model probability")
 
                 if raw_fall_prob >= self.confidence_threshold:
                     label = "fall"
@@ -164,23 +194,25 @@ class FallDetector:
 
                 status_text = f"{label.upper()} (Conf: {confidence:.2f})"
 
-                # 4. Kích hoạt cảnh báo té ngã nếu vượt ngưỡng và hết thời gian cooldown
-                if is_fall:
-                    now = time.time()
-                    if (now - self.last_fall_event_time) > self.event_cooldown:
-                        confidence_pct_str = f"{raw_fall_prob * 100:.2f}%"
-                        if self.on_fall_alert:
-                            self.on_fall_alert(raw_fall_prob, confidence_pct_str)
-                        self.last_fall_event_time = now
+            except Exception as error:
+                status_text = f"Prediction Error: {type(error).__name__}"
+                raw_fall_prob = 0.0
 
-            except Exception as e:
-                status_text = f"Prediction Error: {e}"
+        # Delivery has its own failure boundary and must not alter the prediction.
+        now = time.monotonic()
+        last = self.last_fall_event_time
+        if is_fall and (last is None or now - last >= self.event_cooldown):
+            self.last_fall_event_time = now
+            if self.on_fall_alert:
+                try:
+                    self.on_fall_alert(raw_fall_prob, f"{raw_fall_prob * 100:.2f}%")
+                except Exception:
+                    if now - self._last_callback_error >= 30:
+                        self._last_callback_error = now
+                        logging.getLogger(__name__).error("Fall notification callback failed", exc_info=True)
 
-        # Kiểm tra xem có đang trong thời gian kích hoạt banner cảnh báo không
-        is_alert_active = (
-            self.last_fall_event_time != 0.0 and
-            (time.time() - self.last_fall_event_time < self.event_cooldown)
-        )
+        last = self.last_fall_event_time
+        is_alert_active = last is not None and now - last < self.event_cooldown
 
         return DetectionResult(
             status_text=status_text,
