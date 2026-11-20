@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import unittest
@@ -84,6 +85,8 @@ class Group4AudioAndSchedulerTests(unittest.TestCase):
             cache_dir = Path(tmp) / "edge_cache"
             bt = BluetoothSpeakerManager(force_mock=True)
             player = AudioPlayer(bt, cache_dir=cache_dir / "audio")
+            tts_fixture = shutil.copyfile(player.chime_path, player.cache_dir / "voice.wav")
+            player.synthesize_tts_wav = lambda text: Path(tts_fixture)
             reported: list[tuple[str, str, str, str]] = []
 
             scheduler = ReminderScheduler(

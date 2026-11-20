@@ -694,6 +694,30 @@ class PostgresTests(unittest.TestCase):
         self.assertEqual(outsider.get(f"/api/assets/{asset['id']}").status_code,404)
         self.assertEqual(owner.post(f"/api/cameras/{camera['id']}/assets",content=b'<script>bad</script>',headers={'Content-Type':'audio/wav'}).status_code,415)
 
+    def test_delayed_execution_uses_original_schedule_revision(self):
+        owner, _ = self.account('execution-revision@example.com')
+        home, _, camera, provision = self.home_camera(owner)
+        device = self.device(provision)
+        config = dict(camera_id=camera['id'], name='Lời nhắc', time='07:00',
+                      once_date='2026-11-20', timezone='Asia/Ho_Chi_Minh', text='Nhớ ăn sáng')
+        created = owner.post(f"/api/homes/{home['id']}/reminders", json=config)
+        self.assertEqual(created.status_code, 201, created.text)
+        reminder = created.json()
+        updated = owner.put(f"/api/reminders/{reminder['id']}", json={**config, 'time': '08:00'})
+        self.assertEqual(updated.status_code, 200, updated.text)
+        occurrence = dict(reminder_id=reminder['id'], occurrence='2026-11-20T07:00:v1', status='played')
+        for _ in range(2):
+            response = device.post('/api/device/executions', json=occurrence)
+            self.assertEqual(response.status_code, 200, response.text)
+        with db.connect('worker', home['id'], camera=camera['id']) as conn:
+            rows = conn.execute(
+                "SELECT reminder_version, scheduled_at FROM annha.reminder_executions WHERE reminder_id=%s",
+                (reminder['id'],),
+            ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['reminder_version'], 1)
+        self.assertEqual(rows[0]['scheduled_at'].timestamp(), 1795132800)
+
     def test_tts_worker_finishes_asset_separately_and_quota_failure_is_retryable(self):
         from types import SimpleNamespace
         from unittest.mock import Mock,patch
@@ -941,12 +965,15 @@ class PostgresTests(unittest.TestCase):
                 sender.send_bytes(frame)
                 self.assertEqual(viewer.receive_bytes(),frame)
         with self.client.websocket_connect('/ws/device/audio',headers=headers) as speaker:
-            with owner.websocket_connect(f"/ws/audio/{camera['id']}") as microphone:
+            with self.client.websocket_connect(f"/ws/audio/{camera['id']}", headers={"Cookie": "; ".join(f"{key}={value}" for key, value in owner.cookies.items())}) as microphone:
                 microphone.send_json({'mime':'audio/webm'})
-                self.assertEqual(speaker.receive_json()['type'],'start')
+                start=speaker.receive_json()
+                self.assertEqual(start['type'],'start')
+                speaker.send_json({'type':'ready','session':start['session']})
                 self.assertEqual(microphone.receive_json()['type'],'ready')
                 microphone.send_bytes(b'stream-chunk')
                 self.assertEqual(speaker.receive_bytes(),b'stream-chunk')
+                speaker.send_json({'type':'received','session':start['session']})
                 microphone.send_json({'type':'stop'})
                 self.assertEqual(speaker.receive_json()['type'],'stop')
 

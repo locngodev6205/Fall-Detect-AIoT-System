@@ -317,12 +317,15 @@ class BusinessTests(unittest.TestCase):
                 sender.send_bytes(frame)
                 self.assertEqual(viewer.receive_bytes(),frame)
         with self.client.websocket_connect('/ws/device/audio',headers=headers) as speaker:
-            with owner.websocket_connect(f"/ws/audio/{camera['id']}") as microphone:
+            with self.client.websocket_connect(f"/ws/audio/{camera['id']}", headers={"Cookie": "; ".join(f"{key}={value}" for key, value in owner.cookies.items())}) as microphone:
                 microphone.send_json({'mime':'audio/webm'})
-                self.assertEqual(speaker.receive_json()['type'],'start')
+                start=speaker.receive_json()
+                self.assertEqual(start['type'],'start')
+                speaker.send_json({'type':'ready','session':start['session']})
                 self.assertEqual(microphone.receive_json()['type'],'ready')
                 microphone.send_bytes(b'stream-chunk')
                 self.assertEqual(speaker.receive_bytes(),b'stream-chunk')
+                speaker.send_json({'type':'received','session':start['session']})
                 microphone.send_json({'type':'stop'})
                 self.assertEqual(speaker.receive_json()['type'],'stop')
 
