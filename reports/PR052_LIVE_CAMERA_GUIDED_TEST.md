@@ -48,3 +48,7 @@ MediaPipe p50/p95/p99 91,12/100,10/181,63 ms. GRU 5,95/14,87/17,48 ms. CPU tươ
 ## Trạng thái xác minh
 
 Đã đo đủ năm lượt theo yêu cầu. Người tham gia xác nhận lượt đứng yên và ngồi/đứng. Các lượt đi bộ, cúi nhặt đồ và ra/vào khung còn thiếu xác nhận hành động sau đo. Năm cảnh báo ở lượt cúi nhặt đồ giữ trạng thái chờ phân loại. Không tính Recall từ các lượt ADL này. Preview chỉ hiển thị tại desktop VNC của Pi, tự đóng cuối lượt và không lưu hình ảnh.
+
+## Xác minh bổ sung từ PR-05.3
+
+Chủ dự án xác nhận toàn bộ trial cúi nhặt đồ là No Fall. Cả năm cảnh báo giả lập được phân loại FP trong cùng một trial. Các mốc cảnh báo và trạng thái ghi nhận ban đầu ở trên được giữ để đối chiếu. Xem [PR053_CONFIRMED_INCIDENT.md](PR053_CONFIRMED_INCIDENT.md).

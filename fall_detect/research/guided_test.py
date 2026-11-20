@@ -2,13 +2,14 @@
 import argparse
 import json
 import subprocess
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import time
 from pathlib import Path
 
 import numpy as np
 
 from .benchmark import benchmark
+from .diagnostics import Trace
 from .streaming import load_model
 
 SCENARIOS = ('standing', 'walking', 'sit-stand', 'pick-up', 'leave-reenter')
@@ -100,6 +101,8 @@ def main():
     trial = commands.add_parser('start')
     trial.add_argument('--scenario', choices=SCENARIOS, required=True)
     trial.add_argument('--seconds', type=int, choices=range(30, 61), default=30, metavar='30–60')
+    trial.add_argument('--trace', type=Path)
+    trial.add_argument('--consent-pose-trace', action='store_true')
     trial.add_argument('--preview', action='store_true')
     trial.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
@@ -111,8 +114,11 @@ def main():
         if not outcome['ready']:
             raise SystemExit(2)
         return
-    with args.output.open('x') as target, vnc_preview(args.preview) as preview:
-        result = benchmark(args.camera, model, 0, live=True, limit=args.seconds, preview=preview)
+    if args.consent_pose_trace and not args.trace:
+        parser.error('--consent-pose-trace requires --trace')
+    context = Trace(args.trace, scenario=args.scenario, include_pose=args.consent_pose_trace) if args.trace else nullcontext()
+    with args.output.open('x') as target, vnc_preview(args.preview) as preview, context as trace:
+        result = benchmark(args.camera, model, 0, live=True, limit=args.seconds, preview=preview, trace=trace)
         json.dump(dict(scenario=args.scenario, ground_truth='awaiting_operator_confirmation',
                        **result), target, indent=2, allow_nan=False)
 

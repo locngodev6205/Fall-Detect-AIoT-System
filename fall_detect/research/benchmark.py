@@ -33,7 +33,7 @@ def device_sample(start, cpu, frames):
                 frames=frames, rss_kib=int(rss) if rss else None, temperature_c=temp)
 
 
-def benchmark(source, model, complexity, *, live=False, limit=None, confirmations=1, preview=None):
+def benchmark(source, model, complexity, *, live=False, limit=None, confirmations=1, preview=None, trace=None):
     import cv2
     import mediapipe as mp
     cv2.setNumThreads(1)
@@ -70,6 +70,8 @@ def benchmark(source, model, complexity, *, live=False, limit=None, confirmation
                     if outage_started is None:
                         interruptions += 1
                         outage_started = arrived
+                        if trace is not None:
+                            trace.reset('camera_disconnect')
                         stream.reset('camera_disconnect')
                         detector.reset()
                     cap.release()
@@ -96,6 +98,8 @@ def benchmark(source, model, complexity, *, live=False, limit=None, confirmation
                     presence_transitions.append(dict(source_time=stamp, pose_valid=present))
                     presence = present
                 results = stream.push(stamp,points)
+                if trace is not None:
+                    trace.frame(stream, stamp, points, present, arrived-begin, results)
                 preprocessing.append(stream.preprocess_ms)
                 windows += len(results)
                 for row in results:
