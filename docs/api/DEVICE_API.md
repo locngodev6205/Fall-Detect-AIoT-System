@@ -118,9 +118,10 @@ Cùng message_id chỉ được lưu/đánh giá một lần. Backend áp dụng
 
 Lịch nằm trong config và gồm múi giờ, giờ, weekdays (0 = thứ Hai, 6 = Chủ nhật), once_date, enabled, asset_id, volume, version và late_seconds.
 
-- Scheduler tại thiết bị phải có đồng hồ hợp lệ, lưu config/file và định danh lần phát qua restart.
+- Giây 0–59 tính từ giờ hẹn thuộc phút kích hoạt. `late_seconds=0` chỉ cho phép phát trong phút này. Nếu đặt giới hạn lớn hơn, số giây được tính từ đầu phút hẹn, kể cả qua nửa đêm.
+- Scheduler tại thiết bị phải có đồng hồ hợp lệ, lưu config/file và định danh lần phát qua restart. ACK cấu hình thành công có thể mang cảnh báo nếu thiết bị còn thiếu asset.
 - Ưu tiên cảnh báo tại chỗ hơn phát theo yêu cầu/lịch. Không trộn nguồn cùng lúc, không phát dồn lịch lỡ.
-- Sau thực thi, `POST /api/device/executions` với `reminder_id`, `occurrence` (ví dụ mã lịch + version + thời điểm dự kiến), `status` played/failed/skipped và detail. Cùng occurrence không ghi lặp.
+- Sau thực thi, `POST /api/device/executions` với `reminder_id`, `occurrence` (ví dụ `2026-11-20T07:00:v1` với ID lịch trong trường riêng), `status` played/failed/skipped và detail. Cùng occurrence không ghi lặp.
 - Không báo played khi chỉ tải file hoặc nhận lịch; không suy ra người dùng đã uống thuốc.
 
 Lệnh thủ công: `GET /api/device/commands`. Trả những lệnh pending/accepted chưa hết hạn, gồm ID, kind, payload, expires. Xử lý theo ID và lưu chống lặp tại thiết bị.
