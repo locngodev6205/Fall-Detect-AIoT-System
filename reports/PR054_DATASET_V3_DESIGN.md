@@ -1,0 +1,7 @@
+# PR-05.4 · Thiết kế Hard Negative V3
+
+V3 là bản bổ sung riêng. Manifest version 3 gắn schema annha-pose-v2, metadata ghi hình, consent và hash trace. Trace lưu timestamp gốc, checkpoint/schema, pose 17×3, window, score và thống kê sự kiện. Validator tính thời lượng, cadence thực tế, thiếu pose và số cửa sổ chấm. Ghi kích thước ảnh, version extractor, camera setup, chiều cao/góc nếu đo được. Nhãn xác minh lưu trong sidecar gắn checksum và giữ manifest lúc thu. UNVERIFIED là trạng thái bắt đầu, NO_FALL và EXCLUDED cần quyết định của người xác minh. FALL tiếp tục lấy từ nguồn đã xác minh provenance qua V2.1, collector hard negative không nhận FALL tự gán.
+
+Thu nhiều người, phòng, chiều cao và khoảng cách camera, góc chính diện và góc nghiêng, ánh sáng và hướng thân khác nhau. Cần đa dạng cúi nhẹ, cúi sâu, giữ tư thế, nhặt vật, ngồi/đứng, đi bộ, quay người, nằm chủ động an toàn và ra/vào khung. Ghi hoạt động vật lý và mã setup trước khi chia nhóm. Không dùng clip PR-05.2 làm holdout.
+
+Khóa split theo subject, session, source và camera setup từ lúc chuẩn bị thu. Các clip cùng người/sự kiện hoặc ảnh nguyên liệu chung phải cùng tập. Validator chặn ID, checksum và pose content trùng. Content hash bắt bản sao pose chính xác kể cả đổi timestamp, chưa kiểm định near-duplicate khi cắt hoặc mã hóa lại. Người phụ trách xác minh danh tính nhóm theo hồ sơ bí danh và đối chiếu cắt clip trước khi nhận. Chưa có cohort V3 đã xác minh.
