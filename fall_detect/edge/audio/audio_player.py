@@ -31,6 +31,7 @@ from typing import Any, Callable
 import wave
 
 from .bluetooth_manager import BluetoothSpeakerManager, get_audio_env
+from .live_input import FORMATS, LiveInput
 
 logger = logging.getLogger(__name__)
 
@@ -123,16 +124,28 @@ class AudioPlayer:
         self._has_espeak = shutil.which("espeak-ng") or shutil.which("espeak")
 
         self._lock = threading.Lock()
+        self._closed = False
+        self._live_input: LiveInput | None = None
+        self._interrupted = set()
         self._current_proc: subprocess.Popen[bytes] | None = None
         self._current_priority: int = 0  # 0: idle, 1: normal/reminder, 2: emergency
         self._current_is_gas: bool = False
         self._silenced_until: float = 0.0
         self._last_siren_ts: dict[str, float] = {}
+        self._pending_voice = 0
         self.history: deque[dict[str, Any]] = deque(maxlen=100)
+
+    def is_busy(self) -> bool:
+        """Report playback until the child process has actually finished."""
+        with self._lock:
+            return self._live_input is not None or self._pending_voice > 0 or bool(self._current_proc is not None and self._current_proc.poll() is None)
 
     def stop(self) -> None:
         """Dừng và thu hồi tiến trình âm thanh đang chạy khi tắt Edge Runtime."""
         with self._lock:
+            self._closed = True
+            if self._live_input is not None:
+                self._live_input.interrupt()
             proc = self._current_proc
             self._current_proc = None
             self._current_priority = 0
@@ -146,6 +159,8 @@ class AudioPlayer:
         """
         proc_to_stop: subprocess.Popen[bytes] | None = None
         with self._lock:
+            if self._live_input is not None:
+                self._live_input.interrupt()
             self._silenced_until = time.monotonic() + max(1.0, float(duration_s))
             if (
                 self._current_proc is not None
@@ -153,6 +168,7 @@ class AudioPlayer:
                 and not self._current_is_gas
             ):
                 proc_to_stop = self._current_proc
+                self._interrupted.add(proc_to_stop)
                 self._current_proc = None
                 self._current_priority = 0
         _terminate_and_reap(proc_to_stop)
@@ -171,65 +187,58 @@ class AudioPlayer:
             return out_path
 
         if self._has_espeak and clean:
+            with tempfile.NamedTemporaryFile(dir=self.cache_dir, suffix=".wav", delete=False) as stream:
+                temp_path = Path(stream.name)
             try:
                 subprocess.run(
-                    [self._has_espeak, "-v", "vi", "-s", "145", "-w", str(out_path), "--stdin"],
-                    input=clean.encode("utf-8"),
-                    check=True,
-                    capture_output=True,
-                    timeout=6.0,
+                    [self._has_espeak, "-v", "vi", "-s", "145", "-w", str(temp_path), "--stdin"],
+                    input=clean.encode("utf-8"), check=True, capture_output=True, timeout=6.0,
                 )
-                if out_path.exists() and out_path.stat().st_size > 500:
-                    return out_path
-            except Exception as exc:
-                logger.debug("[AudioPlayer] Lỗi gọi espeak-ng TTS: %s", exc)
+                with wave.open(str(temp_path), "rb") as wav:
+                    if wav.getnframes() == 0:
+                        return self.chime_path
+                temp_path.replace(out_path)
+                return out_path
+            except (OSError, EOFError, wave.Error, subprocess.SubprocessError) as exc:
+                logger.warning("[AudioPlayer] Lỗi gọi eSpeak TTS: %s", type(exc).__name__)
+            finally:
+                temp_path.unlink(missing_ok=True)
 
         return self.chime_path
 
-    def _spawn_bluetooth_player(
-        self,
-        file_path: Path,
-        sink: str | None,
-        backend: str,
-    ) -> tuple[subprocess.Popen[bytes], Path | None] | None:
-        """Prepare speech as PCM with headroom, then target the Bluetooth sink."""
-        if not sink:
+    def _prepare_file(self, file_path: Path) -> Path | None:
+        if file_path in (self.chime_path, self.siren_path):
+            return file_path
+        if not self._has_ffmpeg:
             return None
+        with tempfile.NamedTemporaryFile(dir=self.cache_dir, suffix=".wav", delete=False) as temp:
+            converted = Path(temp.name)
+        try:
+            subprocess.run(
+                ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(file_path),
+                 "-vn", "-ar", "48000", "-ac", "2",
+                 "-af", "volume=-6dB,adelay=250:all=1,apad=pad_dur=0.6",
+                 "-c:a", "pcm_s16le", str(converted)],
+                check=True, capture_output=True, timeout=10,
+            )
+            return converted
+        except (OSError, subprocess.SubprocessError) as error:
+            converted.unlink(missing_ok=True)
+            logger.warning("[AudioPlayer] Lỗi giải mã: %s", type(error).__name__)
+            return None
+
+    def _spawn_bluetooth_player(self, file_path: Path, sink: str, backend: str):
         if backend == "wpctl" and self._has_pw_play:
-            command = ["pw-play", "--target", str(sink), "--latency", "200ms"]
+            command = ["pw-play", "--target", str(sink), "--latency", "200ms",
+                       "--properties", '{"node.dont-fallback":true,"node.dont-reconnect":true}']
         elif backend == "pactl" and self._has_paplay:
             command = ["paplay", f"--device={sink}"]
         else:
-            return None
-
-        converted = None
-        try:
-            if file_path not in (self.chime_path, self.siren_path):
-                if not self._has_ffmpeg:
-                    logger.warning("[AudioPlayer] Thiếu ffmpeg để chuẩn hóa file giọng nói.")
-                    return None
-                with tempfile.NamedTemporaryFile(dir=self.cache_dir, suffix=".wav", delete=False) as temp:
-                    converted = Path(temp.name)
-                subprocess.run(
-                    ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(file_path),
-                     "-vn", "-ar", "48000", "-ac", "2",
-                     # Keep the Bluetooth stream alive past the last spoken sample.
-                     "-af", "volume=-6dB,adelay=250:all=1,apad=pad_dur=0.6",
-                     "-c:a", "pcm_s16le", str(converted)],
-                    check=True, capture_output=True, timeout=10,
-                )
-            proc = subprocess.Popen(
-                [*command, str(converted or file_path)],
-                env=get_audio_env(),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return proc, converted
-        except (OSError, subprocess.SubprocessError) as error:
-            if converted is not None:
-                converted.unlink(missing_ok=True)
-            logger.warning("[AudioPlayer] Không mở được âm thanh Bluetooth: %s", type(error).__name__)
-            return None
+            raise OSError("Thiếu trình phát cho Bluetooth sink.")
+        return subprocess.Popen(
+            [*command, str(file_path)], env=get_audio_env(),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
 
     def _watch_and_reap(
         self,
@@ -238,13 +247,20 @@ class AudioPlayer:
         label: str,
     ) -> None:
         try:
-            status = proc.wait()
+            try:
+                status = proc.wait(timeout=180)
+            except subprocess.TimeoutExpired:
+                _terminate_and_reap(proc)
+                raise
             if status == 0:
                 logger.info("[AudioPlayer] Đã phát xong %r qua Bluetooth.", label)
             else:
                 logger.warning("[AudioPlayer] Trình phát %r dừng với mã %d.", label, status)
+        except subprocess.TimeoutExpired:
+            logger.warning("[AudioPlayer] Phát %r quá thời gian.", label)
         finally:
             with self._lock:
+                self._interrupted.discard(proc)
                 if self._current_proc is proc:
                     self._current_proc = None
                     self._current_priority = 0
@@ -264,103 +280,112 @@ class AudioPlayer:
         is_gas: bool = False,
         cleanup_after_play: bool = False,
         wait_for_completion: bool = False,
+        start_guard: Callable[[], bool] | None = None,
     ) -> tuple[bool, str]:
         """Phát file âm thanh qua Loa Bluetooth chuyên dụng."""
         path = Path(file_path)
         if not path.exists():
             return False, f"Không tìm thấy file âm thanh: {path.name}"
 
-        if not bypass_silence and not is_gas and self.is_silenced():
-            if cleanup_after_play:
-                path.unlink(missing_ok=True)
-            return False, "Thiết bị đang trong thời gian tạm tắt âm (silence)."
+        converted = None
+        proc = None
+        original_to_remove = path if cleanup_after_play else None
+        try:
+            if not self.bt.is_speaker_ready():
+                return False, "Loa Bluetooth chưa kết nối."
+            if not self.bt.mock_mode:
+                prepared = self._prepare_file(path)
+                if prepared is None:
+                    return False, "Không thể giải mã file âm thanh."
+                converted = prepared if prepared != path else None
+            with self._lock:
+                if self._closed:
+                    return False, "Phát đã bị hủy vì thiết bị đang tắt."
+                if start_guard is not None and not start_guard():
+                    return False, "Phát đã bị hủy vì lịch đã thay đổi hoặc quá hạn."
+                if not bypass_silence and not is_gas and time.monotonic() < self._silenced_until:
+                    return False, "Thiết bị đang trong thời gian tạm tắt âm (silence)."
+                current = self._current_proc
+                if current is not None and current.poll() is None:
+                    if (self._current_is_gas and not is_gas) or priority < self._current_priority or priority == self._current_priority < 2:
+                        return False, "Loa đang bận phát âm thanh."
+                    self._interrupted.add(current)
+                    _terminate_and_reap(current)
+                if self._live_input is not None:
+                    if priority < 2:
+                        return False, "Loa đang phát đàm thoại."
+                    self._live_input.interrupt()
+                self.bt.apply_volume(volume, refresh=False)
+                status = self.bt.get_status()
+                sink = status["sink"]
+                if not sink:
+                    return False, "Loa Bluetooth đã ngắt kết nối."
+                if not status["mock_mode"]:
+                    proc = self._spawn_bluetooth_player(converted or path, sink, status["backend"])
+                    self._current_proc = proc
+                    self._current_priority = priority
+                    self._current_is_gas = is_gas
+                self.history.append(dict(type="play", label=label, file=path.name, volume=volume,
+                                         priority=priority, is_gas=is_gas, mock=status["mock_mode"],
+                                         ts=time.time()))
 
-        if not self.bt.is_speaker_ready():
-            if cleanup_after_play:
-                path.unlink(missing_ok=True)
-            msg = (
-                "CẢNH BÁO: Loa Bluetooth chưa kết nối! "
-                "Đã chặn phát âm thanh (tuyệt đối không phát qua cổng 3.5mm/HDMI)."
-            )
-            logger.warning("[AudioPlayer] %s", msg)
-            return False, msg
+            if proc is None:
+                return True, "Đã phát qua loa Bluetooth mô phỏng."
+            paths = (original_to_remove, converted)
+            if not wait_for_completion:
+                threading.Thread(target=self._watch_and_reap, args=(proc, paths, label),
+                                 name="audio-proc-reaper", daemon=True).start()
+                return True, f"Đã khởi chạy trình phát '{label}'."
+            try:
+                exit_code = proc.wait(timeout=180)
+                with self._lock:
+                    interrupted = proc in self._interrupted or self._closed
+                if interrupted:
+                    return False, f"Phát '{label}' đã bị ngắt."
+                if exit_code:
+                    return False, f"Trình phát '{label}' lỗi (mã {exit_code})."
+                status = self.bt.get_status()
+                if not status["ready"] or status["sink"] != sink:
+                    return False, f"Loa Bluetooth đã đổi hoặc ngắt khi phát '{label}'."
+                return True, f"Trình phát '{label}' đã hoàn thành."
+            except subprocess.TimeoutExpired:
+                _terminate_and_reap(proc)
+                return False, f"Phát '{label}' quá thời gian."
+            finally:
+                with self._lock:
+                    self._interrupted.discard(proc)
+                    if self._current_proc is proc:
+                        self._current_proc = None
+                        self._current_priority = 0
+                        self._current_is_gas = False
+        except OSError as exc:
+            return False, f"Không mở được trình phát Bluetooth: {exc}"
+        finally:
+            if proc is None or wait_for_completion:
+                for temporary in (original_to_remove, converted):
+                    if temporary is not None:
+                        temporary.unlink(missing_ok=True)
 
-        proc_to_preempt: subprocess.Popen[bytes] | None = None
+    def start_live_stream(self, mime: str) -> LiveInput | None:
+        if mime not in FORMATS or not self.bt.is_speaker_ready():
+            return None
         with self._lock:
-            if self._current_proc is not None and self._current_proc.poll() is None:
-                # Không cho phép sự kiện thường hoặc té ngã ngắt ngang còi báo rò rỉ khí Gas!
-                if self._current_is_gas and not is_gas:
-                    if cleanup_after_play:
-                        path.unlink(missing_ok=True)
-                    return False, "Loa đang phát cảnh báo rò rỉ khí gas khẩn cấp."
-                if priority < self._current_priority:
-                    if cleanup_after_play:
-                        path.unlink(missing_ok=True)
-                    return False, "Loa đang bận phát cảnh báo khẩn cấp ưu tiên cao hơn."
-                proc_to_preempt = self._current_proc
-                self._current_proc = None
-                self._current_priority = 0
-                self._current_is_gas = False
+            if (self._closed or self._live_input is not None or self._pending_voice
+                    or time.monotonic() < self._silenced_until
+                    or (self._current_proc is not None and self._current_proc.poll() is None)):
+                return None
+            self.bt.apply_volume(85, refresh=False)
+            status = self.bt.get_status()
+            if not status["sink"]:
+                return None
+            self._live_input = LiveInput(mime, status["sink"], status["backend"])
+            return self._live_input
 
-        _terminate_and_reap(proc_to_preempt)
-
-        self.bt.apply_volume(volume)
-        bt_status = self.bt.get_status()
-
-        if bt_status["mock_mode"]:
-            entry = {
-                "type": "play",
-                "label": label,
-                "file": path.name,
-                "volume": int(volume),
-                "priority": priority,
-                "is_gas": bool(is_gas),
-                "mock": True,
-                "ts": time.time(),
-            }
-            self.history.append(entry)
-            if cleanup_after_play:
-                path.unlink(missing_ok=True)
-            logger.info("[AudioPlayer][MockBT] Đã phát '%s' (%s) ở mức âm lượng %d%%.", label, path.name, volume)
-            return True, f"Đã phát qua Loa Bluetooth (Mock, âm lượng {volume}%)."
-
-        playback = self._spawn_bluetooth_player(path, bt_status["sink"], bt_status["backend"])
-        if playback is None:
-            if cleanup_after_play:
-                path.unlink(missing_ok=True)
-            return False, "Không thể khởi chạy trình phát Bluetooth đích danh (kiểm tra ffmpeg/pw-play/paplay)."
-
-        proc, converted = playback
+    def finish_live_stream(self, stream: LiveInput):
+        stream.close()
         with self._lock:
-            self._current_proc = proc
-            self._current_priority = priority
-            self._current_is_gas = bool(is_gas)
-
-        threading.Thread(
-            target=self._watch_and_reap,
-            args=(proc, (path if cleanup_after_play else None, converted), label),
-            name="audio-proc-reaper",
-            daemon=True,
-        ).start()
-
-        self.history.append(
-            {
-                "type": "play",
-                "label": label,
-                "file": path.name,
-                "volume": int(volume),
-                "priority": priority,
-                "is_gas": bool(is_gas),
-                "mock": False,
-                "ts": time.time(),
-            }
-        )
-        if wait_for_completion:
-            status = proc.wait()
-            if status != 0:
-                return False, f"Phát '{label}' bị ngắt hoặc lỗi (mã {status})."
-            return True, f"Đã phát xong '{label}' qua Loa Bluetooth ({bt_status['sink']}, âm lượng {volume}%)."
-        return True, f"Đang phát '{label}' qua Loa Bluetooth ({bt_status['sink']}, âm lượng {volume}%)."
+            if self._live_input is stream:
+                self._live_input = None
 
     def trigger_emergency_siren(
         self,
@@ -389,7 +414,7 @@ class AudioPlayer:
         ok, detail = self.play_file(
             self.siren_path,
             volume=100,
-            priority=2,
+            priority=3 if is_gas else 2,
             label=label,
             bypass_silence=is_gas,
             is_gas=is_gas,
@@ -397,6 +422,8 @@ class AudioPlayer:
         if ok and reason and not self.bt.mock_mode and self._has_espeak:
             tts_wav = self.synthesize_tts_wav(reason)
             if tts_wav != self.chime_path:
+                with self._lock:
+                    self._pending_voice += 1
                 threading.Thread(
                     target=self._delayed_voice_warning,
                     args=(tts_wav, is_gas),
@@ -405,20 +432,26 @@ class AudioPlayer:
         return ok, detail
 
     def _delayed_voice_warning(self, tts_wav: Path, is_gas: bool) -> None:
-        time.sleep(2.1)
-        self.play_file(
-            tts_wav,
-            volume=100,
-            priority=2,
-            label="emergency_tts",
-            bypass_silence=is_gas,
-            is_gas=is_gas,
-        )
+        try:
+            time.sleep(2.1)
+            self.play_file(
+                tts_wav,
+                volume=100,
+                priority=3 if is_gas else 2,
+                label="emergency_tts",
+                bypass_silence=is_gas,
+                is_gas=is_gas,
+            )
+        finally:
+            with self._lock:
+                self._pending_voice -= 1
 
     def execute_audio_command(
         self,
         command: dict[str, Any],
         asset_resolver: Callable[[str], Path | None] | None = None,
+        *,
+        start_guard: Callable[[], bool] | None = None,
     ) -> tuple[bool, str]:
         """Thực thi các lệnh âm thanh từ Web UI (`test_speaker`, `play_audio`, `silence`)."""
         kind = command.get("kind")
@@ -431,7 +464,10 @@ class AudioPlayer:
             return True, f"Đã tạm ngắt còi báo tại chỗ trong {int(seconds)} giây (trừ cảnh báo rò khí gas)."
 
         if kind == "test_speaker":
-            return self.play_file(self.chime_path, volume=volume, priority=1, label="test_speaker")
+            return self.play_file(
+                self.chime_path, volume=volume, priority=0, label="test_speaker",
+                wait_for_completion=True, start_guard=start_guard,
+            )
 
         if kind == "play_audio":
             asset_id = str(payload.get("asset_id") or "").strip()
@@ -442,30 +478,7 @@ class AudioPlayer:
                 return False, f"Không thể tải file âm thanh '{asset_id}' trên thiết bị."
             return self.play_file(
                 audio_path, volume=volume, priority=1, label=f"asset:{asset_id}",
-                wait_for_completion=True,
+                wait_for_completion=True, start_guard=start_guard,
             )
 
         return False, f"Lệnh âm thanh không hỗ trợ: {kind!r}"
-
-    def play_live_audio_chunk(self, chunk: bytes, mime: str = "audio/webm") -> bool:
-        """Nhận luồng âm thanh đàm thoại trực tiếp (Push-to-Talk) từ `/ws/device/audio`."""
-        if not chunk:
-            return False
-        if not self.bt.is_speaker_ready():
-            logger.warning("[AudioPlayer] Bỏ qua gói Push-to-Talk vì Loa Bluetooth chưa kết nối.")
-            return False
-        if self.bt.mock_mode:
-            self.history.append({"type": "ptt_chunk", "bytes": len(chunk), "mime": mime, "ts": time.time()})
-            return True
-
-        ext = ".ogg" if "ogg" in mime.lower() else ".webm"
-        tmp_file = self.cache_dir / f"ptt_live_{int(time.time() * 1000)}{ext}"
-        tmp_file.write_bytes(chunk)
-        ok, _ = self.play_file(
-            tmp_file,
-            volume=85,
-            priority=1,
-            label="push_to_talk",
-            cleanup_after_play=True,
-        )
-        return ok

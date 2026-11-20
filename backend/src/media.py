@@ -1,8 +1,8 @@
 """Authenticated, bounded JPEG/audio relay. No public camera URL or arbitrary proxy."""
 import asyncio
 from contextlib import suppress
-import json
 import time
+from .audio_relay import AudioRelay
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from . import db
 from .security import COOKIE, camera_access, check_origin, digest, session_user
@@ -90,51 +90,14 @@ async def browser_frames(socket:WebSocket,camera_id:str):
         await close(socket)
 
 
+audio_relay = AudioRelay(authorize, device_identity, close, audio_devices, audio_senders, media_sessions)
+
+
 @router.websocket('/ws/device/audio')
-async def device_audio(socket:WebSocket):
-    try: camera,token=device_identity(socket)
-    except HTTPException: await close(socket);return
-    if camera['id'] in audio_devices: await close(socket);return
-    await socket.accept();audio_devices[camera['id']]=socket
-    try:
-        while True:
-            try: await asyncio.wait_for(socket.receive_text(),timeout=3)
-            except asyncio.TimeoutError: pass
-            device_identity(socket)
-    except (WebSocketDisconnect,RuntimeError,HTTPException): pass
-    finally:
-        if audio_devices.get(camera['id']) is socket: audio_devices.pop(camera['id'],None)
-        sender=audio_senders.pop(camera['id'],None)
-        if sender: await close(sender,1011)
-        await close(socket)
+async def device_audio(socket: WebSocket):
+    await audio_relay.device(socket)
 
 
 @router.websocket('/ws/audio/{camera_id}')
-async def browser_audio(socket:WebSocket,camera_id:str):
-    try: token=authorize(socket,camera_id,'audio')
-    except HTTPException: await close(socket);return
-    peer=audio_devices.get(camera_id)
-    if not peer or camera_id in audio_senders: await close(socket,1013);return
-    await socket.accept();audio_senders[camera_id]=socket;media_sessions[socket]=(token,camera_id,'audio')
-    started=False;total=0;deadline=time.monotonic()+60
-    try:
-        metadata=await asyncio.wait_for(socket.receive_json(),timeout=5)
-        if metadata.get('mime') not in ('audio/webm','audio/ogg'): await close(socket);return
-        await asyncio.wait_for(peer.send_json({'type':'start','mime':metadata['mime']}),timeout=2)
-        started=True
-        await socket.send_json({'type':'ready'})
-        while time.monotonic()<deadline:
-            data=await asyncio.wait_for(socket.receive(),timeout=5)
-            authorize(socket,camera_id,'audio')
-            if data['type']=='websocket.disconnect': break
-            if data.get('text'):
-                if json.loads(data['text']).get('type')=='stop': break
-                continue
-            chunk=data.get('bytes',b'');total+=len(chunk)
-            if len(chunk)>512*1024 or total>16*1024*1024: await close(socket,1009);break
-            await asyncio.wait_for(peer.send_bytes(chunk),timeout=2)
-    except (WebSocketDisconnect,RuntimeError,HTTPException,asyncio.TimeoutError,ValueError): pass
-    finally:
-        if started:
-            with suppress(Exception): await asyncio.wait_for(peer.send_json({'type':'stop'}),timeout=1)
-        audio_senders.pop(camera_id,None);media_sessions.pop(socket,None);await close(socket,1000)
+async def browser_audio(socket: WebSocket, camera_id: str):
+    await audio_relay.browser(socket, camera_id)

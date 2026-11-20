@@ -22,6 +22,7 @@ Cách chạy:
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import Future
 import hashlib
 from datetime import datetime
 import io
@@ -62,6 +63,7 @@ except ImportError:
 
 from edge.audio.audio_player import AudioPlayer  # noqa: E402
 from edge.audio.bluetooth_manager import BluetoothSpeakerManager  # noqa: E402
+from edge.audio.worker import AudioWorker
 from edge.audio.scheduler import ReminderScheduler  # noqa: E402
 from edge.client.device_client import DeviceClient  # noqa: E402
 from edge.client.live_streamer import LiveStreamer  # noqa: E402
@@ -222,6 +224,7 @@ class AnNhaEdgeRuntime:
         )
         self.audio = AudioPlayer(self.bt, cache_dir=self.cache_dir / "audio")
 
+        self.audio_worker = AudioWorker()
         self.client = DeviceClient(
             base_url=self.base_url,
             device_token=self.device_token,
@@ -236,12 +239,15 @@ class AnNhaEdgeRuntime:
             cache_dir=self.cache_dir,
             asset_resolver=self.client.ensure_asset_cached,
             execution_reporter=self.client.report_execution,
+            execution_started=self.client.begin_execution,
+            submit_audio=self.audio_worker.submit,
         )
         self.streamer = LiveStreamer(
             base_url=self.base_url,
             device_token=self.device_token,
             fps_limit=live_fps,
-            on_ptt_audio_file=self._handle_ptt_file,
+            start_ptt=self._start_ptt,
+            finish_ptt=self.audio.finish_live_stream,
         )
 
         self._env_thresholds: dict[str, Any] = {
@@ -264,12 +270,15 @@ class AnNhaEdgeRuntime:
         if isinstance(env, dict):
             self._env_thresholds.update(env)
 
-    def _on_web_command(self, cmd: dict[str, Any]) -> tuple[bool, str]:
+    def _on_web_command(self, cmd: dict[str, Any]) -> tuple[bool, str] | Future:
         kind = str(cmd.get("kind") or "")
         if kind in ("ptz_move", "ptz_center"):
             return self.tracker.execute_ptz_command(cmd)
-        if kind in ("play_audio", "test_speaker", "silence"):
-            return self.audio.execute_audio_command(cmd, asset_resolver=self.client.ensure_asset_cached)
+        if kind in ("play_audio", "test_speaker"):
+            future = self.audio_worker.submit(self._play_audio_command, cmd)
+            return future if future is not None else (False, "Hàng đợi âm thanh đã đầy.")
+        if kind == "silence":
+            return self.audio.execute_audio_command(cmd)
         if kind in ("bt_scan", "bt_connect", "bt_disconnect"):
             return self._execute_bluetooth_command(cmd)
         return False, f"Không hỗ trợ loại lệnh: {kind!r}"
@@ -302,14 +311,21 @@ class AnNhaEdgeRuntime:
             return True, "Đã ngắt kết nối loa Bluetooth"
         return False, f"Lệnh Bluetooth không hợp lệ: {kind!r}"
 
-    def _handle_ptt_file(self, path: Path, _mime: str) -> None:
-        self.audio.play_file(
-            path,
-            volume=85,
-            priority=1,
-            label="push_to_talk",
-            cleanup_after_play=True,
+    def _play_audio_command(self, cmd: dict[str, Any]) -> tuple[bool, str]:
+        expires = float(cmd.get("expires") or 0)
+
+        def can_start():
+            return (not self._stop_event.is_set()
+                    and (not expires or time.time() < expires))
+
+        if not can_start():
+            return False, "Lệnh đã hết hạn."
+        return self.audio.execute_audio_command(
+            cmd, self.client.ensure_asset_cached, start_guard=can_start,
         )
+
+    def _start_ptt(self, mime):
+        return self.audio.start_live_stream(mime)
 
     def _evaluate_local_autonomous_safety(self, readings: dict[str, dict[str, Any]]) -> None:
         """Kiểm tra ngưỡng khí gas độc lập ngay tại biên mỗi 1.5s — hú còi tại chỗ kể cả khi rớt mạng!"""
@@ -686,7 +702,9 @@ class AnNhaEdgeRuntime:
             if t.is_alive():
                 t.join(timeout=2.0)
         self.streamer.stop()
+        self.audio_worker.stop()
         self.audio.stop()
+        self.audio_worker.join()
         self.bridge.detach()
         self.bridge.stop()
         self.bt.stop()

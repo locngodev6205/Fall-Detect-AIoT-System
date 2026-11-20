@@ -946,7 +946,7 @@ def config_ack(payload:m.ConfigAck,current:Device):
         camera=conn.execute('SELECT * FROM cameras WHERE id=?',(current['id'],)).fetchone()
         if not conn.execute('SELECT 1 FROM configurations WHERE camera_id=? AND version=?',(current['id'],payload.version)).fetchone(): raise HTTPException(422,'Không có phiên bản cấu hình này.')
         if payload.version<camera['applied_version']: raise HTTPException(409,'Phản hồi cấu hình cũ.')
-        if payload.success: conn.execute('UPDATE cameras SET applied_version=?,config_error=NULL WHERE id=?',(payload.version,current['id']))
+        if payload.success: conn.execute('UPDATE cameras SET applied_version=?,config_error=? WHERE id=?',(payload.version,payload.error or None,current['id']))
         else: conn.execute('UPDATE cameras SET config_error=? WHERE id=?',(payload.error or 'Thiết bị từ chối cấu hình',current['id']))
     return {'message':'Đã ghi nhận phản hồi.'}
 

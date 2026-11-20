@@ -794,18 +794,19 @@ class BluetoothSpeakerManager:
         sink = self.refresh_sink(attempt_connect=False)
         return sink is not None
 
-    def apply_volume(self, volume: int) -> bool:
+    def apply_volume(self, volume: int, *, refresh: bool = True) -> bool:
         """Đặt âm lượng trực tiếp lên đúng Sink Bluetooth (tuyệt đối không chạm `amixer` 3.5mm/HDMI)."""
         vol = max(0, min(100, int(volume)))
         if self.mock_mode:
             return self.is_speaker_ready()
 
-        sink = self.refresh_sink(attempt_connect=False)
+        if refresh:
+            self.refresh_sink(attempt_connect=False)
+        with self._lock:
+            sink = self._active_sink
+            backend = self._active_backend
         if not sink:
             return False
-
-        with self._lock:
-            backend = self._active_backend
 
         env = get_audio_env()
         try:
