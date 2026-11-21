@@ -10,7 +10,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from . import device_pairing
-from .web_queries import page_result
+from .web_queries import page_result, time_range
 from . import db, models as m, services as svc
 from .security import COOKIE, SESSION_SECONDS, active_rights, camera_access, device, digest, effective_camera_permissions, membership, password_hash, password_matches, public_user, throttle, user, verification_code_digest, reset_code_digest
 
@@ -437,16 +437,51 @@ def scoped_event(conn,event_id,user_id,action='view'):
 
 
 @router.get('/homes/{home_id}/events')
-def events(home_id:str,current:Current,limit:int=100,status:str|None=None):
-    if not 1<=limit<=500: raise HTTPException(422,'Giới hạn phải từ 1 đến 500.')
+def events(home_id:str,current:Current,limit:int=100,status:str|None=None,kind:str|None=None,
+           room_id:str|None=None,camera_id:str|None=None,hours:int|None=None,page:int|None=None,
+           page_size:int=10,start:str|None=None,end:str|None=None,severity:str|None=None,active_only:bool=False):
+    if not 1<=limit<=500 or not 1<=page_size<=50 or (page is not None and page<1):
+        raise HTTPException(422,'Giới hạn/trang không hợp lệ.')
+    if active_only and not camera_id:
+        raise HTTPException(422,'Chọn camera để xem các cảnh báo đang chặn OTA.')
+    if kind and kind not in ('fall','immobility','environment','device'):
+        raise HTTPException(422,'Loại sự kiện không hợp lệ.')
+    if severity and severity not in ('info','warning','critical'):
+        raise HTTPException(422,'Mức cảnh báo không hợp lệ.')
+    start_at,end_at=time_range(start,end,hours)
     with db.connect() as conn:
+        conn.execute('BEGIN')
         visible=visible_event_cameras(conn,home_id,current['id'])
-        if not visible: return []
-        sql='SELECT * FROM events WHERE home_id=? AND camera_id IN ('+','.join('?' for _ in visible)+')'
+        if not visible:
+            return page_result([],0,page,page_size) if page is not None else []
+        placeholders=','.join('?' for _ in visible)
+        clauses=['e.home_id=?',f'e.camera_id IN ({placeholders})']
         params=[home_id,*visible]
-        if status: sql+=' AND status=?';params.append(status)
-        rows=conn.execute(sql+' ORDER BY received_at DESC LIMIT ?',params+[limit]).fetchall()
-        return [svc.event_public(conn,r,current['id']) for r in rows]
+        if active_only:
+            clauses.append("e.status IN ('OPEN','ACKNOWLEDGED')")
+        for column,value in [('e.status',status),('e.kind',kind),('c.room_id',room_id),
+                             ('e.camera_id',camera_id),('e.severity',severity)]:
+            if value:
+                clauses.append(column+'=?')
+                params.append(value)
+        if start_at:
+            clauses.append('julianday(e.observed_at)>=julianday(?)')
+            params.append(start_at.isoformat())
+        if end_at:
+            clauses.append('julianday(e.observed_at)<julianday(?)')
+            params.append(end_at.isoformat())
+        source=(' FROM events e JOIN cameras c ON c.id=e.camera_id AND c.home_id=e.home_id'
+                ' LEFT JOIN rooms r ON r.id=c.room_id AND r.home_id=c.home_id'
+                ' WHERE '+' AND '.join(clauses))
+        total=conn.execute('SELECT count(*)'+source,params).fetchone()[0] if page is not None else 0
+        offset=(page-1)*page_size if page is not None else 0
+        if page is not None and offset>=total:
+            return page_result([],total,page,page_size)
+        rows=conn.execute('SELECT e.*, c.name AS camera_name, r.name AS room_name'+source+
+                          ' ORDER BY e.received_at DESC,e.id DESC LIMIT ? OFFSET ?',
+                          [*params,page_size if page is not None else limit,offset]).fetchall()
+        items=[svc.event_public(conn,row,current['id']) for row in rows]
+    return page_result(items,total,page,page_size) if page is not None else items
 
 
 @router.get('/homes/{home_id}/active-events')

@@ -422,14 +422,18 @@ def put_smart_modes(camera_id:str,payload:m.SmartModes,current:Current):
 
 @router.get('/homes/{home_id}/events')
 def events(home_id:str,current:Current,limit:int=100,status:str|None=None,kind:str|None=None,
-           room_id:str|None=None,camera_id:str|None=None,hours:int|None=None,page:int|None=None,page_size:int=10,start:str|None=None,end:str|None=None,severity:str|None=None):
+           room_id:str|None=None,camera_id:str|None=None,hours:int|None=None,page:int|None=None,page_size:int=10,start:str|None=None,end:str|None=None,severity:str|None=None,active_only:bool=False):
     membership(home_id,current['id'])
     if not 1<=limit<=500 or not 1<=page_size<=50 or (page is not None and page<1): raise HTTPException(422,'Giới hạn/trang không hợp lệ.')
     if hours is not None and not 1<=hours<=87600: raise HTTPException(422,'Khoảng thời gian không hợp lệ.')
+    if active_only and not camera_id:
+        raise HTTPException(422,'Chọn camera để xem các cảnh báo đang chặn OTA.')
     if kind and kind not in ('fall','immobility','environment','device'): raise HTTPException(422,'Loại sự kiện không hợp lệ.')
     a,b=time_range(start,end,hours)
     if severity and severity not in ('info','warning','critical'): raise HTTPException(422,'Mức cảnh báo không hợp lệ.')
     clauses=['e.home_id=%s'];args=[home_id]
+    if active_only:
+        clauses.append("e.status IN ('OPEN','ACKNOWLEDGED')")
     if a: clauses.append('e.first_observed_at>=%s');args.append(a)
     if b: clauses.append('e.first_observed_at<%s');args.append(b)
     for column,value in [('e.status',status),('e.kind',kind),('c.room_id',room_id),('e.camera_id',camera_id),('e.severity',severity)]:

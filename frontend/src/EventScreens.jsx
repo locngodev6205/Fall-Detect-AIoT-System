@@ -6,11 +6,22 @@ import { Badge, Button, Empty, Field, Heading, Pagination } from './ui';
 import {useServerPage,ServerPager} from './serverPaging';
 import { useApp, useResource, ResourceState } from './context';
 
+const emptyFilters = { status:'', kind:'', room_id:'', camera_id:'', hours:'', start:'', end:'', severity:'', active_only:'' };
+
 export function Events({initialStatus=''}) {
   const { home, cameras, rooms, can, alertTick, reloadAlerts, reload, notify } = useApp();
-  const [filters,setFilters]=useState({status:initialStatus,kind:'',room_id:'',camera_id:'',hours:'',start:'',end:'',severity:''}),[page,setPage]=useState(1),[busy,setBusy]=useState(false);
-  useEffect(()=>{setFilters(previous=>({...previous,status:initialStatus}));setPage(1);},[initialStatus]);
-  const update=(key,value)=>{setFilters(previous=>({...previous,[key]:value,...(key==='room_id'?{camera_id:''}:{}),...(key==='hours'?{start:'',end:''}:key==='start'||key==='end'?{hours:''}:{})}));setPage(1);};
+  const [filters,setFilters]=useState({...emptyFilters,status:initialStatus}),[page,setPage]=useState(1),[busy,setBusy]=useState(false);
+  useEffect(()=>{setFilters(previous=>({...previous,status:initialStatus,active_only:''}));setPage(1);},[initialStatus]);
+  const update=(key,value)=>{setFilters(previous=>({...previous,active_only:'',[key]:value,...(key==='room_id'?{camera_id:''}:{}),...(key==='hours'?{start:'',end:''}:key==='start'||key==='end'?{hours:''}:{})}));setPage(1);};
+  function clearFilters() {
+    setFilters(emptyFilters);
+    setPage(1);
+  }
+  function showOtaBlockers() {
+    if (!filters.camera_id) return;
+    setFilters({...emptyFilters,camera_id:filters.camera_id,active_only:'true'});
+    setPage(1);
+  }
   const query=new URLSearchParams({page:String(page),page_size:'10',...Object.fromEntries(Object.entries(filters).filter(([,value])=>value).map(([key,value])=>[key,['start','end'].includes(key)?new Date(value).toISOString():value]))});
   const resource=useResource(`/homes/${home.id}/events?${query}`,alertTick);
   async function markRead(event){setBusy(true);try{await api('/events/'+event.id+'/read',{method:'POST',body:{}});resource.reload();reloadAlerts();reload();notify(event.status==='OPEN'&&can(cameras.find(c=>c.id===event.camera_id),'events')?'Đã đọc và tiếp nhận sự kiện.':'Đã đánh dấu sự kiện đã đọc.');}catch(error){notify(error.message);}finally{setBusy(false);}}
@@ -28,7 +39,13 @@ export function Events({initialStatus=''}) {
       <Field label="Từ ngày giờ"><input type="datetime-local" value={filters.start} onChange={e=>update('start',e.target.value)}/></Field>
       <Field label="Đến trước ngày giờ"><input type="datetime-local" min={filters.start} value={filters.end} onChange={e=>update('end',e.target.value)}/></Field>
     </div>
-    <ResourceState resource={resource}>{rows.map(e=><article className="panel event-live-row" key={e.id}><span className={'event-kind-icon '+(e.severity==='critical'?'critical-icon':'')}>{React.createElement(eventIcons[e.kind]||WarningCircle,{size:26})}</span><div className="event-row-copy"><a href={'#/event/'+e.id}><h2>{eventNames[e.kind]}</h2></a><p>{e.room_name||rooms.find(r=>r.id===cameras.find(c=>c.id===e.camera_id)?.room_id)?.name||'Trong nhà'} · {e.camera_name||cameras.find(c=>c.id===e.camera_id)?.name||'Camera'} · {dateTime(e.observed_at)}</p><small>{e.payload.reason}</small></div><Badge tone={['RESOLVED','FALSE_ALARM'].includes(e.status)?'teal':e.severity==='critical'?'red':'amber'}>{e.is_read?'Đã đọc · ':''}{statusNames[e.status]}</Badge>{!e.is_read&&<Button kind="secondary-btn" disabled={busy} onClick={()=>markRead(e)}>Đánh dấu đã đọc</Button>}</article>)}{!rows.length&&<Empty icon={WarningCircle} title="Chưa có sự kiện phù hợp" text="Thử thay đổi bộ lọc hoặc khoảng thời gian."/>}<Pagination page={page} pageSize={10} total={total} onChange={setPage} label="sự kiện"/></ResourceState></>;
+    <div className="actions">
+      <Button kind="secondary-btn" onClick={clearFilters} disabled={!Object.values(filters).some(Boolean)}>Xóa bộ lọc</Button>
+      <Button kind="secondary-btn" onClick={showOtaBlockers} disabled={!filters.camera_id} aria-pressed={!!filters.active_only}>Cảnh báo đang chặn OTA</Button>
+    </div>
+    {filters.active_only ? <p className="muted" role="status">Đang xem cảnh báo Đang mở và Đã tiếp nhận của camera đã chọn.</p>
+      : !filters.camera_id && <p className="muted">Chọn một camera để xem cảnh báo đang chặn OTA.</p>}
+    <ResourceState resource={resource}>{rows.map(e=><article className="panel event-live-row" key={e.id}><span className={'event-kind-icon '+(e.severity==='critical'?'critical-icon':'')}>{React.createElement(eventIcons[e.kind]||WarningCircle,{size:26})}</span><div className="event-row-copy"><a href={'#/event/'+e.id}><h2>{eventNames[e.kind]}</h2></a><p>{e.room_name||rooms.find(r=>r.id===cameras.find(c=>c.id===e.camera_id)?.room_id)?.name||'Trong nhà'} · {e.camera_name||cameras.find(c=>c.id===e.camera_id)?.name||'Camera'} · {dateTime(e.observed_at)}</p><small>{e.payload.reason}</small></div><Badge tone={['RESOLVED','FALSE_ALARM'].includes(e.status)?'teal':e.severity==='critical'?'red':'amber'}>{e.is_read?'Đã đọc · ':''}{statusNames[e.status]}</Badge>{!e.is_read&&<Button kind="secondary-btn" disabled={busy} onClick={()=>markRead(e)}>Đánh dấu đã đọc</Button>}</article>)}{!rows.length&&<Empty icon={WarningCircle} title="Chưa có sự kiện phù hợp" text={filters.active_only ? "Camera này không còn sự kiện đang mở hoặc đã tiếp nhận." : "Thử thay đổi bộ lọc hoặc khoảng thời gian."}/>}<Pagination page={page} pageSize={10} total={total} onChange={setPage} label="sự kiện"/></ResourceState></>;
 }
 
 function EvidenceImage({asset}) {

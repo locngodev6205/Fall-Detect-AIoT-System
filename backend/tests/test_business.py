@@ -182,6 +182,65 @@ class BusinessTests(unittest.TestCase):
         self.assertTrue(permissions['audio'])
         self.assertFalse(permissions['schedules'])
 
+    def test_event_feed_combines_filters_before_pagination(self):
+        from datetime import datetime, timedelta, timezone
+        from backend.src.models import EventInput
+
+        owner,_=self.account('filters-owner@example.com')
+        outsider,_=self.account('filters-outsider@example.com')
+        home,room,camera,_=self.home_camera(owner)
+        url=f"/api/homes/{home['id']}/events"
+        other_room=owner.post(f"/api/homes/{home['id']}/rooms",json={'name':'Phòng thứ hai'}).json()
+        provision=services.provision_device('Camera thứ hai')
+        other=owner.post(f"/api/homes/{home['id']}/cameras/claim",json={
+            'code':provision['pairing_code'],'name':'Camera thứ hai','room_id':other_room['id'],
+        }).json()
+        now=datetime.now(timezone.utc).replace(microsecond=0)
+        start=now-timedelta(hours=2)
+        end=now-timedelta(minutes=10)
+
+        def ingest(source,camera_id=camera['id'],kind='fall',severity='warning',when=start):
+            event,_=services.ingest_event({'id':camera_id,'home_id':home['id']},EventInput(
+                event_id=source,kind=kind,severity=severity,observed_at=when.isoformat(),
+            ))
+            return event['id']
+
+        first=ingest('start-boundary',when=start.astimezone(timezone(timedelta(hours=7))))
+        second=ingest('inside',when=start+timedelta(minutes=1))
+        ingest('end-boundary',when=end)
+        ingest('wrong-room',camera_id=other['id'])
+        ingest('wrong-kind',kind='device')
+        ingest('wrong-severity',severity='critical')
+        closed=ingest('closed')
+        owner.post(f'/api/events/{closed}/actions',json={'action':'resolve','confirm_abnormal':True,'note':'Đã kiểm tra'})
+        ingest('old',when=now-timedelta(days=2))
+
+        filters={'room_id':room['id'],'kind':'fall','severity':'warning','status':'OPEN',
+                 'start':start.isoformat(),'end':end.isoformat(),'page_size':1}
+        pages=[owner.get(url,params={**filters,'page':page}).json() for page in (1,2,3)]
+        self.assertTrue(all(page['total']==2 and page['total_pages']==2 for page in pages))
+        self.assertEqual({pages[0]['items'][0]['id'],pages[1]['items'][0]['id']},{first,second})
+        self.assertEqual(pages[2]['items'],[])
+        self.assertEqual(owner.get(url,params={**filters,'page':1,'camera_id':other['id']}).json()['total'],0)
+        recent=owner.get(url,params={'camera_id':other['id'],'hours':24,'page':1}).json()
+        self.assertEqual([item['source_id'] for item in recent['items']],['wrong-room'])
+        for single,total in [({'hours':24},7),({'room_id':room['id']},7),({'camera_id':other['id']},1),
+                             ({'kind':'device'},1),({'severity':'critical'},1),({'status':'RESOLVED'},1),
+                             ({'start':start.isoformat()},7),({'end':end.isoformat()},7)]:
+            with self.subTest(single=single):
+                self.assertEqual(owner.get(url,params={**single,'page':1}).json()['total'],total)
+        owner.post(f'/api/events/{first}/read')
+        blockers=owner.get(url,params={'active_only':True,'camera_id':camera['id'],'page':1}).json()
+        self.assertEqual(blockers['total'],6)
+        self.assertEqual({item['status'] for item in blockers['items']},{'OPEN','ACKNOWLEDGED'})
+        self.assertIn('device',{item['kind'] for item in blockers['items']})
+        self.assertIn('critical',{item['severity'] for item in blockers['items']})
+        self.assertEqual(owner.get(url,params={'active_only':True}).status_code,422)
+        self.assertEqual(len(owner.get(url,params={'limit':1}).json()),1)
+        self.assertEqual(owner.get(url,params={'page':0}).status_code,422)
+        self.assertEqual(owner.get(url,params={'hours':24,'start':start.isoformat()}).status_code,422)
+        self.assertEqual(outsider.get(url,params={'page':1}).status_code,404)
+
     def test_event_management_and_ota_safety(self):
         from backend.tests.event_management_cases import exercise_event_management
         owner,_=self.account('events-owner@example.com')

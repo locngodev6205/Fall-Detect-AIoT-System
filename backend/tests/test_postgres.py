@@ -1061,6 +1061,15 @@ class PostgresTests(unittest.TestCase):
         self.assertFalse({item['id'] for item in first['items']}&{item['id'] for item in second['items']})
         filtered=owner.get(url+f"?page=1&kind=fall&room_id={room['id']}&camera_id={camera['id']}&hours=24").json()
         self.assertEqual(filtered['total'],6);self.assertTrue(all(item['kind']=='fall' for item in filtered['items']))
+        event_id=first['items'][0]['id']
+        self.assertEqual(owner.post(f'/api/events/{event_id}/read').status_code,200)
+        closed_id=first['items'][1]['id']
+        closed=owner.post(f'/api/events/{closed_id}/actions',json={'action':'safe','note':'Đã kiểm tra','confirm_abnormal':True})
+        self.assertEqual(closed.status_code,200,closed.text)
+        blockers=owner.get(url,params={'camera_id':camera['id'],'active_only':True,'page':1,'page_size':20}).json()
+        self.assertEqual(blockers['total'],12)
+        self.assertEqual({item['status'] for item in blockers['items']},{'OPEN','ACKNOWLEDGED'})
+        self.assertEqual(owner.get(url,params={'active_only':True}).status_code,422)
         self.assertEqual(owner.get(url+'?page=0').status_code,422)
         self.assertEqual(outsider.get(url+'?page=1').status_code,404)
         self.assertEqual(owner.request('DELETE',f"/api/homes/{home['id']}",json={'confirmation':'wrong'}).status_code,422)
