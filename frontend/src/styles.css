@@ -42,3 +42,18 @@
 .ota-history li{padding:8px 0;border-top:1px solid #d8e5e4}
 .ota-history small{display:block}
 @media(max-width:600px){.ota-versions,.ota-timeline{grid-template-columns:1fr}.ota-timeline li{display:flex;align-items:center;padding:4px 8px;border-top:0;border-left:3px solid #d6e3e3}.device-updates .update-controls>*{max-width:100%}}
+
+.timeline-row.observation-row{display:grid;grid-template-columns:minmax(9rem,1fr) minmax(9rem,1fr) minmax(0,1.8fr) minmax(8rem,1fr);align-items:start;line-height:1.55}
+.observation-row>p{margin:0;overflow-wrap:anywhere}
+.observation-row>small{font-size:inherit;color:var(--muted)}
+.ota-release-notes{margin:14px 0;padding:10px 14px;border:1px solid var(--border);border-radius:10px}
+.ota-release-notes summary{cursor:pointer;font-weight:600}
+.ota-release-notes .release-notes{white-space:normal;line-height:1.6;padding-block:8px 2px}
+.ota-release-notes .release-notes h1,.ota-release-notes .release-notes h2,.ota-release-notes .release-notes h3{font-size:1rem;margin:.75em 0 .4em}
+.ota-release-notes .release-notes ul,.ota-release-notes .release-notes ol{padding-inline-start:1.4em;margin:.4em 0}
+.ota-release-notes .release-notes p{margin:.55em 0}
+.ota-release-notes .release-notes a{color:var(--primary);text-decoration:underline}
+.ota-release-notes .release-notes pre{white-space:pre-wrap}
+@media(max-width:760px){
+  .timeline-row.observation-row{grid-template-columns:minmax(0,1fr);gap:4px;font-size:13px}
+}

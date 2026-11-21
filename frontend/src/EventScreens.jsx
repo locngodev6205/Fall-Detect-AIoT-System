@@ -162,10 +162,10 @@ function EventRecord({ record, updates, camera, can, notify, refresh }) {
     <section className="panel spaced">
       <h2>Diễn biến quan sát</h2>
       <ResourceState resource={updates}>
-        {updates.items.map(update => <article className="timeline-row" key={update.sequence}>
+        {updates.items.map(update => <article className="timeline-row observation-row" key={update.sequence}>
           <span>{dateTime(update.observed_at)} · Lần {update.sequence}</span>
           <strong>{observationLabels[update.observation]} · {severityLabels[update.severity]}</strong>
-          {update.payload?.reason && <p>{update.payload.reason}</p>}
+          <p>{update.payload?.reason || '—'}</p>
           <small>Nhận lúc {dateTime(update.received_at)}</small>
         </article>)}
         {!updates.error && !updates.items.length && <p>Chưa có diễn biến quan sát bổ sung.</p>}

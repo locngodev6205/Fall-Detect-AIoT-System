@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from 'react';
+import Markdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { api, dateTime } from './api';
 import { useApp, useResource } from './context';
 import { Button, Field } from './ui';
@@ -112,7 +114,12 @@ export function DeviceUpdates({ cameraId }) {
         <Button kind="secondary-btn" disabled={busy || !!active || !!resource.error || !data.online || !state?.previous_version} onClick={() => submit(true)}>Quay về bản trước</Button>
       </div>
       {incompatible && <p role="alert">Phiên bản này yêu cầu model hoặc môi trường Python khác trên Pi.</p>}
-      {release?.notes && <details><summary>Ghi chú phát hành {version}</summary><pre className="release-notes">{release.notes}</pre></details>}
+      {release?.notes && <details className="ota-release-notes">
+        <summary>Ghi chú phát hành {version}</summary>
+        <div className="release-notes">
+          <Markdown remarkPlugins={[remarkGfm]} skipHtml disallowedElements={['img']}>{release.notes}</Markdown>
+        </div>
+      </details>}
       <p className="muted">Gói được tải trước. Khi đến giờ, thiết bị chờ cảnh báo và âm thanh kết thúc tối đa 30 phút trước khi lịch hết hạn.</p>
       {!!data.jobs.length && <div className="ota-history">
         <h3>5 lệnh gần nhất</h3>
