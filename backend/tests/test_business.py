@@ -53,6 +53,20 @@ class BusinessTests(unittest.TestCase):
         client.headers['Authorization']='Bearer '+provision['device_token']
         return client
 
+    def test_show_landmarks_setting_reaches_edge_configuration(self):
+        owner,_=self.account('landmarks-owner@example.com')
+        _,_,camera,provision=self.home_camera(owner)
+        device=self.device(provision)
+        path=f"/api/cameras/{camera['id']}/smart-modes"
+        modes=owner.get(path).json()['smart_modes']
+        self.assertTrue(modes['show_landmarks'])
+        for enabled in (False,True):
+            result=owner.put(path,json={**modes,'show_landmarks':enabled})
+            self.assertEqual(result.status_code,200,result.text)
+            self.assertIs(owner.get(path).json()['smart_modes']['show_landmarks'],enabled)
+            config=device.get('/api/device/config').json()
+            self.assertEqual(config['smart_modes'],{**modes,'show_landmarks':enabled})
+
     def test_pi_self_enrollment(self):
         from backend.tests.device_pairing_cases import exercise_self_enrollment
         exercise_self_enrollment(self)

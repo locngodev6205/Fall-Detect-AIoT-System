@@ -275,6 +275,7 @@ class AnNhaEdgeRuntime:
         self.local_danger = False
         self.unreported_alert = False
         self.model_inference_ok = False
+        self.show_landmarks = True
         self.update_status = UpdateStatusServer(self, FALL_DETECT_DIR)
         self._stop_event = threading.Event()
         self._workers: list[threading.Thread] = []
@@ -283,7 +284,9 @@ class AnNhaEdgeRuntime:
         self.client.set_command_handler(self._on_web_command)
 
     def _on_config_updated(self, cfg: dict[str, Any]) -> None:
-        self.tracker.update_smart_modes(cfg.get("smart_modes"))
+        modes = cfg.get("smart_modes")
+        self.tracker.update_smart_modes(modes)
+        self.show_landmarks = modes.get("show_landmarks", True) is not False if isinstance(modes, dict) else True
         self.scheduler.apply_config(cfg)
         env = cfg.get("environment")
         if isinstance(env, dict):
@@ -648,7 +651,7 @@ class AnNhaEdgeRuntime:
                             logger.warning("[Vision] Lỗi FallDetector: %s", exc)
 
                     # 1. Vẽ khung xương MediaPipe lên khung hình khi phát hiện người
-                    if present and pose_res.pose_landmarks and mp_drawing and mp_styles:
+                    if self.show_landmarks and present and pose_res.pose_landmarks and mp_drawing and mp_styles:
                         try:
                             mp_drawing.draw_landmarks(
                                 frame,

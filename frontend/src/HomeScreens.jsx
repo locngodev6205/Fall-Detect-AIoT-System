@@ -101,6 +101,7 @@ export function CameraDetail({ id }) {
   const [modesDraft, setModesDraft] = useState({
     fall_detection: true,
     servo_tracking: true,
+    show_landmarks: true,
     night_mode_enabled: true,
     night_start: '22:00',
     night_end: '06:00',
@@ -217,6 +218,14 @@ export function CameraDetail({ id }) {
             </span>
             <input type="checkbox" checked={!!modesDraft.servo_tracking} disabled={!canEditModes || modesBusy}
               onChange={e => toggleMode('servo_tracking', e.target.checked, 'Tự động xoay Servo bám người')}/>
+          </label>
+          <label className="smart-mode-item">
+            <span className="smart-mode-info">
+              <strong><Eye/>Hiện điểm khớp trên video</strong>
+              <small>Bật hoặc tắt hình vẽ khớp trên luồng camera web.</small>
+            </span>
+            <input type="checkbox" checked={modesDraft.show_landmarks !== false} disabled={!canEditModes || modesBusy}
+              onChange={e => toggleMode('show_landmarks', e.target.checked, 'hiển thị điểm khớp trên video')}/>
           </label>
           <label className="smart-mode-item">
             <span className="smart-mode-info">
