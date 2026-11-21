@@ -122,7 +122,7 @@ class Updater:
                 time.sleep(2 ** attempt)
         raise TemporaryNetworkError('Backend tạm thời không phản hồi')
 
-    def request_once(self, path, body=None):
+    def request_once(self, path, body=None, *, timeout=20):
         headers = {'Authorization': 'Bearer ' + self.token}
         data = None
         if body is not None:
@@ -133,13 +133,21 @@ class Updater:
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, *args, **kwargs):
                 return None
-        with urllib.request.build_opener(NoRedirect()).open(req, timeout=20) as response:
+        with urllib.request.build_opener(NoRedirect()).open(req, timeout=timeout) as response:
             if path.endswith('/bundle'):
                 data = response.read(64 * 1024 * 1024 + 1)
                 if len(data) > 64 * 1024 * 1024:
                     raise ValueError('Gói quá lớn')
                 return data
             return json.loads(response.read(2 * 1024 * 1024))
+
+    def report_phase(self, job, status, message=''):
+        # Status hints must not delay local health checks or recovery.
+        try:
+            self.request_once(job['id'] + '/progress',
+                              {'status': status, 'message': message}, timeout=1)
+        except (OSError, ValueError, http.client.HTTPException):
+            pass
 
     def local(self, action='status'):
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
@@ -296,6 +304,7 @@ class Updater:
             atomic_json(self.journal, journal)
             self.recover()
             return
+        self.report_phase(job, 'rolling_back', journal.get('failure_reason', ''))
         try:
             if journal.get('phase') != 'restored':
                 self.service('stop')
@@ -305,7 +314,10 @@ class Updater:
                 atomic_json(self.journal, journal)
             healthy = self.healthy(journal['old'], require_backend=False)
             outcome = 'rolled_back' if healthy else 'failed'
+            reason = journal.get('failure_reason')
             message = 'Đã phục hồi bản trước' if healthy else 'Bản trước chưa vượt qua health check. Cần kiểm tra thiết bị.'
+            if reason:
+                message = f'{reason}. {message}'
         except Exception:
             outcome, message = 'failed', 'Không phục hồi được service. Cần kiểm tra thiết bị.'
         journal.update(phase='report_pending', outcome=outcome, message=message)
@@ -332,8 +344,11 @@ class Updater:
             journal['phase'] = 'switched'
             atomic_json(self.journal, journal)
             self.service('start')
+            self.report_phase(job, 'health_check')
             if not self.healthy(job['version'], require_backend=False):
-                raise RuntimeError('Bản mới không đạt health check trong 120 giây')
+                journal['failure_reason'] = 'Bản mới không đạt health check trong 120 giây'
+                atomic_json(self.journal, journal)
+                raise RuntimeError(journal['failure_reason'])
             journal.update(phase='report_pending', outcome='succeeded', local_verified=True,
                            message='Ứng dụng mới đã sẵn sàng')
             atomic_json(self.journal, journal)

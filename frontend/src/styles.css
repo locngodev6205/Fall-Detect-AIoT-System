@@ -19,3 +19,26 @@
 .camera-grant-list{display:grid;gap:12px;margin:10px 0 22px}.camera-grant{padding:12px 16px;border:1px solid var(--border);border-radius:10px;background:#fbfdfc}.camera-grant>.checkbox{margin:2px 0;font-weight:600}.camera-grant-rights{display:grid;gap:2px;margin:8px 0 0 25px;padding:8px 0 0 12px;border-left:2px solid #dcebe7}.camera-grant-rights .checkbox{margin:6px 0;font-weight:400}.camera-grant-rights .checkbox span{line-height:1.6}
 
 .update-controls{display:flex;flex-wrap:wrap;align-items:end;gap:12px}.update-controls select,.update-controls input{min-width:150px}.release-notes{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;max-height:240px;overflow:auto}
+
+.ota-heading{display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:8px}
+.ota-badge{display:inline-flex;align-items:center;border-radius:999px;padding:4px 10px;background:#eaf0f1;color:#344b54;font-size:.78rem;font-weight:700}
+.ota-badge[data-tone="good"]{background:#d9f4eb;color:#075b49}
+.ota-badge[data-tone="warn"]{background:#fff0cb;color:#704800}
+.ota-versions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:12px 0}
+.ota-versions>div{padding:14px;background:#f2f8f7;border-radius:12px}
+.ota-versions dt{font-size:.83rem;color:#405d67}
+.ota-versions dd{margin:5px 0 0;font-size:clamp(1rem,2vw,1.55rem);font-weight:700;overflow-wrap:anywhere}
+.ota-job{padding:16px;margin:16px 0;border:1px solid #bfd9d6;border-left:4px solid #087e73;border-radius:10px}
+.ota-job[data-tone="good"]{background:#eefaf5}
+.ota-job[data-tone="bad"]{background:#fff4f1;border-color:#a63829}
+.ota-job [aria-live]>strong{font-size:1.23rem}
+.ota-job p{margin:5px 0}
+.ota-timeline{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));list-style:none;padding:0;gap:8px;margin:16px 0}
+.ota-timeline li{display:grid;align-content:start;gap:6px;border-top:3px solid #d6e3e3;padding-top:8px;font-size:.85rem;color:#455d66}
+.ota-timeline li span{font-weight:700}
+.ota-timeline li[data-complete="true"]{color:#075b49;border-color:#219780}
+.ota-timeline li[aria-current="step"]{color:#173547;border-color:#173547;font-weight:700}
+.ota-history ul{list-style:none;padding:0;margin:0}
+.ota-history li{padding:8px 0;border-top:1px solid #d8e5e4}
+.ota-history small{display:block}
+@media(max-width:600px){.ota-versions,.ota-timeline{grid-template-columns:1fr}.ota-timeline li{display:flex;align-items:center;padding:4px 8px;border-top:0;border-left:3px solid #d6e3e3}.device-updates .update-controls>*{max-width:100%}}
