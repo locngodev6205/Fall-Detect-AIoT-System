@@ -18,7 +18,7 @@
 
 .camera-grant-list{display:grid;gap:12px;margin:10px 0 22px}.camera-grant{padding:12px 16px;border:1px solid var(--border);border-radius:10px;background:#fbfdfc}.camera-grant>.checkbox{margin:2px 0;font-weight:600}.camera-grant-rights{display:grid;gap:2px;margin:8px 0 0 25px;padding:8px 0 0 12px;border-left:2px solid #dcebe7}.camera-grant-rights .checkbox{margin:6px 0;font-weight:400}.camera-grant-rights .checkbox span{line-height:1.6}
 
-.update-controls{display:flex;flex-wrap:wrap;align-items:end;gap:12px}.update-controls select,.update-controls input{min-width:150px}.release-notes{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;max-height:240px;overflow:auto}
+.update-controls{display:flex;flex-wrap:wrap;align-items:end;gap:12px}.update-controls>.field{margin-bottom:0}.update-controls select,.update-controls input{min-width:150px}.release-notes{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;max-height:240px;overflow:auto}
 
 .ota-heading{display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:8px}
 .ota-badge{display:inline-flex;align-items:center;border-radius:999px;padding:4px 10px;background:#eaf0f1;color:#344b54;font-size:.78rem;font-weight:700}
