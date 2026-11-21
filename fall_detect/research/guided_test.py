@@ -74,9 +74,10 @@ def vnc_preview(enabled):
     try:
         def show(frame, present):
             display = cv2.resize(frame, (320, 240))
-            cv2.putText(display, 'POSE OK' if present else 'POSE UNAVAILABLE',
-                        (8, 22), cv2.FONT_HERSHEY_SIMPLEX, .55,
-                        (0, 255, 0) if present else (0, 200, 255), 1)
+            if present is not None:
+                cv2.putText(display, 'POSE OK' if present else 'POSE UNAVAILABLE',
+                            (8, 22), cv2.FONT_HERSHEY_SIMPLEX, .55,
+                            (0, 255, 0) if present else (0, 200, 255), 1)
             try:
                 player.stdin.write(display.tobytes())
             except BrokenPipeError:

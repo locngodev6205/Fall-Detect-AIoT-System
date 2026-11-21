@@ -13,7 +13,7 @@ from ml.features import SHAPE, SPEC
 from .diagnostics import Trace
 from .streaming import CHECKPOINT_SHA
 
-ACTIVITIES = ('bend-light','bend-deep','pick-up','hold-bend','sit-down','stand-up',
+ACTIVITIES = ('standing','bend-light','bend-deep','pick-up','hold-bend','sit-down','stand-up',
               'walking','turn','sit-stand','lie-down','leave-reenter')
 IDENT = re.compile(r'[A-Za-z0-9_-]{1,64}')
 

@@ -9,13 +9,13 @@ from research.diagnostics import Trace
 from research.streaming import Stream
 
 
-def fixture(root, *, bad_time=False):
+def fixture(root, *, bad_time=False, activity='pick-up'):
     trial = dict(recording='r1',subject='s1',session='sess1',source='src1',camera_setup='cam1',
-                 activity='pick-up',split='train',consent=True,retention_days=14)
+                 activity=activity,split='train',consent=True,retention_days=14)
     stream = Stream(lambda _: .1)
     pose = np.ones((17,3), dtype=np.float32)
     pose[:,1] = np.arange(17)/17
-    with Trace(root, scenario='pick-up', include_pose=True) as trace:
+    with Trace(root, scenario=activity, include_pose=True) as trace:
         for i in range(25):
             t = i/10
             real = stream.push(t,pose)
@@ -66,3 +66,10 @@ def test_reject_overlap_and_duplicates(tmp_path,field):
         second[field]=first[field]
     with pytest.raises(ValueError,match='Cross-split|Duplicate'):
         check_splits([first,second])
+
+
+def test_standing_is_supported_as_a_no_fall_trial(tmp_path):
+    root = tmp_path / "standing"
+    checksum = fixture(root, activity="standing")
+    (root / "label.json").write_text(json.dumps(dict(label="NO_FALL", trace_sha256=checksum)))
+    assert validate(root, confirmed=True)["trial"]["activity"] == "standing"
