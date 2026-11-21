@@ -70,6 +70,14 @@ class UpdateTests(unittest.TestCase):
             conn.execute("INSERT INTO camera_grants(home_id,camera_id,user_id,can_view) VALUES('home','camera','owner',1)")
         self.assertEqual(self.client.get('/api/cameras/camera/updates').status_code, 403)
 
+    def test_overview_keeps_job_origin_after_version_changes(self):
+        result = self.create().json()
+        self.assertEqual(result['from_version'], '0.0.0')
+        self.client.post('/api/device/updates/heartbeat', json={'current_version': '1.0.0'})
+        overview = self.client.get('/api/cameras/camera/updates').json()
+        self.assertEqual(overview['state']['current_version'], '1.0.0')
+        self.assertEqual(overview['jobs'][0]['from_version'], '0.0.0')
+
     def test_cancel_prevents_late_install(self):
         job = self.create().json()['id']
         self.assertEqual(self.report(job, 'downloading').status_code, 200)
@@ -333,12 +341,16 @@ class TransportTests(unittest.TestCase):
                     if status != 'installing':
                         raise TemporaryNetworkError('offline')
                 try:
-                    with patch.object(updater,'current',return_value='0.0.0'), patch.object(updater,'local',return_value={'ready':True,'maintenance_active':True}), patch.object(updater,'report',side_effect=report), patch.object(updater,'healthy',side_effect=[locally_healthy,True]) as healthy, patch.object(updater,'switch') as switch, patch.object(updater,'service'):
+                    with patch.object(updater,'current',return_value='0.0.0'), patch.object(updater,'local',return_value={'ready':True,'maintenance_active':True}), patch.object(updater,'report',side_effect=report), patch.object(updater,'request_once',side_effect=OSError('offline')) as phase, patch.object(updater,'healthy',side_effect=[locally_healthy,True]) as healthy, patch.object(updater,'switch') as switch, patch.object(updater,'service'):
                         with self.assertRaises(TemporaryNetworkError):
                             updater.install({'id':'test','version':'1.0.0'})
                         saved = json.loads(updater.journal.read_text())
                         self.assertEqual(saved['outcome'],'succeeded' if locally_healthy else 'rolled_back')
                         self.assertEqual(healthy.call_args_list[0].kwargs,{'require_backend':False})
+                        self.assertEqual([call.args[1]['status'] for call in phase.call_args_list],
+                                         ['health_check'] if locally_healthy else ['health_check', 'rolling_back'])
+                        if not locally_healthy:
+                            self.assertIn('không đạt health check', saved['message'])
                         self.assertEqual([c.args[0] for c in switch.call_args_list],
                                          ['1.0.0'] if locally_healthy else ['1.0.0','0.0.0'])
                 finally:
@@ -368,7 +380,7 @@ class TransportTests(unittest.TestCase):
                 (target/'release.json').write_text('{}')
             updater.switch('1.0.0')
             atomic_json(updater.journal,{'job':{'id':'test'},'old':'0.0.0','claimed':True})
-            with patch.object(updater,'service'), patch.object(updater,'healthy',return_value=True), patch.object(updater,'report'):
+            with patch.object(updater,'service'), patch.object(updater,'report_phase'), patch.object(updater,'healthy',return_value=True), patch.object(updater,'report'):
                 updater.recover()
             self.assertEqual(updater.current(),'0.0.0')
             self.assertTrue(updater.target('1.0.0').exists())
@@ -403,7 +415,7 @@ class JournalPhaseTests(unittest.TestCase):
             with self.subTest(phase=phase):
                 atomic_json(updater.journal,{'phase':phase,'job':self.job,'old':'0.0.0',
                                             'claimed':phase != 'claim_pending'})
-                with patch.object(updater,'request',return_value={'job':{**self.job,'status':'installing'}}), patch.object(updater,'report',side_effect=OSError('offline')), patch.object(updater,'service') as service, patch.object(updater,'switch') as switch, patch.object(updater,'healthy',return_value=True):
+                with patch.object(updater,'request',return_value={'job':{**self.job,'status':'installing'}}), patch.object(updater,'report',side_effect=OSError('offline')), patch.object(updater,'report_phase'), patch.object(updater,'service') as service, patch.object(updater,'switch') as switch, patch.object(updater,'healthy',return_value=True):
                     with self.assertRaises(OSError):
                         updater.recover()
                     outcome = json.loads(updater.journal.read_text())

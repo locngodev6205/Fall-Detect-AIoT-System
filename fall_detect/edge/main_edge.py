@@ -90,6 +90,20 @@ def load_env_file(path: Path) -> dict[str, str]:
     return loaded
 
 
+def draw_ota_version_badge(frame: Any, version: str) -> None:
+    """Hiển thị phiên bản ứng dụng đang chạy trên luồng camera để demo OTA."""
+    if cv2 is None or not version or version == "unmanaged":
+        return
+    label = f"AnNha Edge v{version}"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    (text_w, text_h), baseline = cv2.getTextSize(label, font, 0.6, 2)
+    frame_h, frame_w = frame.shape[:2]
+    if frame_w < text_w + 24 or frame_h < text_h + baseline + 24:
+        return
+    cv2.rectangle(frame, (8, 8), (text_w + 24, text_h + baseline + 20), (18, 28, 36), -1)
+    cv2.putText(frame, label, (16, text_h + 14), font, 0.6, (0, 255, 180), 2, cv2.LINE_AA)
+
+
 def render_synthetic_hud_jpeg(
     *,
     width: int = 640,
@@ -508,6 +522,7 @@ class AnNhaEdgeRuntime:
                 cv2.rectangle(frame, (bx1, by1), (bx1 + box_w, by1 + box_h), (0, 230, 150), 1)
                 cv2.putText(frame, f"FPS: {current_fps:4.1f}", (bx1 + 14, by1 + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 180), 1, cv2.LINE_AA)
 
+                draw_ota_version_badge(frame, self.update_status.version)
                 ok_enc, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                 if ok_enc:
                     self.streamer.update_frame_jpeg(buf.tobytes())
@@ -662,6 +677,7 @@ class AnNhaEdgeRuntime:
                         cv2.LINE_AA,
                     )
 
+                    draw_ota_version_badge(frame, self.update_status.version)
                     ok_enc, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                     if ok_enc:
                         jpg_bytes = buf.tobytes()

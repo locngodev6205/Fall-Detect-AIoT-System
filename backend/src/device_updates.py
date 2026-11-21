@@ -166,7 +166,8 @@ def create(camera: str, body: CreateJob, current=Depends(security.user)):
             if any(release['manifest'][k] != device.get(k) for k in ('model_sha256', 'runtime_sha256', 'target')):
                 raise HTTPException(409, 'Bản phát hành không tương thích model hoặc môi trường Python của thiết bị.')
         job = {'id': str(uuid.uuid4()), 'camera_id': camera, 'requested_by': str(current['id']), 'version': version,
-            'rollback': body.rollback, 'scheduled_at': scheduled, 'expires_at': scheduled + 1800,
+            'rollback': body.rollback, 'from_version': device.get('current_version'),
+            'scheduled_at': scheduled, 'expires_at': scheduled + 1800,
             'created_at': now, 'updated_at': now, 'status': 'pending', 'progress': 0, 'message': '',
             'release': release if not body.rollback else None}
         conn.execute('INSERT INTO update_jobs(id,camera_id,payload) VALUES(?,?,?)', (job['id'], camera, json.dumps(job)))
