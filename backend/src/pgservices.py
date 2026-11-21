@@ -416,10 +416,15 @@ async def revalidate_connections():
     from . import pgmedia
     await pgmedia.revalidate()
 
-def send_mail(recipient,subject,body,html_body=None):
+def send_mail(recipient,subject,body,html_body=None,attachment=None):
     message=EmailMessage();message['From']=os.getenv('SMTP_FROM','AnNhà <noreply@annha.local>');message['To']=recipient;message['Subject']=subject;message.set_content(body)
     if html_body:
         message.add_alternative(html_body,subtype='html')
+    if attachment:
+        data,mime,filename=attachment
+        if mime not in ('image/jpeg','image/png') or len(data)>5*1024*1024:
+            raise ValueError('Invalid email image attachment')
+        message.add_attachment(data,maintype='image',subtype=mime.split('/')[1],filename=filename)
     host=os.getenv('SMTP_HOST','localhost').strip()
     port=int(os.getenv('SMTP_PORT','1025'))
     starttls=os.getenv('SMTP_STARTTLS','false').lower()=='true'
@@ -916,9 +921,10 @@ def format_safety_email(event,recipient_name):
         recipient_name=recipient_name,home_name=event.get('home_name'),room_name=event.get('room_name'),
         camera_name=event.get('camera_name'),severity_label=severity_names.get(event.get('severity'),'Chưa rõ mức độ'),
         event_label=kind_names.get(event.get('kind'),'Cảnh báo'),occurred_at=stamp.strftime('%d/%m/%Y %H:%M:%S'),
-        event_id=event.get('id'))
+        event_id=event.get('id'),reason=event.get('reason'))
 
 def _read_notification_image(row):
+    if row.get('upload_key','').startswith('demo:') or demo_camera(row.get('camera_id')): return None,'missing'
     from .media_storage import MediaNotFound,MediaUnavailable
     if row['status']!='ready' or (row['expires_at'] and row['expires_at']<=db.now()): return None,'missing'
     if row['mime_type'] not in ('image/jpeg','image/png') or int(row['size_bytes'] or 0)>10*1024*1024: return None,'unavailable'
@@ -985,9 +991,15 @@ def process_notifications(home_id=None,delivery_id=None):
               JOIN annha.homes h ON h.id=e.home_id WHERE e.id=%s AND e.home_id=%s''',(job['event_id'],home)).fetchone()
             destination=conn.execute('SELECT destination_ciphertext FROM annha_private.notification_secrets WHERE home_id=%s AND channel_id=%s',(home,channel['id'])).fetchone() if channel['kind']=='telegram' else None
             evidence=conn.execute('''SELECT * FROM annha.media_assets WHERE home_id=%s AND event_id=%s
-              AND kind IN ('event_image','snapshot') AND mime_type IN ('image/jpeg','image/png') AND status='ready'
+              AND camera_id=%s AND kind IN ('event_image','snapshot') AND mime_type IN ('image/jpeg','image/png') AND status='ready'
               AND upload_key<>'demo:snapshot' AND (expires_at IS NULL OR expires_at>now())
-              ORDER BY created_at DESC,id DESC LIMIT 1''',(home,job['event_id'])).fetchone() if channel['kind']=='telegram' and channel['allow_media'] else None
+              ORDER BY created_at DESC,id DESC LIMIT 1''',(home,job['event_id'],job['camera_id'])).fetchone() if channel['allow_media'] else None
+            # Defer the same pending delivery without holding a lock or consuming a retry.
+            wait_s=max(0,min(10,float(os.getenv('NOTIFICATION_EVIDENCE_WAIT_SECONDS','3'))))
+            deadline=job['created_at']+timedelta(seconds=wait_s)
+            if channel['allow_media'] and not evidence and db.now()<deadline:
+                conn.execute('UPDATE annha.notification_deliveries SET next_attempt_at=%s WHERE id=%s',(deadline,job['id']))
+                continue
             conn.execute("UPDATE annha.notification_deliveries SET status='sending',attempt_count=attempt_count+1,next_attempt_at=now()+interval '2 minutes',last_dispatch_at=now() WHERE id=%s",(job['id'],))
         message=format_telegram_event({'name':event['home_name'],'timezone':event['timezone']},event)
         state='accepted';error=None;provider_id=None;media_result='not_requested';retry_after=None;provider_account_ref='default'
@@ -996,10 +1008,21 @@ def process_notifications(home_id=None,delivery_id=None):
                 if os.getenv('EMAIL_ALERTS_ENABLED','false').lower()!='true': raise RuntimeError('EmailProviderDisabled')
                 with db.connect('auth') as conn: recipient=conn.execute('SELECT email,name,email_version FROM annha_private.users WHERE id=%s AND disabled_at IS NULL AND deleted_at IS NULL',(channel['recipient_user_id'],)).fetchone()
                 if not recipient or recipient['email_version']!=job['email_version']: raise RuntimeError('StaleEmail')
+                photo=None
+                if channel['allow_media']:
+                    photo,media_result=_read_notification_image(evidence) if evidence else (None,'missing')
+                    if photo and len(photo)>5*1024*1024: photo=None;media_result='unavailable'
+                else: media_result='consent_disabled'
                 with db.connect('worker',home) as conn:
                     if not conn.execute('SELECT annha_private.can_dispatch_notification(%s) AS ok',(job['id'],)).fetchone()['ok']: raise RuntimeError('NotEligible')
+                    latest=conn.execute('SELECT allow_media FROM annha.notification_channels WHERE id=%s',(channel['id'],)).fetchone()
+                    if not latest or not latest['allow_media']: photo=None;media_result='consent_disabled'
                 rendered=format_safety_email(event,recipient['name'])
-                send_mail(recipient['email'],rendered.subject,rendered.text,rendered.html)
+                if photo:
+                    ext='jpg' if evidence['mime_type']=='image/jpeg' else 'png'
+                    send_mail(recipient['email'],rendered.subject,rendered.text,rendered.html,
+                        attachment=(photo,evidence['mime_type'],event['kind']+'_event.'+ext))
+                else: send_mail(recipient['email'],rendered.subject,rendered.text,rendered.html)
             else:
                 if not destination or not os.getenv('TELEGRAM_BOT_TOKEN','').strip(): raise TelegramDeliveryError('TelegramNotConfigured')
                 chat_id=decrypt(destination['destination_ciphertext'])['chat_id']

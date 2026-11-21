@@ -28,6 +28,7 @@ import io
 import logging
 import math
 import os
+import queue
 from pathlib import Path
 import signal
 import sys
@@ -250,7 +251,10 @@ class AnNhaEdgeRuntime:
             "temperature_low": 15.0,
         }
         self._observation: str = "clear"
-        self._camera_ok: bool = True
+        self._camera_ok: bool = False
+        self._evidence_frame = (None, 0.0)
+        self._event_queue = queue.Queue(maxsize=64)
+        self._device_faults = set()
         self._stop_event = threading.Event()
         self._workers: list[threading.Thread] = []
 
@@ -319,21 +323,11 @@ class AnNhaEdgeRuntime:
             gas_high = float(self._env_thresholds.get("gas_high") or 450.0)
             if gas_val >= gas_high:
                 logger.critical("[LocalSafety] CẢNH BÁO RÒ RỈ KHÍ GAS: %.1f >= %.1f!", gas_val, gas_high)
-                siren_ok, _ = self.audio.trigger_emergency_siren(
+                self.audio.trigger_emergency_siren(
                     "gas",
                     "Cảnh báo khẩn cấp! Phát hiện nồng độ khí gas vượt ngưỡng an toàn!",
                 )
-                if siren_ok and self.device_token:
-                    now_m = time.monotonic()
-                    last_ev = getattr(self, "_last_gas_event_ts", -1e9)
-                    if now_m - last_ev >= 60.0:
-                        self._last_gas_event_ts = now_m
-                        self.client.send_event(
-                            kind="environment",
-                            severity="critical",
-                            observation="abnormal",
-                            reason=f"Nồng độ khí gas vượt ngưỡng nguy hiểm ({gas_val:.0f} >= {gas_high:.0f}).",
-                        )
+                # Backend telemetry owns environment episodes and their event IDs.
 
     def handle_fall_detected(self, confidence: float, reason: str, jpeg_evidence: bytes | None = None) -> None:
         """Xử lý tức thời khi AI phát hiện té ngã: Hú còi tại phòng trước -> Gửi Event + Ảnh lên Backend."""
@@ -345,20 +339,44 @@ class AnNhaEdgeRuntime:
         # 2. Đẩy sự kiện & ảnh bằng chứng lên Backend AnNhà (nếu có cấu hình token)
         if not self.device_token:
             return
-        ev = self.client.send_event(
-            kind="fall",
-            severity="critical",
-            observation="abnormal",
-            reason=reason,
-            confidence=confidence,
-        )
-        if ev and ev.get("id") and jpeg_evidence:
-            self.client.upload_evidence(
-                jpeg_evidence,
-                mime_type="image/jpeg",
-                filename="fall_evidence.jpg",
-                internal_event_id=str(ev["id"]),
-            )
+        self._queue_event(kind="fall", severity="critical", observation="abnormal",
+                          reason=reason, confidence=confidence)
+
+    def _on_fall(self, confidence: float = 0.92, confidence_pct_str: str = "", **_kw: Any) -> None:
+        self.handle_fall_detected(float(confidence), "Mô hình AI phát hiện chuyển động té ngã trên camera.")
+
+    def _on_immobility(self, duration: float) -> None:
+        self._queue_event(kind="immobility", severity="warning", observation="abnormal",
+                          duration_s=duration, reason=f"Phát hiện bất động kéo dài {duration:.0f} giây.")
+
+    def _current_evidence(self):
+        jpg, stamp = self._evidence_frame
+        if self.force_mock_hardware or not self._camera_ok or time.monotonic()-stamp > 2.0:
+            return None
+        return jpg
+
+    def _queue_event(self, **payload):
+        payload.setdefault("observed_at", datetime.now().astimezone().isoformat())
+        if not self.device_token:
+            return
+        try:
+            self._event_queue.put_nowait((payload, self._current_evidence()))
+        except queue.Full:
+            logger.error("[Evidence] Event queue full; submitting text event in background")
+            threading.Thread(target=self.client.send_event, kwargs=payload, daemon=True).start()
+
+    def _event_io_loop(self):
+        while not self._stop_event.is_set():
+            try:
+                payload, jpg = self._event_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                self.client.send_event(**payload, jpeg_evidence=jpg)
+            except Exception:
+                logger.exception("[Evidence] Event submission failed")
+            finally:
+                self._event_queue.task_done()
 
     def _safety_loop(self) -> None:
         """Luồng giám sát an toàn rò rỉ khí gas độc lập hoàn toàn (1.5s), không bị nghẽn bởi I/O mạng hay lệnh âm thanh."""
@@ -383,12 +401,18 @@ class AnNhaEdgeRuntime:
                 # 1. Gửi Telemetry môi trường định kỳ
                 if self.device_token and now >= next_tel:
                     readings = self.bridge.get_telemetry_readings()
-                    self.client.send_telemetry(readings)
+                    self.client.send_telemetry(readings, jpeg_evidence=self._current_evidence())
                     next_tel = now + self.telemetry_interval_s
 
                 # 2. Heartbeat & đồng bộ cấu hình
                 if self.device_token and now >= next_hb:
                     sensors_ok = bool(self.bridge.is_hardware_connected or self.force_mock_hardware)
+                    faults = {name for name, ok in (("camera", self._camera_ok), ("sensors", sensors_ok)) if not ok}
+                    if not self.force_mock_hardware:
+                        for fault in faults - self._device_faults:
+                            self._queue_event(kind="device", severity="warning", observation="abnormal",
+                                              reason=f"Thiết bị báo lỗi {fault}.")
+                    self._device_faults = faults
                     self.client.send_heartbeat(
                         observation=self._observation,
                         camera_ok=self._camera_ok,
@@ -462,6 +486,7 @@ class AnNhaEdgeRuntime:
                     self._observation = "camera_error"
                     self._stop_event.wait(0.5)
                     continue
+                captured_at = time.monotonic()
                 self._camera_ok = True
                 self._observation = "clear"
 
@@ -487,9 +512,11 @@ class AnNhaEdgeRuntime:
 
                 ok_enc, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                 if ok_enc:
+                    self._evidence_frame = (buf.tobytes(), captured_at)
                     self.streamer.update_frame_jpeg(buf.tobytes())
                 self._stop_event.wait(0.18)
         finally:
+            self._camera_ok = False
             cap.release()
 
     def _run_opencv_mediapipe_loop(self, cap: Any) -> None:
@@ -503,15 +530,6 @@ class AnNhaEdgeRuntime:
             if candidate.exists():
                 model_path = str(candidate)
 
-        latest_jpg_holder: dict[str, bytes | None] = {"jpg": None}
-
-        def _on_fall(confidence: float = 0.92, **_kw: Any) -> None:
-            self.handle_fall_detected(
-                confidence=float(confidence),
-                reason="Mô hình AI phát hiện chuyển động té ngã trên camera.",
-                jpeg_evidence=latest_jpg_holder["jpg"],
-            )
-
         detector = None
         if os.path.exists(model_path):
             try:
@@ -521,7 +539,10 @@ class AnNhaEdgeRuntime:
                     num_features=NUM_FEATURES,
                     confidence_threshold=fd_cfg.FALL_CONFIDENCE_THRESHOLD,
                     event_cooldown=fd_cfg.FALL_EVENT_COOLDOWN,
-                    on_fall_alert=_on_fall,
+                    on_fall_alert=self._on_fall,
+                    on_immobility_alert=self._on_immobility,
+                    enable_immobility=fd_cfg.ENABLE_IMMOBILITY_DETECTION,
+                    immobility_timeout_seconds=fd_cfg.IMMOBILITY_TIMEOUT_SECONDS,
                 )
             except Exception as exc:
                 logger.warning("[Vision] Không khởi tạo được TFLite FallDetector (%s) -> chỉ chạy Pose Tracking.", exc)
@@ -550,6 +571,7 @@ class AnNhaEdgeRuntime:
                         self._stop_event.wait(0.5)
                         continue
 
+                    captured_at = time.monotonic()
                     self._camera_ok = True
                     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     rgb.flags.writeable = False
@@ -628,9 +650,10 @@ class AnNhaEdgeRuntime:
                     ok_enc, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                     if ok_enc:
                         jpg_bytes = buf.tobytes()
-                        latest_jpg_holder["jpg"] = jpg_bytes
+                        self._evidence_frame = (jpg_bytes, captured_at)
                         self.streamer.update_frame_jpeg(jpg_bytes)
         finally:
+            self._camera_ok = False
             cap.release()
 
     def _run_mock_hud_loop(self) -> None:
@@ -677,7 +700,9 @@ class AnNhaEdgeRuntime:
         t_safe.start()
         t_io.start()
         t_vis.start()
-        self._workers = [t_safe, t_io, t_vis]
+        t_events = threading.Thread(target=self._event_io_loop, name="annha-edge-events", daemon=True)
+        t_events.start()
+        self._workers = [t_safe, t_io, t_vis, t_events]
         return self
 
     def stop(self) -> None:

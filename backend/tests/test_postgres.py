@@ -632,6 +632,25 @@ class PostgresTests(unittest.TestCase):
         with db.connect('worker',home['id'],camera=camera['id']) as conn:
             self.assertEqual(conn.execute('SELECT count(*) AS n FROM annha.camera_configurations WHERE camera_id=%s',(camera['id'],)).fetchone()['n'],3)
 
+    def test_event_management_read_and_observation_workflow(self):
+        from backend.tests.event_management_cases import exercise_event_management
+        owner,_=self.account('events-owner@example.com')
+        viewer,viewer_user=self.account('events-viewer@example.com')
+        outsider,_=self.account('events-outsider@example.com')
+        home,_,camera,provision=self.home_camera(owner)
+        with db.connect('auth') as conn:
+            conn.execute("INSERT INTO annha_private.home_memberships(home_id,user_id,role) VALUES(%s,%s,'viewer')",
+                         (home['id'],viewer_user['id']))
+            conn.execute('INSERT INTO annha_private.camera_grants(home_id,camera_id,user_id,can_view) VALUES(%s,%s,%s,true)',
+                         (home['id'],camera['id'],viewer_user['id']))
+        path,event_id=exercise_event_management(self,owner,viewer,outsider,self.device(provision),home['id'])
+        # An older event can exist without stored observations.
+        with db.connect('worker',home['id']) as conn:
+            conn.execute('DELETE FROM annha.event_updates WHERE event_id=%s',(event_id,))
+        response=owner.get(path+'/updates')
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(response.json(),{'items':[],'total':0,'page':1,'page_size':10,'total_pages':1})
+
     def test_config_version_event_realtime_and_persistence(self):
         owner,_=self.account('owner@example.com')
         home,room,camera,provision=self.home_camera(owner);device=self.device(provision)
@@ -1042,6 +1061,15 @@ class PostgresTests(unittest.TestCase):
         self.assertFalse({item['id'] for item in first['items']}&{item['id'] for item in second['items']})
         filtered=owner.get(url+f"?page=1&kind=fall&room_id={room['id']}&camera_id={camera['id']}&hours=24").json()
         self.assertEqual(filtered['total'],6);self.assertTrue(all(item['kind']=='fall' for item in filtered['items']))
+        event_id=first['items'][0]['id']
+        self.assertEqual(owner.post(f'/api/events/{event_id}/read').status_code,200)
+        closed_id=first['items'][1]['id']
+        closed=owner.post(f'/api/events/{closed_id}/actions',json={'action':'safe','note':'Đã kiểm tra','confirm_abnormal':True})
+        self.assertEqual(closed.status_code,200,closed.text)
+        blockers=owner.get(url,params={'camera_id':camera['id'],'active_only':True,'page':1,'page_size':20}).json()
+        self.assertEqual(blockers['total'],12)
+        self.assertEqual({item['status'] for item in blockers['items']},{'OPEN','ACKNOWLEDGED'})
+        self.assertEqual(owner.get(url,params={'active_only':True}).status_code,422)
         self.assertEqual(owner.get(url+'?page=0').status_code,422)
         self.assertEqual(outsider.get(url+'?page=1').status_code,404)
         self.assertEqual(owner.request('DELETE',f"/api/homes/{home['id']}",json={'confirmation':'wrong'}).status_code,422)
@@ -1391,7 +1419,7 @@ class PostgresTests(unittest.TestCase):
         home,room,camera,provision=self.home_camera(owner);device=self.device(provision)
         png=b'\x89PNG\r\n\x1a\nphase4-private-image'
         chat_id='-100'+str(int(self.suffix,16))
-        with patch.dict(os.environ,{'TELEGRAM_BOT_TOKEN':'phase4-mock-token','MEDIA_STORAGE_PROVIDER':'local'}):
+        with patch.dict(os.environ,{'TELEGRAM_BOT_TOKEN':'phase4-mock-token','MEDIA_STORAGE_PROVIDER':'local','NOTIFICATION_EVIDENCE_WAIT_SECONDS':'0'}):
             payload={'telegram':{'enabled':True,'event_kinds':['fall'],'minimum_severity':'warning','camera_scope_all':True,'camera_ids':[],'chat_id':chat_id,'allow_media':False},
               'email':{'enabled':False,'event_kinds':['fall'],'minimum_severity':'warning','camera_scope_all':True,'camera_ids':[]}}
             saved=owner.put(f"/api/homes/{home['id']}/notification-recipients/{owner_user['id']}",json=payload)
@@ -1537,12 +1565,12 @@ class PostgresTests(unittest.TestCase):
             self.assertIn('AnNhà',matching[0].args[1])
             self.assertIn('Nhà test '+self.suffix,matching[0].args[2])
             self.assertIn('Nghi ngờ té ngã',matching[0].args[2])
-            self.assertIn('không đính kèm ảnh hoặc video',matching[0].args[2])
+            self.assertIn('cho phép riêng cho Email',matching[0].args[2])
             self.assertIn('Nhà test '+self.suffix,matching[0].args[3])
             with db.connect('worker',home['id']) as conn:
                 row=conn.execute('SELECT status,media_result FROM annha.notification_deliveries WHERE id=%s',(delivery['id'],)).fetchone()
                 attempt=conn.execute('SELECT status,provider FROM annha.delivery_attempts WHERE delivery_id=%s ORDER BY attempt DESC LIMIT 1',(delivery['id'],)).fetchone()
-            self.assertEqual((row['status'],row['media_result']),('accepted','not_requested'))
+            self.assertEqual((row['status'],row['media_result']),('accepted','consent_disabled'))
             self.assertEqual((attempt['status'],attempt['provider']),('accepted','smtp'))
             history=owner.get(f"/api/homes/{home['id']}/delivery-status")
             self.assertEqual(history.status_code,200,history.text)
@@ -1596,3 +1624,437 @@ class PostgresTests(unittest.TestCase):
     def test_fasttrack_safety_email_retry_and_single_target(self):
         from .fasttrack_cases import safety_retry_case
         safety_retry_case(self)
+
+    def test_detail_actions_stop_pending_and_future_reminders(self):
+        from unittest.mock import patch
+        owner,owner_user=self.account('detail-actions@example.com')
+        home,room,camera,provision=self.home_camera(owner);device=self.device(provision)
+        with patch.dict(os.environ,{'TELEGRAM_BOT_TOKEN':'offline-fixture'}), \
+             patch.object(services,'send_telegram_text') as text,patch.object(services,'send_telegram_photo') as photo:
+            saved=owner.put(f"/api/homes/{home['id']}/notification-recipients/{owner_user['id']}",json={
+                'telegram':{'enabled':True,'chat_id':'123','event_kinds':['fall']},'email':{'enabled':False}})
+            self.assertEqual(saved.status_code,200,saved.text)
+            for action in ('acknowledge','resolve','false_alarm'):
+                event=device.post('/api/device/events',json={'event_id':'detail-'+action,'kind':'fall','severity':'critical',
+                    'observation':'abnormal','observed_at':db.now().isoformat()}).json()['id']
+                opened=owner.get('/api/events/'+event).json()
+                self.assertEqual(opened['status'],'OPEN');self.assertFalse(opened['is_read'])
+                with db.connect('worker',home['id']) as conn:
+                    conn.execute("UPDATE annha.notification_deliveries SET status='accepted',accepted_at=now()-interval '16 minutes',last_dispatch_at=now()-interval '16 minutes' WHERE event_id=%s",(event,))
+                services.schedule_notification_reminders(home['id'])
+                with db.connect('worker',home['id']) as conn:
+                    pending=conn.execute("SELECT id FROM annha.notification_deliveries WHERE event_id=%s AND status='pending'",(event,)).fetchone()
+                self.assertIsNotNone(pending)
+                result=owner.post('/api/events/'+event+'/actions',json={'action':action,'note':'Đã kiểm tra','confirm_abnormal':True})
+                self.assertEqual(result.status_code,200,result.text)
+                services.schedule_notification_reminders(home['id'])
+                services.process_notifications(home['id'],str(pending['id']))
+                with db.connect('worker',home['id']) as conn:
+                    self.assertEqual(conn.execute('SELECT status FROM annha.notification_deliveries WHERE id=%s',(pending['id'],)).fetchone()['status'],'cancelled')
+                    self.assertEqual(conn.execute('SELECT count(*) AS n FROM annha.notification_deliveries WHERE event_id=%s',(event,)).fetchone()['n'],2)
+            text.assert_not_called();photo.assert_not_called()
+
+class EvidenceNotificationUnitTests(unittest.TestCase):
+    """Offline regression tests: all database, SMTP and Telegram calls are mocked."""
+
+    def test_smtp_optional_image_and_transactional_compatibility(self):
+        from unittest.mock import patch
+        from backend.src.email_templates import render_email
+        with patch.object(services.smtplib,'SMTP') as smtp:
+            services.send_mail('fixture@example.invalid','Fall','text','<p>text</p>',
+                attachment=(b'\xff\xd8\xffimage','image/jpeg','fall_event.jpg'))
+            message=smtp.return_value.__enter__.return_value.send_message.call_args.args[0]
+            self.assertEqual([(p.get_filename(),p.get_content_type()) for p in message.iter_attachments()],
+                             [('fall_event.jpg','image/jpeg')])
+            for kind in ('verification','password_reset','invitation'):
+                rendered=render_email(kind,code='12345678',token='fixture')
+                services.send_mail('fixture@example.invalid',rendered.subject,rendered.text,rendered.html)
+                message=smtp.return_value.__enter__.return_value.send_message.call_args.args[0]
+                self.assertEqual(list(message.iter_attachments()),[])
+            for mime,data in [('text/plain',b'x'),('image/png',b'x'*(5*1024*1024+1))]:
+                with self.assertRaises(ValueError):
+                    services.send_mail('fixture@example.invalid','test','text',attachment=(data,mime,'test'))
+
+    def run_delivery(self,channel_kind='telegram',kind='fall',consent=True,image=True,
+                     age=60,reject=False,eligible=True,revoke=False,read_result=None,ambiguous=False,wait_seconds=3):
+        from unittest.mock import MagicMock,patch
+        now=db.now()
+        job={'id':'delivery','channel_id':'channel','event_id':'event','camera_id':'camera',
+             'created_at':now-services.timedelta(seconds=age),'attempt_count':0,'email_version':1}
+        channel={'id':'channel','recipient_user_id':'user','kind':channel_kind,'allow_media':consent}
+        event={'id':'event','kind':kind,'severity':'critical','first_observed_at':now,
+               'home_name':'Home','timezone':'UTC','camera_name':'Camera','room_name':'Room','reason':'Fixture reason'}
+        evidence={'mime_type':'image/png'} if image else None
+        updates=[];queries=[];state=['pending']
+        conn=MagicMock();conn.__enter__.return_value=conn
+        def execute(sql,args=()):
+            queries.append((sql,args));result=MagicMock()
+            if sql.startswith('SELECT * FROM annha.notification_deliveries'): row=job if state[0]=='pending' else None
+            elif 'can_dispatch_notification' in sql: row={'ok':eligible}
+            elif sql.startswith('SELECT * FROM annha.notification_channels'): row=channel
+            elif sql.startswith('SELECT e.*'): row=event
+            elif sql.startswith('SELECT destination_ciphertext'): row={'destination_ciphertext':'fixture'}
+            elif sql.startswith('SELECT * FROM annha.media_assets'): row=evidence
+            elif sql.startswith('SELECT email,name'): row={'email':'fixture@example.invalid','name':'Fixture','email_version':1}
+            elif sql.startswith('SELECT allow_media'): row={'allow_media':consent and not revoke}
+            elif sql.startswith('SELECT c.allow_media'): row={'allow_media':consent and not revoke,'destination_ciphertext':'fixture'}
+            else: row=None
+            if sql.startswith('UPDATE annha.notification_deliveries SET status=%s'):
+                state[0]=args[0];updates.append(args)
+            if "status='cancelled'" in sql: state[0]='cancelled'
+            result.fetchone.return_value=row
+            return result
+        conn.execute.side_effect=execute
+        with patch.object(db,'connect',return_value=conn), \
+             patch.dict(os.environ,{'EMAIL_ALERTS_ENABLED':'true','TELEGRAM_BOT_TOKEN':'offline-fixture','NOTIFICATION_EVIDENCE_WAIT_SECONDS':str(wait_seconds)}), \
+             patch.object(services,'decrypt',return_value={'chat_id':'123'}), \
+             patch.object(services,'_read_notification_image',return_value=read_result or (b'\x89PNG\r\n\x1a\nfixture','sent')), \
+             patch.object(services,'send_mail') as mail, \
+             patch.object(services,'send_telegram_photo',return_value='photo') as photo, \
+             patch.object(services,'send_telegram_text',return_value='text') as text:
+            if reject: photo.side_effect=services.TelegramDeliveryError('TelegramPhotoRejected')
+            if ambiguous: photo.side_effect=services.TelegramDeliveryError('TelegramTimeout',ambiguous=True)
+            services.process_notifications('home','delivery')
+            services.process_notifications('home','delivery')
+        return mail,photo,text,updates,queries,state[0]
+
+    def test_allowed_images_each_event_kind_and_channel(self):
+        for kind in ('fall','immobility','environment','device'):
+            for channel in ('email','telegram'):
+                with self.subTest(kind=kind,channel=channel):
+                    mail,photo,text,updates,queries,state=self.run_delivery(channel,kind)
+                    self.assertEqual(state,'accepted');self.assertEqual(len(updates),1)
+                    if channel=='email':
+                        self.assertEqual(mail.call_count,1)
+                        self.assertEqual(mail.call_args.kwargs['attachment'][2],kind+'_event.png')
+                    else:
+                        self.assertEqual(photo.call_count,1);text.assert_not_called()
+                        self.assertIn('/#/event/event',photo.call_args.args[1])
+                    sql,args=next(q for q in queries if q[0].startswith('SELECT * FROM annha.media_assets'))
+                    self.assertIn('camera_id=%s',sql);self.assertIn('event_id=%s',sql)
+                    self.assertEqual(args,('home','event','camera'))
+
+    def test_no_image_no_consent_or_revoked_consent_sends_text(self):
+        for channel in ('email','telegram'):
+            for options in ({'image':False},{'consent':False},{'revoke':True},
+                            {'read_result':(None,'unavailable')}):
+                with self.subTest(channel=channel,options=options):
+                    mail,photo,text,updates,queries,state=self.run_delivery(channel,**options)
+                    self.assertEqual(state,'accepted');photo.assert_not_called()
+                    if channel=='email': self.assertNotIn('attachment',mail.call_args.kwargs)
+                    else: self.assertEqual(text.call_count,1)
+
+    def test_delay_and_telegram_rejection_and_ambiguous_timeout(self):
+        mail,photo,text,updates,queries,state=self.run_delivery(age=0,image=False)
+        self.assertEqual(state,'pending');self.assertEqual(updates,[])
+        mail.assert_not_called();photo.assert_not_called();text.assert_not_called()
+        self.assertTrue(any('next_attempt_at=%s' in sql for sql,args in queries))
+        mail,photo,text,updates,queries,state=self.run_delivery(reject=True)
+        self.assertEqual(state,'accepted');self.assertEqual(text.call_count,1)
+        self.assertEqual(updates[0][-2],'text_fallback')
+        mail,photo,text,updates,queries,state=self.run_delivery(ambiguous=True)
+        self.assertEqual(state,'unknown');self.assertEqual(photo.call_count,1);text.assert_not_called()
+
+    def test_configured_wait_covers_cloud_processing_and_keeps_fallback_deadline(self):
+        mail,photo,text,updates,queries,state=self.run_delivery('email',age=4.3,image=False,wait_seconds=8)
+        self.assertEqual(state,'pending');mail.assert_not_called();self.assertEqual(updates,[])
+        mail,photo,text,updates,queries,state=self.run_delivery('email',age=4.3,image=True,wait_seconds=8)
+        self.assertEqual(state,'accepted');self.assertEqual(mail.call_count,1)
+        self.assertIn('attachment',mail.call_args.kwargs)
+        mail,photo,text,updates,queries,state=self.run_delivery('email',age=9,image=False,wait_seconds=8)
+        self.assertEqual(state,'accepted');self.assertEqual(mail.call_count,1)
+        self.assertNotIn('attachment',mail.call_args.kwargs)
+
+    def test_recipient_without_camera_access_gets_nothing(self):
+        mail,photo,text,updates,queries,state=self.run_delivery(eligible=False)
+        self.assertEqual(state,'cancelled')
+        mail.assert_not_called();photo.assert_not_called();text.assert_not_called()
+
+    def test_expired_demo_and_invalid_image_rejected(self):
+        from unittest.mock import patch
+        row={'status':'ready','expires_at':db.now()-services.timedelta(seconds=1),
+             'mime_type':'image/png','size_bytes':20,'provider':'local','camera_id':'fixture'}
+        with patch.object(services,'demo_camera',return_value=False):
+            self.assertEqual(services._read_notification_image(row),(None,'missing'))
+            row.update(expires_at=None,upload_key='demo:snapshot')
+            with patch.object(services.media_storage,'LocalStorage') as storage:
+                self.assertEqual(services._read_notification_image(row),(None,'missing'))
+                storage.assert_not_called()
+            row.update(upload_key='fixture',mime_type='text/plain')
+            self.assertEqual(services._read_notification_image(row),(None,'unavailable'))
+
+    def test_edge_callbacks_freshness_and_async_event_upload(self):
+        from unittest.mock import MagicMock,patch
+        import queue
+        import threading
+        import time
+        from fall_detect.edge.main_edge import AnNhaEdgeRuntime
+        from fall_detect.edge.client.device_client import DeviceClient
+        edge=AnNhaEdgeRuntime.__new__(AnNhaEdgeRuntime)
+        edge.device_token='fixture';edge.force_mock_hardware=False;edge._camera_ok=True
+        edge._evidence_frame=(b'\xff\xd8\xfffixture',time.monotonic())
+        edge._event_queue=queue.Queue(maxsize=64);edge._stop_event=threading.Event()
+        edge.tracker=MagicMock();edge.audio=MagicMock()
+        client=DeviceClient.__new__(DeviceClient)
+        client.applied_version=0;client._lock=threading.Lock()
+        from collections import deque
+        client._outbox_events=deque(maxlen=200)
+        response=MagicMock(status_code=200);response.json.return_value={'id':'exact-event-id'}
+        client._request=MagicMock(return_value=response);client.upload_evidence=MagicMock()
+        edge.client=client
+        edge._on_fall(0.96,'96.00%')
+        edge._on_immobility(120)
+        client._request.assert_not_called()  # Camera callbacks only queue network work.
+        original_send=client.send_event
+        def send_and_stop(**kwargs):
+            result=original_send(**kwargs)
+            if edge._event_queue.empty(): edge._stop_event.set()
+            return result
+        with patch.object(client,'send_event',side_effect=send_and_stop): edge._event_io_loop()
+        self.assertEqual([c.kwargs['json_body']['kind'] for c in client._request.call_args_list],['fall','immobility'])
+        self.assertEqual(client._request.call_args_list[1].kwargs['json_body']['duration_s'],120)
+        self.assertEqual(client.upload_evidence.call_count,2)
+        self.assertEqual(client.upload_evidence.call_args.kwargs['internal_event_id'],'exact-event-id')
+        for camera_ok,mock,stamp in ((False,False,time.monotonic()),(True,True,time.monotonic()),(True,False,time.monotonic()-5)):
+            edge._camera_ok=camera_ok;edge.force_mock_hardware=mock;edge._evidence_frame=(b'old-or-mock',stamp)
+            self.assertIsNone(edge._current_evidence())
+
+    def test_event_outbox_retains_original_evidence_and_id(self):
+        from unittest.mock import MagicMock
+        from collections import deque
+        import threading
+        from fall_detect.edge.client.device_client import DeviceClient
+        client=DeviceClient.__new__(DeviceClient);client.applied_version=0;client._lock=threading.Lock()
+        client._outbox_events=deque(maxlen=200);client._outbox_telemetry=deque();client._outbox_executions=deque()
+        response=MagicMock(status_code=200);response.json.return_value={'id':'retried-event'}
+        client._request=MagicMock(side_effect=[TimeoutError('offline'),response]);client.upload_evidence=MagicMock()
+        client.send_event(kind='fall',severity='critical',observation='abnormal',reason='fixture',jpeg_evidence=b'original-jpeg')
+        source_id=client._outbox_events[0]['event_id']
+        client._flush_outbox()
+        self.assertEqual(client._request.call_args.kwargs['json_body']['event_id'],source_id)
+        self.assertNotIn('_evidence_jpeg',client._request.call_args.kwargs['json_body'])
+        client.upload_evidence.assert_called_once_with(b'original-jpeg',internal_event_id='retried-event',filename='fall_event.jpg')
+
+    def test_environment_response_uploads_only_returned_event_ids(self):
+        from unittest.mock import MagicMock
+        from fall_detect.edge.client.device_client import DeviceClient
+        client=DeviceClient.__new__(DeviceClient);client.tb=MagicMock()
+        response=MagicMock(status_code=200);response.json.return_value={'events':[{'id':'environment-id'}]}
+        client._request=MagicMock(return_value=response);client.upload_evidence=MagicMock()
+        self.assertTrue(client.send_telemetry({},jpeg_evidence=b'fresh-jpeg'))
+        client.upload_evidence.assert_called_once_with(b'fresh-jpeg',internal_event_id='environment-id',filename='environment_event.jpg')
+        response.json.return_value={'events':[]};client.upload_evidence.reset_mock()
+        self.assertTrue(client.send_telemetry({},jpeg_evidence=b'fresh-jpeg'))
+        client.upload_evidence.assert_not_called()
+
+    def test_detector_cooldown_callbacks_keep_original_thresholds(self):
+        from unittest.mock import MagicMock,patch
+        import importlib.util
+        import sys
+        import types
+        import numpy as np
+        # Load the actual detector with only the unavailable hardware interpreter mocked.
+        interpreter_module=types.ModuleType('tflite_runtime.interpreter')
+        interpreter_module.Interpreter=MagicMock()
+        package=types.ModuleType('tflite_runtime');package.interpreter=interpreter_module
+        with patch.dict(sys.modules,{'tflite_runtime':package,'tflite_runtime.interpreter':interpreter_module}):
+            spec=importlib.util.spec_from_file_location('evidence_test_detector',Path(__file__).parents[2]/'fall_detect/modules/detector.py')
+            module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module
+            try: spec.loader.exec_module(module)
+            finally: sys.modules.pop(spec.name,None)
+        with patch.object(module.FallDetector,'_init_model'):
+            fall=MagicMock();immobility=MagicMock()
+            detector=module.FallDetector('fixture',input_timesteps=1,event_cooldown=10,
+                immobility_timeout_seconds=30,on_fall_alert=fall,on_immobility_alert=immobility)
+        detector.interpreter=MagicMock();detector.interpreter.get_tensor.return_value=np.array([[0.95]])
+        detector.input_details=[{'index':0}];detector.output_details=[{'index':0}]
+        features=np.ones(51)
+        with patch.object(module.time,'time',return_value=100): detector.update(features)
+        with patch.object(module.time,'time',return_value=101): detector.update(features)
+        fall.assert_called_once();self.assertEqual(len(fall.call_args.args),2)
+        with patch.object(module.time,'time',return_value=131): detector.update(features)
+        immobility.assert_called_once_with(31)
+        with patch.object(module.time,'time',return_value=132): detector.update(features)
+        self.assertEqual(immobility.call_count,1);self.assertEqual(fall.call_count,2)
+
+    def test_upload_failure_keeps_event_and_retry_batch_keeps_remaining_events(self):
+        from unittest.mock import MagicMock
+        from collections import deque
+        import threading
+        from fall_detect.edge.client.device_client import DeviceClient
+        client=DeviceClient.__new__(DeviceClient);client.applied_version=0;client._lock=threading.Lock()
+        client._outbox_events=deque(maxlen=200);client._outbox_telemetry=deque();client._outbox_executions=deque()
+        response=MagicMock(status_code=200);response.json.return_value={'id':'stored-event'}
+        client._request=MagicMock(side_effect=[response,TimeoutError('image upload offline')])
+        result=client.send_event(kind='fall',severity='critical',observation='abnormal',reason='fixture',jpeg_evidence=b'jpeg')
+        self.assertEqual(result,{'id':'stored-event'})
+        self.assertFalse(client._outbox_events)
+        self.assertIn('event_id=stored-event',client._request.call_args.args[1])
+        client._outbox_events.extend([{'event_id':'first','_evidence_jpeg':b'original'}, {'event_id':'second'}])
+        client._request=MagicMock(return_value=MagicMock(status_code=503))
+        client._flush_outbox()
+        self.assertEqual([e['event_id'] for e in client._outbox_events],['first','second'])
+        self.assertEqual(client._outbox_events[0]['_evidence_jpeg'],b'original')
+
+class EventActionUnitTests(unittest.TestCase):
+    """Existing event routes and notification links, with all persistence mocked."""
+
+    def test_email_and_telegram_links_open_exact_event_route(self):
+        from unittest.mock import patch
+        event={'id':'event-id','kind':'fall','severity':'critical','first_observed_at':db.now(),
+               'timezone':'UTC','home_name':'Home','camera_name':'Camera','room_name':'Room','reason':'Fixture'}
+        with patch.dict(os.environ,{'PUBLIC_URL':'https://fixture.invalid/'}):
+            email=services.format_safety_email(event,'Fixture')
+            link='https://fixture.invalid/#/event/event-id'
+            self.assertIn('href="'+link+'"',email.html)
+            self.assertIn(link,email.text)
+            self.assertIn(link,services.format_telegram_event({'name':'Home','timezone':'UTC'},event))
+            self.assertIn(link,services.format_telegram_caption({'name':'Home','timezone':'UTC'},event))
+
+    def test_get_event_does_not_read_or_acknowledge(self):
+        from unittest.mock import MagicMock,patch
+        from backend.src import pgapi
+        conn=MagicMock();conn.__enter__.return_value=conn
+        with patch.object(pgapi,'event_scope',return_value='home') as scope,patch.object(db,'connect',return_value=conn), \
+             patch.object(services,'event_public',return_value={'id':'event','status':'OPEN','is_read':False}):
+            result=pgapi.get_event('event',{'id':'user'})
+        self.assertEqual(result['status'],'OPEN');self.assertFalse(result['is_read'])
+        scope.assert_called_once_with('event',{'id':'user'})
+        self.assertTrue(all(call.args[0].lstrip().startswith('SELECT') for call in conn.execute.call_args_list))
+
+    def test_action_denied_before_database_write(self):
+        import asyncio
+        from unittest.mock import patch
+        from fastapi import HTTPException
+        from backend.src import pgapi,models
+        with patch.object(pgapi,'event_scope',side_effect=HTTPException(403,'No event permission')) as scope, \
+             patch.object(db,'connect') as connect:
+            with self.assertRaises(HTTPException) as raised:
+                asyncio.run(pgapi.event_action('event',models.Action(action='resolve'),{'id':'viewer'}))
+            self.assertEqual(raised.exception.status_code,403);connect.assert_not_called()
+            self.assertEqual(scope.call_args.args[2],'events')
+
+    def test_action_validation_and_final_states(self):
+        import asyncio
+        from unittest.mock import MagicMock,patch,AsyncMock
+        from fastapi import HTTPException
+        from backend.src import pgapi,models
+        for action,status in [('acknowledge','ACKNOWLEDGED'),('resolve','RESOLVED'),('false_alarm','FALSE_ALARM')]:
+            with self.subTest(action=action):
+                conn=MagicMock();conn.__enter__.return_value=conn
+                conn.execute.return_value.fetchone.return_value={'id':'event','camera_id':'camera','status':'OPEN','observation':'abnormal'}
+                with patch.object(pgapi,'event_scope',return_value='home'),patch.object(db,'connect',return_value=conn), \
+                     patch.object(db,'audit'),patch.object(services,'event_public',return_value={'id':'event','status':status}), \
+                     patch.object(services,'broadcast',new_callable=AsyncMock):
+                    if action!='acknowledge':
+                        with self.assertRaises(HTTPException) as raised:
+                            asyncio.run(pgapi.event_action('event',models.Action(action=action),{'id':'user'}))
+                        self.assertEqual(raised.exception.status_code,409)
+                        self.assertFalse(any(c.args[0].startswith('UPDATE') for c in conn.execute.call_args_list))
+                    result=asyncio.run(pgapi.event_action('event',models.Action(action=action,note='Checked',confirm_abnormal=True),{'id':'user'}))
+                    self.assertEqual(result['status'],status)
+                    updates=[c for c in conn.execute.call_args_list if c.args[0].startswith('UPDATE annha.events')]
+                    self.assertEqual(len(updates),1)
+                    if action!='acknowledge':self.assertEqual(updates[0].args[1][0],status)
+                    conn.execute.return_value.fetchone.return_value['status']=status if action!='acknowledge' else 'RESOLVED'
+                    with self.assertRaises(HTTPException):
+                        asyncio.run(pgapi.event_action('event',models.Action(action=action,note='Checked',confirm_abnormal=True),{'id':'user'}))
+
+    def test_malformed_event_id_returns_404_before_database_access(self):
+        from unittest.mock import patch
+        from fastapi import HTTPException
+        from backend.src import pgapi
+        with patch.object(db,'connect') as connect:
+            with self.assertRaises(HTTPException) as raised:pgapi.event_scope('not-an-id',{'id':'user'})
+            self.assertEqual(raised.exception.status_code,404);connect.assert_not_called()
+
+    def test_postgres_read_receipt_is_private_and_acknowledgement_is_once(self):
+        from unittest.mock import MagicMock,patch
+        from backend.src import pgapi
+        for allowed in (False,True):
+            with self.subTest(handler=allowed):
+                conn=MagicMock();receipts=set();open_state=[True]
+                event={'id':'event','camera_id':'camera','home_id':'home','status':'OPEN'}
+                def execute(sql,args=()):
+                    cursor=MagicMock();row=None
+                    if sql.startswith('INSERT INTO annha.event_reads'):
+                        key=(args[2],args[3]);row=None if key in receipts else {'event_id':args[2]};receipts.add(key)
+                    elif 'can_camera' in sql:row={'allowed':allowed}
+                    elif sql.startswith('UPDATE annha.events'):
+                        row={'id':'event'} if open_state[0] else None;open_state[0]=False
+                    cursor.fetchone.return_value=row
+                    return cursor
+                conn.execute.side_effect=execute
+                with patch.object(db,'audit') as audit:
+                    self.assertEqual(pgapi._read_event(conn,event,{'id':'reader'}),(True,allowed))
+                    # Simulate a concurrent caller with the old OPEN row: conditional UPDATE wins only once.
+                    self.assertEqual(pgapi._read_event(conn,event,{'id':'reader'}),(False,False))
+                    self.assertEqual(audit.call_count,1 if allowed else 0)
+                self.assertEqual(receipts,{('event','reader')})
+                inserts=[c for c in conn.execute.call_args_list if c.args[0].startswith('INSERT INTO annha.event_actions')]
+                self.assertEqual(len(inserts),1 if allowed else 0)
+
+    def test_read_all_counts_only_new_receipts_and_broadcasts_changed_events(self):
+        import asyncio
+        from unittest.mock import MagicMock,patch,AsyncMock
+        from backend.src import pgapi
+        conn=MagicMock();conn.__enter__.return_value=conn
+        conn.execute.return_value.fetchall.return_value=[{'id':'first'},{'id':'second'}]
+        with patch.object(pgapi,'membership'),patch.object(db,'connect',return_value=conn), \
+             patch.object(pgapi,'_read_event',side_effect=[(True,True),(False,False)]), \
+             patch.object(services,'events_public',return_value=[{'id':'first'}]), \
+             patch.object(services,'broadcast',new_callable=AsyncMock) as broadcast:
+            result=asyncio.run(pgapi.mark_all_events_read('home',{'id':'user'}))
+        self.assertEqual(result,{'read_count':1,'acknowledged_count':1})
+        broadcast.assert_awaited_once_with({'id':'first'})
+
+    def test_event_endpoints_require_login_and_csrf(self):
+        from unittest.mock import patch
+        from fastapi import HTTPException,Request
+        from backend.src import pgsecurity
+        # Exercise the shared Current dependency used by GET, read and action routes.
+        with patch.object(pgsecurity,'session_user',side_effect=HTTPException(401,'Login required')):
+            for method in ('GET','POST'):
+                with self.assertRaises(HTTPException) as raised:
+                    pgsecurity.user(Request({'type':'http','method':method,'headers':[]}))
+                self.assertEqual(raised.exception.status_code,401)
+        with patch.object(pgsecurity,'session_user',return_value={'id':'user','csrf':'expected'}):
+            with self.assertRaises(HTTPException) as raised:
+                pgsecurity.user(Request({'type':'http','method':'POST','headers':[]}))
+            self.assertEqual(raised.exception.status_code,403)
+            allowed=pgsecurity.user(Request({'type':'http','method':'POST','headers':[(b'x-csrf-token',b'expected')]}))
+            self.assertEqual(allowed['id'],'user')
+
+class WebcamTestEventUnitTests(unittest.TestCase):
+    def test_no_send_flag_does_not_capture_or_send(self):
+        from unittest.mock import patch
+        from fall_detect.edge import send_test_event as script
+        with patch.object(script,'credentials') as credentials,patch.object(script,'capture_jpeg') as capture:
+            self.assertEqual(script.main([]),0)
+            credentials.assert_not_called();capture.assert_not_called()
+
+    def test_upload_uses_exact_created_event_and_is_labelled(self):
+        from unittest.mock import MagicMock
+        from fall_detect.edge.send_test_event import send_test_event
+        client=MagicMock();client.send_event.return_value={'id':'test-event'}
+        self.assertEqual(send_test_event(client,b'webcam-jpeg','fall'),'test-event')
+        self.assertIn('KIỂM THỬ',client.send_event.call_args.kwargs['reason'])
+        client.upload_evidence.assert_called_once_with(b'webcam-jpeg',internal_event_id='test-event',filename='fall_test_webcam.jpg')
+
+    def test_failed_event_does_not_upload_and_failed_upload_is_reported(self):
+        from unittest.mock import MagicMock
+        from fall_detect.edge.send_test_event import send_test_event
+        client=MagicMock();client.send_event.return_value=None
+        with self.assertRaises(ValueError):send_test_event(client,b'webcam-jpeg','fall')
+        client.upload_evidence.assert_not_called()
+        client.send_event.return_value={'id':'test-event'};client.upload_evidence.return_value=None
+        with self.assertRaisesRegex(ValueError,'test-event'):send_test_event(client,b'webcam-jpeg','fall')
+
+    def test_webcam_released_when_capture_fails(self):
+        from unittest.mock import MagicMock,patch
+        import sys
+        from fall_detect.edge.send_test_event import capture_jpeg
+        cv2=MagicMock();cv2.VideoCapture.return_value.isOpened.return_value=False
+        with patch.dict(sys.modules,{'cv2':cv2}):
+            with self.assertRaises(ValueError):capture_jpeg(0)
+        cv2.VideoCapture.return_value.release.assert_called_once()

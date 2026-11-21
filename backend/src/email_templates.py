@@ -170,11 +170,11 @@ def render_email(kind, *, public_url='http://localhost:8188', **values):
         paragraphs = ['Vui lòng mở AnNhà để xem thông tin và chủ động kiểm tra tình hình. Email này không xác nhận người thân đang an toàn hay cần trợ giúp y tế.']
         details = [('Mức độ', values.get('severity_label')), ('Sự kiện', values.get('event_label')),
                    ('Ngôi nhà', values.get('home_name')), ('Phòng', values.get('room_name')),
-                   ('Camera', values.get('camera_name')), ('Thời điểm ghi nhận', values.get('occurred_at'))]
+                   ('Camera', values.get('camera_name')), ('Thời điểm ghi nhận', values.get('occurred_at')), ('Mô tả', values.get('reason'))]
         cta = 'Mở sự kiện trong AnNhà'
         expiry = None
-        note = 'Để bảo vệ riêng tư, email không đính kèm ảnh hoặc video gia đình.'
-        subject = 'AnNhà · Thông tin an toàn cần lưu ý'
+        note = 'Ảnh sự kiện chỉ được đính kèm khi đã cho phép riêng cho Email và người nhận còn quyền xem camera.'
+        subject = 'AnNhà · '+_text(values.get('event_label'), 'Thông tin an toàn cần lưu ý')
     else:
         raise ValueError(f'Unknown email template: {kind}')
     html, text = _layout(title=title, preheader=preheader, greeting=name, paragraphs=paragraphs,
