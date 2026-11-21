@@ -632,6 +632,25 @@ class PostgresTests(unittest.TestCase):
         with db.connect('worker',home['id'],camera=camera['id']) as conn:
             self.assertEqual(conn.execute('SELECT count(*) AS n FROM annha.camera_configurations WHERE camera_id=%s',(camera['id'],)).fetchone()['n'],3)
 
+    def test_event_management_and_ota_safety(self):
+        from backend.tests.event_management_cases import exercise_event_management
+        owner,_=self.account('events-owner@example.com')
+        viewer,viewer_user=self.account('events-viewer@example.com')
+        outsider,_=self.account('events-outsider@example.com')
+        home,_,camera,provision=self.home_camera(owner)
+        with db.connect('auth') as conn:
+            conn.execute("INSERT INTO annha_private.home_memberships(home_id,user_id,role) VALUES(%s,%s,'viewer')",
+                         (home['id'],viewer_user['id']))
+            conn.execute('INSERT INTO annha_private.camera_grants(home_id,camera_id,user_id,can_view) VALUES(%s,%s,%s,true)',
+                         (home['id'],camera['id'],viewer_user['id']))
+        path,event_id=exercise_event_management(self,owner,viewer,outsider,self.device(provision),home['id'])
+        # An older event can exist without stored observations.
+        with db.connect('worker',home['id']) as conn:
+            conn.execute('DELETE FROM annha.event_updates WHERE event_id=%s',(event_id,))
+        response=owner.get(path+'/updates')
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(response.json(),{'items':[],'total':0,'page':1,'page_size':10,'total_pages':1})
+
     def test_config_version_event_realtime_and_persistence(self):
         owner,_=self.account('owner@example.com')
         home,room,camera,provision=self.home_camera(owner);device=self.device(provision)

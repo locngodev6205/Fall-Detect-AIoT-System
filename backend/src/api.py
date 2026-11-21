@@ -10,6 +10,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from . import device_pairing
+from .web_queries import page_result
 from . import db, models as m, services as svc
 from .security import COOKIE, SESSION_SECONDS, active_rights, camera_access, device, digest, effective_camera_permissions, membership, password_hash, password_matches, public_user, throttle, user, verification_code_digest, reset_code_digest
 
@@ -423,61 +424,134 @@ def put_smart_modes(camera_id:str,payload:m.SmartModes,current:Current):
         return {'camera_id':camera_id,'desired_version':updated['version'],'applied_version':camera['applied_version'],'smart_modes':updated['smart_modes']}
 
 
+def visible_event_cameras(conn,home_id,user_id):
+    ids=[row['id'] for row in conn.execute('SELECT id FROM cameras WHERE home_id=?',(home_id,))]
+    return effective_camera_permissions(conn,home_id,user_id,ids)
+
+
+def scoped_event(conn,event_id,user_id,action='view'):
+    row=conn.execute('SELECT * FROM events WHERE id=?',(event_id,)).fetchone()
+    if not row: raise HTTPException(404,'Không tìm thấy sự kiện.')
+    camera_access(conn,row['camera_id'],user_id,action,historical=True)
+    return row
+
+
 @router.get('/homes/{home_id}/events')
 def events(home_id:str,current:Current,limit:int=100,status:str|None=None):
     if not 1<=limit<=500: raise HTTPException(422,'Giới hạn phải từ 1 đến 500.')
     with db.connect() as conn:
-        member=membership(conn,home_id,current['id'])
-        visible=[c['id'] for c in conn.execute('SELECT id FROM cameras WHERE home_id=?',(home_id,)) if member['role']=='owner' or c['id'] in member['scopes']]
+        visible=visible_event_cameras(conn,home_id,current['id'])
         if not visible: return []
         sql='SELECT * FROM events WHERE home_id=? AND camera_id IN ('+','.join('?' for _ in visible)+')'
         params=[home_id,*visible]
         if status: sql+=' AND status=?';params.append(status)
         rows=conn.execute(sql+' ORDER BY received_at DESC LIMIT ?',params+[limit]).fetchall()
-        return [svc.event_public(conn,r) for r in rows]
+        return [svc.event_public(conn,r,current['id']) for r in rows]
 
 
 @router.get('/homes/{home_id}/active-events')
 def active_events(home_id:str,current:Current,page_size:int=5):
     if not 1<=page_size<=20: raise HTTPException(422,'Giới hạn trang không hợp lệ.')
     with db.connect() as conn:
-        member=membership(conn,home_id,current['id'])
-        visible=[c['id'] for c in conn.execute('SELECT id FROM cameras WHERE home_id=?',(home_id,)) if member['role']=='owner' or c['id'] in member['scopes']]
+        visible=visible_event_cameras(conn,home_id,current['id'])
         as_of=db.now()
         if not visible:
-            return {'count':0,'items':[],'as_of':as_of}
+            return {'count':0,'unread_count':0,'items':[],'as_of':as_of}
         placeholders=','.join('?' for _ in visible)
         count=conn.execute(f"SELECT count(*) AS n FROM events WHERE home_id=? AND camera_id IN ({placeholders}) AND status IN ('OPEN','ACKNOWLEDGED')", [home_id, *visible]).fetchone()['n']
+        unread=conn.execute(f"""SELECT count(*) AS n FROM events e
+            WHERE home_id=? AND camera_id IN ({placeholders}) AND status IN ('OPEN','ACKNOWLEDGED')
+            AND NOT EXISTS (SELECT 1 FROM event_reads er WHERE er.event_id=e.id AND er.user_id=?)""",
+            [home_id,*visible,current['id']]).fetchone()['n']
         sql=f"""
-            SELECT e.*, c.name AS camera_name, r.name AS room_name
+            SELECT e.*, c.name AS camera_name, r.name AS room_name,
+                EXISTS (SELECT 1 FROM event_reads er WHERE er.event_id=e.id AND er.user_id=?) AS is_read
             FROM events e
             JOIN cameras c ON c.id=e.camera_id AND c.home_id=e.home_id
             LEFT JOIN rooms r ON r.id=c.room_id AND r.home_id=c.home_id
             WHERE e.home_id=? AND e.camera_id IN ({placeholders}) AND e.status IN ('OPEN','ACKNOWLEDGED')
-            ORDER BY e.received_at DESC, e.id DESC LIMIT ?
+            ORDER BY is_read ASC, e.received_at DESC, e.id DESC LIMIT ?
         """
-        rows=conn.execute(sql, [home_id, *visible, page_size]).fetchall()
-        items=[svc.event_public(conn,r) for r in rows]
-        return {'count':count,'items':items,'as_of':as_of}
+        rows=conn.execute(sql, [current['id'],home_id,*visible,page_size]).fetchall()
+        items=[svc.event_public(conn,r,current['id']) for r in rows]
+        return {'count':count,'unread_count':unread,'items':items,'as_of':as_of}
 
 
 @router.get('/events/{event_id}')
 def get_event(event_id:str,current:Current):
     with db.connect() as conn:
-        row=conn.execute('SELECT * FROM events WHERE id=?',(event_id,)).fetchone()
-        if not row: raise HTTPException(404,'Không tìm thấy sự kiện.')
-        camera_access(conn,row['camera_id'],current['id'],historical=True)
-        return svc.event_public(conn,row)
+        row=scoped_event(conn,event_id,current['id'])
+        return svc.event_public(conn,row,current['id'])
+
+
+def read_event(conn,event,user_id,can_handle):
+    inserted=conn.execute('INSERT INTO event_reads(event_id,user_id) VALUES(?,?) ON CONFLICT DO NOTHING',
+                          (event['id'],user_id)).rowcount
+    if not can_handle or event['status']!='OPEN':
+        return inserted,None
+    conn.execute("UPDATE events SET status='ACKNOWLEDGED' WHERE id=?",(event['id'],))
+    conn.execute('INSERT INTO actions VALUES(?,?,?,?,?,?)',
+                 (db.uid(),event['id'],user_id,'acknowledge','',db.now()))
+    db.audit(conn,event['home_id'],user_id,'event.acknowledge',event['id'])
+    updated=conn.execute('SELECT * FROM events WHERE id=?',(event['id'],)).fetchone()
+    return inserted,svc.event_public(conn,updated)
+
+
+@router.post('/events/{event_id}/read')
+async def mark_event_read(event_id:str,current:Current):
+    user_id=current['id']
+    with db.connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        event=scoped_event(conn,event_id,user_id)
+        permissions=effective_camera_permissions(conn,event['home_id'],user_id,[event['camera_id']])
+        _,updated=read_event(conn,event,user_id,permissions[event['camera_id']]['events'])
+    if updated: await svc.broadcast(updated)
+    return {'id':event_id,'read':True}
+
+
+@router.post('/homes/{home_id}/events/read-all')
+async def mark_all_events_read(home_id:str,current:Current):
+    user_id=current['id']
+    count=0
+    broadcasts=[]
+    with db.connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        permissions=visible_event_cameras(conn,home_id,user_id)
+        if permissions:
+            placeholders=','.join('?' for _ in permissions)
+            rows=conn.execute(f"""SELECT * FROM events WHERE home_id=? AND camera_id IN ({placeholders})
+                AND status IN ('OPEN','ACKNOWLEDGED') ORDER BY received_at,id""",[home_id,*permissions]).fetchall()
+            for event in rows:
+                inserted,updated=read_event(conn,event,user_id,permissions[event['camera_id']]['events'])
+                count+=inserted
+                if updated: broadcasts.append(updated)
+    for event in broadcasts: await svc.broadcast(event)
+    return {'read_count':count,'acknowledged_count':len(broadcasts)}
+
+
+@router.get('/events/{event_id}/updates')
+def event_updates(event_id:str,current:Current,page:int=1,page_size:int=10):
+    if page<1 or not 1<=page_size<=100:
+        raise HTTPException(422,'Trang hoặc kích thước trang không hợp lệ.')
+    with db.connect() as conn:
+        conn.execute('BEGIN')
+        scoped_event(conn,event_id,current['id'])
+        total=conn.execute('SELECT count(*) FROM event_updates WHERE event_id=?',(event_id,)).fetchone()[0]
+        offset=(page-1)*page_size
+        rows=conn.execute("""SELECT sequence,observed_at,received_at,observation,severity,payload
+            FROM event_updates WHERE event_id=? ORDER BY sequence DESC LIMIT ? OFFSET ?""",
+            (event_id,page_size,offset)).fetchall() if offset<total else []
+    items=[{**dict(row),'payload':json.loads(row['payload'])} for row in rows]
+    return page_result(items,total,page,page_size)
 
 
 @router.post('/events/{event_id}/actions')
 async def event_action(event_id:str,payload:m.Action,current:Current):
     with db.connect() as conn:
-        row=conn.execute('SELECT * FROM events WHERE id=?',(event_id,)).fetchone()
-        if not row: raise HTTPException(404,'Không tìm thấy sự kiện.')
-        camera_access(conn,row['camera_id'],current['id'],'events',historical=True)
+        conn.execute('BEGIN IMMEDIATE')
+        row=scoped_event(conn,event_id,current['id'],'events')
         closing=payload.action in ('resolve','safe','false_alarm')
-        if closing and row['observation'] in ('abnormal','suspected') and (not payload.confirm_abnormal or not payload.note):
+        if closing and row['observation'] in ('abnormal','suspected') and (not payload.confirm_abnormal or not payload.note.strip()):
             raise HTTPException(409,'Còn dấu hiệu bất thường. Cần xác nhận và ghi chú trước khi kết thúc.')
         if row['status'] in ('RESOLVED','FALSE_ALARM') and payload.action!='note': raise HTTPException(409,'Sự kiện đã kết thúc.')
         if payload.action=='acknowledge': conn.execute("UPDATE events SET status='ACKNOWLEDGED' WHERE id=?",(event_id,))

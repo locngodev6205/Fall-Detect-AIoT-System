@@ -182,6 +182,25 @@ class BusinessTests(unittest.TestCase):
         self.assertTrue(permissions['audio'])
         self.assertFalse(permissions['schedules'])
 
+    def test_event_management_and_ota_safety(self):
+        from backend.tests.event_management_cases import exercise_event_management
+        owner,_=self.account('events-owner@example.com')
+        viewer,viewer_user=self.account('events-viewer@example.com')
+        outsider,_=self.account('events-outsider@example.com')
+        home,_,camera,provision=self.home_camera(owner)
+        with db.connect() as conn:
+            conn.execute("INSERT INTO memberships(home_id,user_id,role) VALUES(?,?,'viewer')",
+                         (home['id'],viewer_user['id']))
+            conn.execute('INSERT INTO camera_grants(home_id,camera_id,user_id) VALUES(?,?,?)',
+                         (home['id'],camera['id'],viewer_user['id']))
+        path,event_id=exercise_event_management(self,owner,viewer,outsider,self.device(provision),home['id'])
+        # An older event can exist without stored observations.
+        with db.connect() as conn:
+            conn.execute('DELETE FROM event_updates WHERE event_id=?',(event_id,))
+        response=owner.get(path+'/updates')
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(response.json(),{'items':[],'total':0,'page':1,'page_size':10,'total_pages':1})
+
     def test_config_version_event_realtime_and_persistence(self):
         owner,_=self.account('owner@example.com')
         home,room,camera,provision=self.home_camera(owner);device=self.device(provision)
