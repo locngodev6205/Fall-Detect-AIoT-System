@@ -490,3 +490,31 @@ Bundle có SHA-256 manifest `c8b28b135b5d1b4054bafb07effc3395588d9cac1553b826458
 Episode chỉ là ablation sau khi chọn checkpoint. Lần báo đầu giữ nguyên, ngưỡng hồi phục lấy từ Walk của Train bên trong mỗi lượt. Các cohort chỉ có tối đa một Fall đã gán nhãn mỗi clip. Không suy ra hiệu năng nhiều Fall liên tiếp hoặc false alarms/hour từ những clip này.
 
 Đã xác minh các SHA-256 của `best.pt` và nạp weight tensor. Test resume checkpoint local cho cùng `evaluation.json` và hash best. File `last.pt` lưu optimizer và lịch sử ở dạng chung để nạp bằng `weights_only=True`. **42 tests đạt**, notebook hợp lệ và các cell biên dịch được. Artifact nằm ngoài Git tại `annha-recovery-payutch-v1/accuracy-pose-v1/multisource-v1` và `multisource-local`. Kaggle CLI xác thực thao tác chỉ đọc, chưa tạo Private Dataset hoặc chạy GPU.
+
+### GMDCSA24 · External benchmark đã xem trước đó
+
+| Model | Seed | TP / FP / FN | Recall | Precision | F1 / F2 | Trễ p50 | ADL FP | Cold TP/FP/FN |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| GRU E4-42 | — | 8/13/4 | 0.667 | 0.381 | 0.485 / 0.580 | 0.936 s | 10 | 9/1/3 |
+| single | 42 | 7/18/5 | 0.583 | 0.280 | 0.378 / 0.479 | 0.920 s | 13 | 8/2/4 |
+| multi | 42 | 7/12/5 | 0.583 | 0.368 | 0.452 / 0.522 | 1.216 s | 10 | 7/1/5 |
+| single | 123 | 4/20/8 | 0.333 | 0.167 | 0.222 / 0.278 | 0.842 s | 12 | 9/1/3 |
+| multi | 123 | 9/4/3 | 0.750 | 0.692 | 0.720 / 0.738 | 1.324 s | 3 | 8/0/4 |
+| single | 2026 | 6/17/6 | 0.500 | 0.261 | 0.343 / 0.423 | 1.068 s | 11 | 9/2/3 |
+| multi | 2026 | 10/7/2 | 0.833 | 0.588 | 0.690 / 0.769 | 1.142 s | 4 | 9/3/3 |
+
+| Mode | Recall mean ± SD | Precision mean ± SD | F1 mean ± SD | F2 mean ± SD | FP mean ± SD |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| single | 0.472 ± 0.127 | 0.236 ± 0.061 | 0.314 ± 0.082 | 0.393 ± 0.104 | 18.333 ± 1.528 |
+| multi | 0.722 ± 0.127 | 0.550 ± 0.165 | 0.620 ± 0.147 | 0.676 ± 0.134 | 7.667 ± 4.041 |
+
+| Checkpoint local | SHA-256 |
+| --- | --- |
+| multi-123 | `bd82ca160c8c0a7bb82dbe653f4a7748decb5da2d4a33a5cb3b3efedcb0d2ea3` |
+| multi-2026 | `f0c8f4c6512195626b4e9f2a09bbd9ce78be3bb7661dbcd6fbf05b003f52e308` |
+| multi-42 | `36498849e63e4c34efb8f65ff185e5f1a27737a8cda3ecf2b91d34454e263d78` |
+| single-123 | `7fddf6a2456ba193457ffe21705eb8443ffdccb68ce12e5365147716b39578a3` |
+| single-2026 | `1eec10cfbc8052ffa97b406dabd3fb293800e31cd1c674c026b538d57f11d44f` |
+| single-42 | `04b7e07682741f2ae15d90a90c517fbd7275b62222dc4b87c4e29bbf3c8c3830` |
+
+Thêm URFD cải thiện F2 và giảm FP so với single-source ở cả ba seed. So với GRU, hai seed multi có F2 cao hơn, còn seed 42 thấp hơn. Cold-start vẫn có 7–9 TP so với 9 TP của GRU, và trễ trung vị multi cao hơn GRU ở cả ba seed. Không chọn seed dựa trên kết quả này. Đây là bằng chứng ưu tiên kiểm chứng tiếp multi-source, chưa đủ để đổi Edge. Các số trên được đo bằng CPU local.
