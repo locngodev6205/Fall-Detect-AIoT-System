@@ -126,21 +126,30 @@ def evaluate(args):
     hashes = {"gru": digest(args.gru)}
     cache_hash = digest(args.full_cache/"manifest.json")
     for seed in SEEDS:
-        path = args.artifacts/f"full-{seed}.pt"
-        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-        if any(checkpoint[k] != v for k, v in dict(seed=seed, manifest=MANIFEST,
-               pose_cache_sha256=cache_hash, width=8, architecture=UPSTREAM_REVISION).items()):
-            raise ValueError("Unexpected Full checkpoint")
-        model = CTRGCN(base_channels=8)
-        model.load_state_dict(checkpoint["state_dict"])
-        models[str(seed)] = model.eval()
-        hashes[str(seed)] = digest(path)
-
+        for mode in ("single", "multi") if args.multisource else (None,):
+            name = f"{mode}-{seed}" if mode else str(seed)
+            directory = args.artifacts/name if mode else args.artifacts
+            path = directory/"best.pt" if mode else directory/f"full-{seed}.pt"
+            checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+            if mode:
+                expected = dict(seed=seed, mode=mode, bundle_sha=cache_hash, upstream=UPSTREAM_REVISION)
+                if any(checkpoint["identity"][key] != value for key, value in expected.items()):
+                    raise ValueError("Unexpected multi-source checkpoint")
+            else:
+                expected = dict(seed=seed, manifest=MANIFEST, pose_cache_sha256=cache_hash,
+                                width=8, architecture=UPSTREAM_REVISION)
+                if any(checkpoint[k] != v for k, v in expected.items()):
+                    raise ValueError("Unexpected Full checkpoint")
+            model = CTRGCN(base_channels=8)
+            model.load_state_dict(checkpoint["state_dict"])
+            models[name] = model.eval()
+            hashes[name] = digest(path)
     @torch.inference_mode()
     def score(model, inputs):
         return model(graph_input(torch.from_numpy(inputs))).sigmoid().item()
 
     results = {key: [] for key in models}
+    cold = {key: [] for key in models}
     with tempfile.TemporaryDirectory() as workspace:
         for row in rows:
             entry = dict(row)
@@ -155,16 +164,26 @@ def evaluate(args):
                 with np.load(pose_file, allow_pickle=False) as poses:
                     if abs(poses["stamps"][-1]+1/quality["source_fps"]-row["duration"]) > .08:
                         raise ValueError(f"Decoded timestamp duration mismatch: {path.name}")
-                    for key in ("gru",) if mode == "lite" else tuple(str(s) for s in SEEDS):
+                    for key in ("gru",) if mode == "lite" else tuple(key for key in models if key != "gru"):
                         fn = models[key] if key == "gru" else partial(score, models[key])
                         result = replay(entry, fn, poses=(poses["stamps"], poses["points"]))
                         results[key].append(dict(result, subject=row["subject"], pose=quality))
+                        if args.multisource and entry["event"]:
+                            start = max(0., entry["event"][0]-.5)
+                            cold[key].append(replay(entry, fn, start, poses=(poses["stamps"], poses["points"])))
                 pose_file.unlink()
             print(row["video_id"], flush=True)
+    summary = {}
+    for key, values in results.items():
+        metrics = summarize(values, "baseline")
+        tp, fp, fn = (metrics[k] for k in ("tp", "fp", "fn"))
+        metrics["f1"] = 2*tp/(2*tp+fp+fn)
+        summary[key] = dict(metrics=metrics, recordings=values)
+        if cold[key]:
+            summary[key].update(cold=summarize(cold[key], "baseline"), cold_recordings=cold[key])
     with args.output.open("x") as target:
         json.dump(dict(protocol=bundle["protocol"], cohort_sha256=digest(args.cohort), checkpoints=hashes,
-            cohort=rows, results={key: dict(metrics=summarize(values, "baseline"), recordings=values)
-                                  for key, values in results.items()}), target, indent=2, allow_nan=False)
+                       cohort=rows, results=summary), target, indent=2, allow_nan=False)
 
 
 def main():
@@ -176,6 +195,8 @@ def main():
     run = commands.add_parser("evaluate")
     for name in ("upstream", "data", "cohort", "media", "gru", "full_cache", "artifacts", "output"):
         run.add_argument(name, type=Path)
+    run.add_argument("--multisource", action="store_true",
+                     help="Read single- and multi-source best checkpoints for each fixed seed")
     args = parser.parse_args()
     if args.output.exists():
         parser.error("Use a fresh output")

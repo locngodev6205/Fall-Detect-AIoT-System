@@ -435,3 +435,58 @@ Mọi hiện vật giữ ngoài Git tại `annha-recovery-payutch-v1/accuracy-po
 | full-2026.pt | `78e66086814ded393df2c50c5cc2d92f95c20d460f1e5064707b34641282e6a2` |
 
 **41 test liên quan đạt.** Freeze tái tạo đúng byte JSON và hash cohort trước inference.
+
+## Multi-dataset CTR-GCN · Gói Kaggle GPU
+
+### Audit và split
+
+| Nguồn | Media local có bằng chứng | Vai trò trong lượt này | Điều khoản |
+| --- | --- | --- | --- |
+| CAUCAFall v5 | 95 recording có clock/annotation đã xác minh. 39 thuộc Train gốc | 29 candidate Train (14 Fall, 15 ADL), 10 internal Validation S8 (5 Fall, 5 ADL). Validation cũ và Test khóa ở ngoài gói | CC BY 4.0 |
+| URFD cam0 RGB | 12 reconstruction cục bộ có hash và clock gốc (4 Fall, 8 ADL) | 12 candidate Train ở chế độ multi. Một view mỗi recording, subject chưa được xác minh nên toàn miền chỉ Train | CC BY-NC-SA 4.0, học thuật phi thương mại |
+| Montréal / MCFD | 4 Fall có provenance/annotation trong PR-03 | Loại khỏi gói. Chưa xác minh quyền phân phối cloud và bốn clip không cung cấp ADL của miền này | Chưa xác minh điều khoản bản media đang giữ |
+| Le2i / IMVIA | 0 clip RGB local đã ghép clock. Có bảng thời gian OmniFall | Ngoài Train, cần khôi phục media và kiểm chứng ghép clip | Điều khoản theo bản phát hành nguồn, chưa xác minh trên bản media phù hợp |
+| GMDCSA24 v2.1 | 24 video đã đối chiếu SHA-256, 12 Fall và 12 ADL thuộc 4 subject | Chỉ dùng lại làm external benchmark đã công bố. Không đưa vào Train hoặc chọn checkpoint | CC BY 4.0 |
+
+Nguồn CAUCAFall từ Eraso, Muñoz, Muñoz và Pinto. Nguồn URFD từ Kwolek và Kępski, hai nguồn chỉ được dùng theo quyền của bản phát hành. Attribution, license, release, provenance nhãn, recording ID/subject/group/view, video và decoded SHA-256 được giữ trong nghiên cứu. Phần pose dẫn xuất từ video, không phải trọng số pose upstream. Khảo sát minh bạch phạm vi cho Le2i và Montréal mà không gán subject hoặc annotation giả. [CAUCAFall](https://data.mendeley.com/datasets/7w7fccy7ky/5) · [URFD](https://fenix.ur.edu.pl/mkepski/ds/uf.html) · [Le2i](https://doi.org/10.25666/DATAUBFC-2024-04-09) · [GMDCSA24](https://zenodo.org/records/13354453)
+
+Giữ nguyên 29 recording cũ để lưu các kết quả trước đây. S8 là một subject tách ra từ Train V2.1 để chọn epoch cho hai model mới. Nó từng xuất hiện trong quá trình train baseline E4-42 và các thử nghiệm cũ, nên bảng S8 chỉ dùng nội bộ; so sánh cả ba trên cùng cohort GMDCSA24. Cohort GMD đã được xem qua ở vòng trước, nên lượt lặp này **không phải blind test mới**. Không dùng GMD để chọn epoch, ngưỡng hoặc seed.
+
+Gói `annha-multisource-full-v1` gồm 51 NPZ và `manifest.json`, lưu timestamp, COCO-17, confidence, hash từng pose, hash video và provenance. CAUCAFall dùng lại cache MediaPipe Full 0.10.14 đã kiểm hash. URFD chạy lại 12 video với cùng Full asset SHA-256, kiểm số frame và gắn lại clock cam0 đã được PR-03 xác minh. Loader từ chối SHA, group, subject hoặc decoded SHA trùng qua split. Không trộn Lite/Full khi train. Các raw video, Test khóa và dữ liệu còn lại ở ngoài bundle.
+
+### Cách chạy từ đầu đến cuối
+
+Trên local dùng Python 3.11, Torch 2.6.0 CPU, NumPy 1.26.4, MediaPipe 0.10.14 và OpenCV 4.11 để dựng cache. Dùng checkout CTR-GCN ghim như mục trước. Kaggle dùng Python, NumPy và Torch CUDA đã có trong image. Notebook kiểm CUDA và in phiên bản đang chạy; runner lưu phiên bản Torch, loại CPU/GPU và identity vào metadata. Pose đã được cache nên Kaggle không cần cài MediaPipe/ONNX. Hai chế độ giữ width 8, window 20/3/gap-3, AdamW, threshold 0,5 và 12 epoch theo config. Khác biệt có chủ đích là thêm URFD vào chế độ multi. Các lượt ghi `last.pt` sau mỗi epoch và chọn `best.pt` theo F2 trên S8 (giữ epoch sớm nhất khi hòa), không chọn theo GMD. Config có batch size, epochs và patience; default patience 0. Resume cần cùng config, manifest, seed, mode và runtime, dùng `--resume` và thư mục hiện có.
+
+```bash
+python scripts/ml/accuracy_multisource.py prepare "$dataset_v21" "$full_cache" "$bundle"
+# Local hoặc Kaggle. Thêm --require-gpu để lỗi rõ nếu không có GPU.
+for mode in single multi; do
+  for seed in 42 123 2026; do
+    python scripts/ml/accuracy_multisource.py train "$bundle" "$upstream" \
+      notebooks/ctr_gcn_kaggle_config.json "$out/$mode-$seed" --mode "$mode" --seed "$seed"
+  done
+done
+
+python scripts/ml/accuracy_independent.py evaluate "$upstream" "$dataset_v21" \
+  "$gmd_cohort" "$gmd_media" "$e4_checkpoint" "$bundle" "$out" "$external_results" --multisource
+```
+
+Kaggle gắn Private Dataset chỉ chứa bundle `manifest.json` và 51 NPZ, cấu hình `BUNDLE` theo mount thực tế, bật Internet để clone mã và accelerator GPU, rồi chạy [notebook mỏng](../notebooks/ctr_gcn_kaggle.ipynb). Đặt `PROJECT_REF` thành SHA của lượt review khi chạy chính thức. Tải outputs `annha-ctr-gcn-runs` từ bản notebook đã lưu, rồi chạy đánh giá GMD ở local như trên. Để tiếp tục sau phiên bị reset, gắn bản outputs trước làm input và chép thư mục run cần resume vào `/kaggle/working/annha-ctr-gcn-runs`. Không upload video gốc, checkpoint cũ, credential, GMD holdout hoặc Test V2.1 trong gói huấn luyện. [Kaggle Notebook](https://www.kaggle.com/docs/notebooks) · [Kaggle Private Dataset](https://www.kaggle.com/docs/datasets)
+
+### Kết quả CPU local và artifact
+
+Bundle có SHA-256 manifest `c8b28b135b5d1b4054bafb07effc3395588d9cac1553b826458636fe2ed34864`. Cả sáu lượt hoàn tất trên CPU. Preflight loại một recording CAUCAFall khỏi window training. Single dùng **28 recording / 381 cửa sổ**, multi dùng **40 recording / 503 cửa sổ** (28 CAUCAFall, 12 URFD). Lượt S8 dùng 10 recording. Mỗi lượt tối ưu cùng recipe; thêm dữ liệu làm đổi số cập nhật mỗi epoch, nên đây là so sánh hiệu ứng thêm nguồn trong cùng pipeline, không cô lập số bước optimizer.
+
+| Chế độ | Seed | Epoch chọn | S8 TP / FP / FN | F2 | FP khi thử episode |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Single | 42 | 7 | 3 / 6 / 2 | 0,517 | 3 |
+| Single | 123 | 1 | 3 / 6 / 2 | 0,517 | 5 |
+| Single | 2026 | 9 | 3 / 3 / 2 | 0,577 | 2 |
+| Multi | 42 | 9 | 3 / 4 / 2 | 0,556 | 4 |
+| Multi | 123 | 9 | 2 / 2 / 3 | 0,417 | 1 |
+| Multi | 2026 | 12 | 3 / 1 / 2 | 0,625 | 1 |
+
+Episode chỉ là ablation sau khi chọn checkpoint. Lần báo đầu giữ nguyên, ngưỡng hồi phục lấy từ Walk của Train bên trong mỗi lượt. Các cohort chỉ có tối đa một Fall đã gán nhãn mỗi clip. Không suy ra hiệu năng nhiều Fall liên tiếp hoặc false alarms/hour từ những clip này.
+
+Đã xác minh các SHA-256 của `best.pt` và nạp weight tensor. Test resume checkpoint local cho cùng `evaluation.json` và hash best. File `last.pt` lưu optimizer và lịch sử ở dạng chung để nạp bằng `weights_only=True`. **42 tests đạt**, notebook hợp lệ và các cell biên dịch được. Artifact nằm ngoài Git tại `annha-recovery-payutch-v1/accuracy-pose-v1/multisource-v1` và `multisource-local`. Kaggle CLI xác thực thao tác chỉ đọc, chưa tạo Private Dataset hoặc chạy GPU.

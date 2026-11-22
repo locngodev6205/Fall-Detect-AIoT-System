@@ -144,3 +144,17 @@ def test_independent_duplicate_check_includes_training_subject_context_only():
     ))
     assert videos == {"train", "train-extra"}
     assert frames == {"train-frames", "train-extra-frames"}
+
+
+def test_multisource_bundle_rejects_subject_group_and_hash_overlap():
+    from accuracy_multisource import validate_partition
+    import pytest
+
+    train = dict(dataset="caucafall", split="train", subject="1",
+                 group_id="ca:one", video_sha256="a", decoded_sha256="A")
+    holdout = dict(dataset="caucafall", split="val", subject="2",
+                   group_id="ca:two", video_sha256="b", decoded_sha256="B")
+    validate_partition([train, holdout, dict(train, dataset="urfd", subject=None)])
+    for name in ("subject", "group_id", "video_sha256", "decoded_sha256"):
+        with pytest.raises(ValueError, match=name):
+            validate_partition([train, dict(holdout, **{name: train[name]})])
