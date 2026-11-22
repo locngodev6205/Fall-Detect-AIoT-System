@@ -90,7 +90,7 @@ def training_examples(recordings, size, gap, matched=False):
     return np.stack(samples), identities, labels
 
 
-def fit(examples, size, seed, visibility=False):
+def fit(examples, size, seed, visibility=False, *, recording_weights=None):
     torch.manual_seed(seed)
     gen = torch.Generator().manual_seed(seed)
     samples, ids, labels = examples
@@ -102,6 +102,8 @@ def fit(examples, size, seed, visibility=False):
     counts = Counter(ids)
     classes = Counter(dict(zip(ids, labels)).values())
     weights = torch.tensor([len(ids)/(2*counts[key]*classes[label]) for key,label in zip(ids, labels)])
+    if recording_weights is not None:
+        weights *= torch.tensor([recording_weights.get(key, 1.) for key in ids])
     model = make_model(torch, 'gru', size)
     optimizer = torch.optim.AdamW(model.parameters(), lr=.001)
     losses = []

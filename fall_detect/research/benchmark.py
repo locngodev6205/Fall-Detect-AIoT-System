@@ -33,11 +33,18 @@ def device_sample(start, cpu, frames):
                 frames=frames, rss_kib=int(rss) if rss else None, temperature_c=temp)
 
 
-def benchmark(source, model, complexity, *, live=False, limit=None, confirmations=1, preview=None, trace=None):
+def benchmark(source, model, complexity, *, live=False, limit=None, confirmations=1, preview=None, trace=None, resolution=None):
     import cv2
     import mediapipe as mp
     cv2.setNumThreads(1)
-    cap = cv2.VideoCapture(source)
+    def open_capture():
+        capture = cv2.VideoCapture(source)
+        if live and resolution:
+            capture.set(cv2.CAP_PROP_FRAME_WIDTH, resolution[0])
+            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, resolution[1])
+        return capture
+
+    cap = open_capture()
     if not cap.isOpened():
         cap.release()
         raise ValueError(f'Cannot open {source}')
@@ -76,7 +83,7 @@ def benchmark(source, model, complexity, *, live=False, limit=None, confirmation
                         detector.reset()
                     cap.release()
                     time.sleep(.5)
-                    cap = cv2.VideoCapture(source)
+                    cap = open_capture()
                     continue
                 if outage_started is not None:
                     recovery.append((arrived-outage_started)*1000)
