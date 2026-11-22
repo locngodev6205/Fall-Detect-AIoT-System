@@ -20,7 +20,7 @@ class PreemptionTests(unittest.TestCase):
         for kind in ("gas", "fall"):
             for source in ("file", "ptt"):
                 with self.subTest(kind=kind, source=source), tempfile.TemporaryDirectory() as directory:
-                    bt = BluetoothSpeakerManager(force_mock=True)
+                    bt = BluetoothSpeakerManager(force_mock=True, output_mode="bluetooth")
                     player = AudioPlayer(bt, Path(directory))
                     bt.mock_mode = False
                     children = []

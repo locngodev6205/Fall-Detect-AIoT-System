@@ -23,7 +23,7 @@ from edge.audio.scheduler import ReminderScheduler  # noqa: E402
 class Group4AudioAndSchedulerTests(unittest.TestCase):
     def test_wav_synthesis_valid_riff_headers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            bt = BluetoothSpeakerManager(force_mock=True)
+            bt = BluetoothSpeakerManager(force_mock=True, output_mode="bluetooth")
             player = AudioPlayer(bt, cache_dir=Path(tmp) / "audio")
             for wav_path in (player.chime_path, player.siren_path):
                 self.assertTrue(wav_path.exists())
@@ -35,7 +35,7 @@ class Group4AudioAndSchedulerTests(unittest.TestCase):
 
     def test_strict_bluetooth_only_blocks_playback_when_disconnected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            bt = BluetoothSpeakerManager(force_mock=True)
+            bt = BluetoothSpeakerManager(force_mock=True, output_mode="bluetooth")
             player = AudioPlayer(bt, cache_dir=Path(tmp) / "audio")
 
             # Khi loa Bluetooth kết nối -> phát thành công
@@ -49,14 +49,14 @@ class Group4AudioAndSchedulerTests(unittest.TestCase):
             self.assertIn("Loa Bluetooth chưa kết nối", detail2)
 
             # Kiểm tra bộ lọc node loại trừ triệt để HDMI / Analog 3.5mm nội bộ của Raspberry Pi
-            bt_real = BluetoothSpeakerManager(speaker_mac="AA:BB:CC:11:22:33", force_mock=False)
+            bt_real = BluetoothSpeakerManager(speaker_mac="AA:BB:CC:11:22:33", force_mock=False, output_mode="bluetooth")
             self.assertFalse(bt_real._matches_bluetooth_node("alsa_output.platform-bcm2835_audio.analog-stereo"))
             self.assertFalse(bt_real._matches_bluetooth_node("alsa_output.platform-fef00700.hdmi.hdmi-stereo"))
             self.assertTrue(bt_real._matches_bluetooth_node("bluez_output.AA_BB_CC_11_22_33.1"))
 
     def test_emergency_siren_and_gas_leak_never_silenced(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            bt = BluetoothSpeakerManager(force_mock=True)
+            bt = BluetoothSpeakerManager(force_mock=True, output_mode="bluetooth")
             player = AudioPlayer(bt, cache_dir=Path(tmp) / "audio", siren_cooldown_s=1.0)
 
             # Còi báo té ngã phát ở mức âm lượng tối đa 100%
@@ -83,7 +83,7 @@ class Group4AudioAndSchedulerTests(unittest.TestCase):
     def test_offline_scheduler_persistence_and_night_mode_suppression(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cache_dir = Path(tmp) / "edge_cache"
-            bt = BluetoothSpeakerManager(force_mock=True)
+            bt = BluetoothSpeakerManager(force_mock=True, output_mode="bluetooth")
             player = AudioPlayer(bt, cache_dir=cache_dir / "audio")
             tts_fixture = shutil.copyfile(player.chime_path, player.cache_dir / "voice.wav")
             player.synthesize_tts_wav = lambda text: Path(tts_fixture)

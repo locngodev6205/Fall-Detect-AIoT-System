@@ -29,7 +29,7 @@ class AudioHardeningTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
-        self.bt = BluetoothSpeakerManager(force_mock=True)
+        self.bt = BluetoothSpeakerManager(force_mock=True, output_mode="bluetooth")
         self.player = AudioPlayer(self.bt, self.root / "audio")
         self.addCleanup(self.player.stop)
 
