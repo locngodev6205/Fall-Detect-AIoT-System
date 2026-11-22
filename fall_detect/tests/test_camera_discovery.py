@@ -69,7 +69,7 @@ class CameraDiscoveryTests(TestCase):
 
     def test_streamer_clears_last_camera_frame(self):
         streamer = LiveStreamer("http://localhost:8188", "")
-        streamer.update_frame_jpeg(b"\\xff\\xd8\\xffexample")
+        streamer.update_frame_jpeg(b"\xff\xd8\xffexample")
         self.assertIsNotNone(streamer.get_latest_jpeg())
         streamer.clear_frame()
         self.assertIsNone(streamer.get_latest_jpeg())
