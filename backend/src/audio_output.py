@@ -9,7 +9,7 @@ def heartbeat_capabilities(payload):
 
 def audio_output_state(payload, capabilities, desired_version, applied_version, online, config_error=None):
     actual = capabilities.get('audio_output') or {}
-    desired = payload.get('audio_output') or actual.get('mode') or 'bluetooth'
+    desired = payload.get('audio_output') or actual.get('mode') or 'analog'
     desired_version, applied_version = desired_version or 0, applied_version or 0
     return {
         'mode': desired,

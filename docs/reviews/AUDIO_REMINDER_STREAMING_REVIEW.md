@@ -158,7 +158,7 @@ With a 3.5 mm device connected, the operator confirmed that a five-second contin
 
 ### Wired audio output
 
-Set `ANNHA_AUDIO_OUTPUT=analog` in the Edge env file. Existing local configurations with `analog_demo` still work. The default remains `bluetooth`. Analog mode selects a PipeWire sink whose ALSA card is exactly `bcm2835 Headphones`, targets its object serial, and fails closed if it cannot find it. File playback, TTS, reminders, local warning audio and Push-to-Talk share that selection. The wired output scales volume per stream to at most 25%, preserving the volume setting's relative range. Bluetooth commands are unavailable in analog mode. Neither mode sets the system default sink.
+Set `ANNHA_AUDIO_OUTPUT=analog` in the Edge env file. Existing local configurations with `analog_demo` still work. The default is `analog` for devices without an explicit local setting or a saved camera preference. A saved camera preference wins. Existing explicit local Bluetooth settings are preserved until a camera preference is applied. Analog mode selects a PipeWire sink whose ALSA card is exactly `bcm2835 Headphones`, targets its object serial, and fails closed if it cannot find it. File playback, TTS, reminders, local warning audio and Push-to-Talk share that selection. The wired output scales volume per stream to at most 25%, preserving the volume setting's relative range. Bluetooth commands are unavailable in analog mode. Neither mode sets the system default sink.
 
 **Staging and cutover**
 

@@ -75,7 +75,7 @@ class BluetoothSpeakerManager:
         speaker_name: str = "",
         *,
         force_mock: bool | None = None,
-        output_mode: str = "bluetooth",
+        output_mode: str = "analog",
         reconnect_interval_s: float = 12.0,
         env_file_path: Path | None = None,
     ) -> None:

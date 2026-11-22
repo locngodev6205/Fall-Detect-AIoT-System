@@ -7,7 +7,7 @@ def exercise_audio_output(test):
     device = test.device(provision)
     camera_path = f"/api/cameras/{camera['id']}"
     route = camera_path + "/audio-output"
-    test.assertEqual(user.get(route).json()['mode'], 'bluetooth')
+    test.assertEqual(user.get(route).json()['mode'], 'analog')
     test.assertEqual(user.put(route, json={'mode': 'analog_demo'}).status_code, 422)
     revision = user.put(route, json={'mode': 'analog'})
     test.assertEqual(revision.status_code, 200, revision.text)
@@ -39,3 +39,6 @@ def exercise_audio_output(test):
         test.assertEqual((actual['actual_mode'], actual['ready'], actual['switching']), (mode,ready,False))
         if not ready:
             test.assertEqual(actual['error'], 'Loa chưa sẵn sàng')
+    refreshed = user.put(camera_path + "/smart-modes", json={**modes, 'night_mode_enabled': True})
+    test.assertEqual(refreshed.status_code, 200, refreshed.text)
+    test.assertEqual(device.get('/api/device/config').json()['audio_output'], 'bluetooth')

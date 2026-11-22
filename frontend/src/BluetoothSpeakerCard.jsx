@@ -84,7 +84,7 @@ function AudioOutputControls({ cameraId, canControl, onMode }) {
     <section className="spaced" aria-label="Đầu ra âm thanh">
       <label>
         <strong>Đầu ra âm thanh</strong>
-        <select value={state?.mode || 'bluetooth'} disabled={!state || saving || !canControl}
+        <select value={state?.mode || 'analog'} disabled={!state || saving || !canControl}
           onChange={event => selectOutput(event.target.value)}>
           {Object.entries(audioOutputLabels).map(([mode, label]) => <option key={mode} value={mode}>{label}</option>)}
         </select>

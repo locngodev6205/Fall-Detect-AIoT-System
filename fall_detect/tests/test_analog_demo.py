@@ -35,7 +35,7 @@ class AnalogDemoTests(unittest.TestCase):
             bluetooth.assert_not_called()
 
     def test_bluetooth_mode_never_looks_for_analog(self):
-        bt = BluetoothSpeakerManager(force_mock=False)
+        bt = BluetoothSpeakerManager(force_mock=False, output_mode="bluetooth")
         with patch.object(bt, "detect_bluetooth_sink", return_value=(None, "none")), \
              patch.object(bt, "_detect_analog_sink") as analog:
             self.assertFalse(bt.is_speaker_ready())
@@ -68,7 +68,7 @@ class AnalogDemoTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            bt = BluetoothSpeakerManager(force_mock=True)
+            bt = BluetoothSpeakerManager(force_mock=True, output_mode="bluetooth")
             player = AudioPlayer(bt, root / 'sound')
             client = DeviceClient('http://fixture', 'fixture', cache_dir=root)
 
@@ -107,14 +107,15 @@ class AnalogDemoTests(unittest.TestCase):
                 'capabilities': {'camera': True, 'speaker': True, 'sensors': True},
                 'audio_output': {**report, 'version': 2},
             }), requests)
+            client._save_cached_config({'audio_output': 'bluetooth', 'version': 3})
             client.stop()
             player.stop()
 
             restarted = DeviceClient('http://fixture', '', cache_dir=root)
-            fallback = BluetoothSpeakerManager(force_mock=True, output_mode='analog_demo')
+            fallback = BluetoothSpeakerManager(force_mock=True)
             self.assertEqual(fallback.output_mode, 'analog')
-            fallback.select_output('bluetooth')
+            self.assertEqual(fallback.normalize_output('analog_demo'), 'analog')
             restarted.on_config_updated(lambda cfg: fallback.select_output(cfg['audio_output']))
-            self.assertEqual(fallback.output_mode, 'analog')
-            self.assertEqual(restarted.applied_version, 2)
+            self.assertEqual(fallback.output_mode, 'bluetooth')
+            self.assertEqual(restarted.applied_version, 3)
             restarted.stop()
