@@ -25,6 +25,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, StreamingResponse
 from starlette.background import BackgroundTask
 from . import pgdb as db, models, media_storage
+from .audio_output import audio_output_state, heartbeat_capabilities
 from .email_templates import render_email
 from .demo_metadata import demo_camera
 from .pgsecurity import digest,verification_code_digest,reset_code_digest,membership,session_user,camera_access,device_identity
@@ -189,6 +190,8 @@ def compile_config(home,camera,extra_patch=None):
         previous=conn.execute('SELECT * FROM annha.camera_configurations WHERE camera_id=%s ORDER BY version DESC LIMIT 1',(camera,)).fetchone()
         prev_modes=current_config_payload(previous['payload'] if previous else {})['smart_modes']
         body=jsonable_encoder({'camera_id':camera,'environment':settings,'reminders':reminders,'smart_modes':prev_modes})
+        if previous and 'audio_output' in previous['payload']:
+            body['audio_output'] = previous['payload']['audio_output']
         if extra_patch: body.update(jsonable_encoder(extra_patch))
         if previous and {key:value for key,value in current_config_payload(previous['payload']).items() if key!='version'}==body: return previous['payload']
         version=previous['version']+1 if previous else 1;body['version']=version

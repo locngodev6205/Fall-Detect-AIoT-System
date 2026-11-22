@@ -4,9 +4,11 @@ import asyncio
 import hashlib
 import os
 import psycopg
+import re
 import secrets
 from typing import Annotated
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter,Depends,HTTPException,Request,Response
 from fastapi.encoders import jsonable_encoder
 from . import device_pairing
@@ -401,6 +403,29 @@ def config(camera_id:str,current:Current):
         state=conn.execute('SELECT * FROM annha.camera_config_state WHERE camera_id=%s',(camera_id,)).fetchone() or {}
         row=conn.execute('SELECT payload FROM annha.camera_configurations WHERE camera_id=%s ORDER BY version DESC LIMIT 1',(camera_id,)).fetchone()
     return {'desired_version':state.get('desired_version',0),'applied_version':state.get('applied_version') or 0,'error':state.get('error'),'payload':svc.current_config_payload(row['payload'] if row else {})}
+
+@router.get('/cameras/{camera_id}/audio-output')
+def get_audio_output(camera_id: str, current: Current):
+    camera = camera_access(camera_id, current['id'])
+    with db.connect('app', camera['home_id'], current['id']) as conn:
+        state = conn.execute('SELECT desired_version,applied_version,error FROM annha.camera_config_state WHERE camera_id=%s',
+                             (camera_id,)).fetchone() or {}
+        row = conn.execute('SELECT payload FROM annha.camera_configurations WHERE camera_id=%s ORDER BY version DESC LIMIT 1',
+                           (camera_id,)).fetchone()
+    online = bool(camera['last_seen_at'] and (db.now() - camera['last_seen_at']).total_seconds() < 45)
+    return svc.audio_output_state(row['payload'] if row else {}, camera['capabilities'],
+                                  state.get('desired_version'), state.get('applied_version'), online, state.get('error'))
+
+
+@router.put('/cameras/{camera_id}/audio-output')
+def put_audio_output(camera_id: str, payload: m.AudioOutput, current: Current):
+    camera = camera_access(camera_id, current['id'], 'audio')
+    if svc.compile_config(camera['home_id'], camera_id, {'audio_output': payload.mode}) is None:
+        raise HTTPException(404, 'Không tìm thấy camera.')
+    with db.connect('app', camera['home_id'], current['id']) as conn:
+        db.audit(conn, camera['home_id'], current['id'], 'camera.audio_output', camera_id)
+    return get_audio_output(camera_id, current)
+
 
 @router.get('/cameras/{camera_id}/smart-modes')
 def get_smart_modes(camera_id:str,current:Current):
@@ -1248,7 +1273,7 @@ def deliveries(home_id:str,current:Current,recipient_id:UUID|None=None,page:int|
 @router.post('/device/heartbeat')
 def heartbeat(payload:m.Heartbeat,current:Device):
     with db.connect('worker',current['home_id'],camera=current['id']) as conn:
-        conn.execute('UPDATE annha.cameras SET last_seen_at=now(),observation=%s,capabilities=%s WHERE id=%s',(payload.observation,db.J(payload.capabilities),current['id']))
+        conn.execute('UPDATE annha.cameras SET last_seen_at=now(),observation=%s,capabilities=%s WHERE id=%s',(payload.observation,db.J(svc.heartbeat_capabilities(payload)),current['id']))
         state=conn.execute('SELECT desired_version FROM annha.camera_config_state WHERE camera_id=%s',(current['id'],)).fetchone()
     if isinstance(payload.bluetooth,dict):
         _PG_BT_STATE[str(current['id'])]={
@@ -1274,7 +1299,7 @@ def config_ack(payload:m.ConfigAck,current:Device):
         if not state or not conn.execute('SELECT 1 FROM annha.camera_configurations WHERE camera_id=%s AND version=%s',(current['id'],payload.version)).fetchone(): raise HTTPException(422,'Không có phiên bản cấu hình này.')
         if payload.version<(state['applied_version'] or 0): raise HTTPException(409,'Phản hồi cấu hình cũ.')
         conn.execute('INSERT INTO annha.config_acknowledgements(home_id,camera_id,message_id,version,success,error) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING',(current['home_id'],current['id'],f'{payload.version}:{payload.success}:{hashlib.sha256(payload.error.encode()).hexdigest()}',payload.version,payload.success,payload.error))
-        if payload.success: conn.execute('UPDATE annha.camera_config_state SET applied_version=%s,applied_at=now(),error=NULL WHERE camera_id=%s',(payload.version,current['id']))
+        if payload.success: conn.execute('UPDATE annha.camera_config_state SET applied_version=%s,applied_at=now(),error=%s WHERE camera_id=%s',(payload.version,payload.error or None,current['id']))
         else: conn.execute('UPDATE annha.camera_config_state SET error=%s WHERE camera_id=%s',(payload.error or 'Thiết bị từ chối cấu hình',current['id']))
     return {'message':'Đã ghi nhận phản hồi.'}
 
@@ -1307,7 +1332,7 @@ def command_ack(command_id:str,payload:m.CommandAck,current:Device):
         row=fail_if_missing(conn.execute('SELECT * FROM annha.commands WHERE id=%s AND camera_id=%s FOR UPDATE',(command_id,current['id'])).fetchone())
         if row['status'] in ('executed','failed','expired'):
             if row['status']==payload.status: return {'status':row['status']}
-            raise HTTPException(409,'Lệnh đã kết thúc.')
+            raise HTTPException(409,{'message':'Lệnh đã kết thúc.','status':row['status']})
         if row['expires_at']<db.now() and row['status']!='executing': raise HTTPException(409,'Lệnh đã hết hạn.')
         stages={'pending':0,'accepted':1,'executing':2,'executed':3,'failed':3}
         if stages.get(row['status'],0)>stages[payload.status]: raise HTTPException(409,'Không được lùi trạng thái lệnh.')
@@ -1318,8 +1343,26 @@ def command_ack(command_id:str,payload:m.CommandAck,current:Device):
 def execution(payload:m.Execution,current:Device):
     with db.connect('device',current['home_id'],camera=current['id']) as conn:
         reminder=fail_if_missing(conn.execute('SELECT * FROM annha.reminders WHERE id=%s AND camera_id=%s',(payload.reminder_id,current['id'])).fetchone())
+        version = reminder['current_version']
+        scheduled_at = db.now()
+        # Edge occurrence keys encode the immutable schedule revision and local date.
+        match = re.fullmatch(r'(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}):v([1-9]\d{0,8})', payload.occurrence)
+        if match:
+            day, local_time, raw_version = match.groups()
+            revision = fail_if_missing(conn.execute(
+                "SELECT local_time,timezone FROM annha.reminder_revisions WHERE reminder_id=%s AND camera_id=%s AND version=%s",
+                (payload.reminder_id, current['id'], int(raw_version))).fetchone())
+            try:
+                scheduled_at = datetime.fromisoformat(f'{day}T{local_time}').replace(tzinfo=ZoneInfo(revision['timezone']))
+                if scheduled_at.time() != revision['local_time']:
+                    raise ValueError("Occurrence time differs from revision")
+            except (ValueError, ZoneInfoNotFoundError) as exc:
+                raise HTTPException(422, 'Thời điểm lịch nhắc không hợp lệ.') from exc
+            version = int(raw_version)
+        # A targetless DO NOTHING preserves the device role's INSERT-only grant.
         conn.execute('''INSERT INTO annha.reminder_executions(home_id,camera_id,reminder_id,reminder_version,occurrence_key,scheduled_at,executed_at,status,detail)
-            VALUES(%s,%s,%s,%s,%s,now(),now(),%s,%s) ON CONFLICT(camera_id,reminder_id,occurrence_key) DO NOTHING''',(current['home_id'],current['id'],payload.reminder_id,reminder['current_version'],payload.occurrence,payload.status,payload.detail))
+            VALUES(%s,%s,%s,%s,%s,%s,now(),%s,%s) ON CONFLICT DO NOTHING''',
+            (current['home_id'],current['id'],payload.reminder_id,version,payload.occurrence,scheduled_at,payload.status,payload.detail))
     return {'stored':True}
 
 @router.get('/device/assets/{asset_id}')

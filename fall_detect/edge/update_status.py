@@ -47,7 +47,7 @@ class UpdateStatusServer:
         fresh = camera_stamp > 0 and 0 <= now - camera_stamp < 5
         safety_fresh = safety_stamp > 0 and 0 <= now - safety_stamp < 5
         healthy = fresh and safety_fresh and r.model_inference_ok and not r.force_mock_hardware
-        busy = r.audio.is_busy()
+        busy = r.audio_worker.is_busy() or r.audio.is_busy()
         ready = healthy and not r.local_danger and not r.unreported_alert and not busy
         reason = '' if ready else ('Nguy hiểm hoặc cảnh báo chưa gửi' if r.local_danger or r.unreported_alert else
             'Âm thanh đang phát' if busy else 'Camera, model hoặc giám sát an toàn chưa sẵn sàng')

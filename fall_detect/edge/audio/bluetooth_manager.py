@@ -75,9 +75,12 @@ class BluetoothSpeakerManager:
         speaker_name: str = "",
         *,
         force_mock: bool | None = None,
+        output_mode: str = "analog",
         reconnect_interval_s: float = 12.0,
         env_file_path: Path | None = None,
     ) -> None:
+        self.output_mode = self.normalize_output(output_mode)
+        self._routing_lock = threading.RLock()
         raw_mac = (speaker_mac or "").strip().upper()
         if raw_mac and not MAC_RE.fullmatch(raw_mac):
             logger.warning("[BluetoothAudio] Địa chỉ BT_SPEAKER_MAC không hợp lệ (%r) -> bỏ qua.", speaker_mac)
@@ -104,6 +107,22 @@ class BluetoothSpeakerManager:
         self._thread: threading.Thread | None = None
         self._mock_connected: bool = True
         self._last_scanned_devices: list[dict[str, Any]] = []
+
+    @staticmethod
+    def normalize_output(mode: str) -> str:
+        mode = "analog" if mode == "analog_demo" else mode
+        if mode not in ("bluetooth", "analog"):
+            raise ValueError("ANNHA_AUDIO_OUTPUT must be bluetooth or analog")
+        return mode
+
+    @property
+    def uses_analog(self) -> bool:
+        return self.output_mode == "analog"
+
+    def select_output(self, mode: str) -> None:
+        with self._routing_lock:
+            self.output_mode = self.normalize_output(mode)
+            self.refresh_sink()
 
     def set_mock_connected(self, connected: bool) -> None:
         """Hỗ trợ kiểm thử kịch bản mất kết nối loa Bluetooth."""
@@ -763,28 +782,40 @@ class BluetoothSpeakerManager:
 
         return None, "none"
 
+    def _detect_analog_sink(self) -> tuple[str | None, str]:
+        if not self._has_wpctl:
+            return None, "none"
+        env = get_audio_env()
+        try:
+            status = subprocess.run(["wpctl", "status"], capture_output=True, text=True,
+                                    check=True, timeout=1.0, env=env).stdout
+            audio = status.split("\nVideo", 1)[0]
+            sinks = audio.partition("Sinks:")[2].partition("Sources:")[0]
+            for node_id in re.findall(r"^.*?\b(\d+)\.\s+", sinks, re.M):
+                info = subprocess.run(["wpctl", "inspect", node_id], capture_output=True, text=True,
+                                      check=True, timeout=0.75, env=env).stdout
+                if not re.search(r'^\s*(?:\*\s*)?api\.alsa\.card\.name = "bcm2835 Headphones"\s*$', info, re.M):
+                    continue
+                serial = re.search(r'^\s*(?:\*\s*)?object\.serial = "([1-9]\d*)"', info, re.M)
+                if serial:
+                    return serial.group(1), "wpctl"
+        except (OSError, subprocess.SubprocessError):
+            logger.debug("[Audio] Không xác nhận được đầu ra 3,5 mm.")
+        return None, "none"
+
     def refresh_sink(self, *, attempt_connect: bool = False) -> str | None:
-        """Làm mới trạng thái Sink Bluetooth; thử kết nối lại qua `bluetoothctl` nếu cần."""
-        sink, backend = self.detect_bluetooth_sink()
-        if sink is None and attempt_connect and not self.mock_mode:
-            if self._bluetoothctl_connect():
+        with self._routing_lock:
+            if self.uses_analog and not self.mock_mode:
+                sink, backend = self._detect_analog_sink()
+            else:
                 sink, backend = self.detect_bluetooth_sink()
+                if sink is None and attempt_connect and not self.mock_mode and self._bluetoothctl_connect():
+                    sink, backend = self.detect_bluetooth_sink()
 
-        with self._lock:
-            self._active_sink = sink
-            self._active_backend = backend
-
-        if sink and not self.mock_mode:
-            env = get_audio_env()
-            try:
-                if backend == "wpctl":
-                    subprocess.run(["wpctl", "set-default", sink], check=False, timeout=1.5, env=env)
-                elif backend == "pactl":
-                    subprocess.run(["pactl", "set-default-sink", sink], check=False, timeout=1.5, env=env)
-                    subprocess.run(["pactl", "set-sink-mute", sink, "0"], check=False, timeout=1.5, env=env)
-            except Exception:
-                pass
-        return sink
+            with self._lock:
+                self._active_sink = sink
+                self._active_backend = backend
+            return sink
 
     def is_speaker_ready(self) -> bool:
         """Kiểm tra Loa Bluetooth đã sẵn sàng nhận âm thanh chưa."""
@@ -794,18 +825,33 @@ class BluetoothSpeakerManager:
         sink = self.refresh_sink(attempt_connect=False)
         return sink is not None
 
-    def apply_volume(self, volume: int) -> bool:
+    def resolve_live_target(self, sink: str, backend: str) -> str:
+        if self.uses_analog or backend != "wpctl":
+            return sink
+        result = subprocess.run(["wpctl", "inspect", sink], capture_output=True, text=True,
+                                timeout=0.75, env=get_audio_env())
+        # wpctl status lists object IDs; PipeWire playback targets accept serials or names.
+        name = re.search(r'^\s*(?:\*\s*)?node\.name = "(bluez_(?:output|sink)\.[^"]+)"', result.stdout, re.M)
+        serial = re.search(r'^\s*(?:\*\s*)?object\.serial = "(\d+)"', result.stdout, re.M)
+        if result.returncode or not name or not serial:
+            raise OSError("Không xác nhận được Bluetooth sink PipeWire.")
+        return serial.group(1)
+
+    def apply_volume(self, volume: int, *, refresh: bool = True) -> bool:
         """Đặt âm lượng trực tiếp lên đúng Sink Bluetooth (tuyệt đối không chạm `amixer` 3.5mm/HDMI)."""
         vol = max(0, min(100, int(volume)))
         if self.mock_mode:
             return self.is_speaker_ready()
 
-        sink = self.refresh_sink(attempt_connect=False)
+        if refresh:
+            self.refresh_sink(attempt_connect=False)
+        with self._lock:
+            sink = self._active_sink
+            backend = self._active_backend
         if not sink:
             return False
-
-        with self._lock:
-            backend = self._active_backend
+        if self.uses_analog:
+            return True  # Wired output uses per-stream volume.
 
         env = get_audio_env()
         try:
@@ -852,6 +898,7 @@ class BluetoothSpeakerManager:
     def get_status(self) -> dict[str, Any]:
         with self._lock:
             return {
+                "mode": self.output_mode,
                 "ready": bool(self._mock_connected) if self.mock_mode else (self._active_sink is not None),
                 "mock_mode": self.mock_mode,
                 "sink": self._active_sink,

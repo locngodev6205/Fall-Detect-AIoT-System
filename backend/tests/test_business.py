@@ -347,6 +347,10 @@ class BusinessTests(unittest.TestCase):
             self.assertNotIn('reference',current)
         self.assertEqual(device.get('/api/device/config').json()['zones'],[])
 
+    def test_camera_audio_output_config_and_actual_state(self):
+        from backend.tests.audio_output_cases import exercise_audio_output
+        exercise_audio_output(self)
+
     def test_reminder_commands_assets_and_telemetry(self):
         owner,_=self.account('owner@example.com');home,room,camera,provision=self.home_camera(owner);device=self.device(provision)
         payload={'camera_id':camera['id'],'name':'Nhắc ăn','time':'07:00','text':'Nhớ ăn sáng nhé','source':'tts'}
@@ -365,6 +369,20 @@ class BusinessTests(unittest.TestCase):
         self.assertEqual(len(device.get('/api/device/commands').json()),1)
         self.assertEqual(device.post(f"/api/device/commands/{first.json()['id']}/ack",json={'status':'executed'}).status_code,200)
         self.assertEqual(device.get('/api/device/commands').json(),[])
+        ack = f"/api/device/commands/{first.json()['id']}/ack"
+        self.assertEqual(device.post(ack, json={"status": "executed"}).json(), {"status": "executed"})
+        conflict = device.post(ack, json={"status": "failed"})
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.json()["detail"]["status"], "executed")
+        second = owner.post(f"/api/cameras/{camera['id']}/commands",
+                            json={**cmd, "idempotency_key": "expired-command"})
+        self.assertEqual(second.status_code, 201, second.text)
+        expired_id = second.json()["id"]
+        with db.connect() as conn:
+            conn.execute("UPDATE commands SET status='expired' WHERE id=?", (expired_id,))
+        expired = device.post(f"/api/device/commands/{expired_id}/ack", json={"status": "executed"})
+        self.assertEqual(expired.status_code, 409)
+        self.assertEqual(expired.json()["detail"]["status"], "expired")
         reading={'message_id':'reading-1','observed_at':db.now(),'readings':{'temperature':{'value':28,'unit':'C'}}}
         self.assertEqual(device.post('/api/device/telemetry',json=reading).status_code,200)
         self.assertEqual(len(owner.get(f"/api/cameras/{camera['id']}/telemetry").json()),1)
@@ -409,12 +427,15 @@ class BusinessTests(unittest.TestCase):
                 sender.send_bytes(frame)
                 self.assertEqual(viewer.receive_bytes(),frame)
         with self.client.websocket_connect('/ws/device/audio',headers=headers) as speaker:
-            with owner.websocket_connect(f"/ws/audio/{camera['id']}") as microphone:
+            with self.client.websocket_connect(f"/ws/audio/{camera['id']}", headers={"Cookie": "; ".join(f"{key}={value}" for key, value in owner.cookies.items())}) as microphone:
                 microphone.send_json({'mime':'audio/webm'})
-                self.assertEqual(speaker.receive_json()['type'],'start')
+                start=speaker.receive_json()
+                self.assertEqual(start['type'],'start')
+                speaker.send_json({'type':'ready','session':start['session']})
                 self.assertEqual(microphone.receive_json()['type'],'ready')
                 microphone.send_bytes(b'stream-chunk')
                 self.assertEqual(speaker.receive_bytes(),b'stream-chunk')
+                speaker.send_json({'type':'received','session':start['session']})
                 microphone.send_json({'type':'stop'})
                 self.assertEqual(speaker.receive_json()['type'],'stop')
 

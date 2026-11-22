@@ -405,6 +405,28 @@ def config(camera_id:str,current:Current):
         return {'desired_version':camera['desired_version'],'applied_version':camera['applied_version'],'error':camera['config_error'],'payload':svc.current_config_payload(json.loads(row['payload']) if row else {})}
 
 
+@router.get('/cameras/{camera_id}/audio-output')
+def get_audio_output(camera_id: str, current: Current):
+    with db.connect() as conn:
+        camera = camera_access(conn, camera_id, current['id'])
+        row = conn.execute('SELECT payload FROM configurations WHERE camera_id=? ORDER BY version DESC LIMIT 1',
+                           (camera_id,)).fetchone()
+    payload = json.loads(row['payload']) if row else {}
+    capabilities = json.loads(camera['capabilities'])
+    online = bool(camera['last_seen'] and (datetime.now(timezone.utc) - datetime.fromisoformat(camera['last_seen'])).total_seconds() < 45)
+    return svc.audio_output_state(payload, capabilities, camera['desired_version'], camera['applied_version'], online, camera['config_error'])
+
+
+@router.put('/cameras/{camera_id}/audio-output')
+def put_audio_output(camera_id: str, payload: m.AudioOutput, current: Current):
+    with db.connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        camera = camera_access(conn, camera_id, current['id'], 'audio')
+        svc.revision(conn, camera_id, {'audio_output': payload.mode})
+        db.audit(conn, camera['home_id'], current['id'], 'camera.audio_output', camera_id)
+    return get_audio_output(camera_id, current)
+
+
 @router.get('/cameras/{camera_id}/smart-modes')
 def get_smart_modes(camera_id:str,current:Current):
     with db.connect() as conn:
@@ -1028,7 +1050,7 @@ def deliveries(home_id:str,current:Current):
 @router.post('/device/heartbeat')
 def heartbeat(payload:m.Heartbeat,current:Device):
     with db.connect() as conn:
-        conn.execute('UPDATE cameras SET last_seen=?,observation=?,capabilities=? WHERE id=?',(db.now(),payload.observation,db.dumps(payload.capabilities),current['id']))
+        conn.execute('UPDATE cameras SET last_seen=?,observation=?,capabilities=? WHERE id=?',(db.now(),payload.observation,db.dumps(svc.heartbeat_capabilities(payload)),current['id']))
         if isinstance(payload.bluetooth,dict):
             _save_camera_bluetooth(conn,current['id'],payload.bluetooth)
     return {'server_time':db.now(),'desired_version':current['desired_version']}
@@ -1055,7 +1077,7 @@ def config_ack(payload:m.ConfigAck,current:Device):
         camera=conn.execute('SELECT * FROM cameras WHERE id=?',(current['id'],)).fetchone()
         if not conn.execute('SELECT 1 FROM configurations WHERE camera_id=? AND version=?',(current['id'],payload.version)).fetchone(): raise HTTPException(422,'Không có phiên bản cấu hình này.')
         if payload.version<camera['applied_version']: raise HTTPException(409,'Phản hồi cấu hình cũ.')
-        if payload.success: conn.execute('UPDATE cameras SET applied_version=?,config_error=NULL WHERE id=?',(payload.version,current['id']))
+        if payload.success: conn.execute('UPDATE cameras SET applied_version=?,config_error=? WHERE id=?',(payload.version,payload.error or None,current['id']))
         else: conn.execute('UPDATE cameras SET config_error=? WHERE id=?',(payload.error or 'Thiết bị từ chối cấu hình',current['id']))
     return {'message':'Đã ghi nhận phản hồi.'}
 
@@ -1092,7 +1114,7 @@ def command_ack(command_id:str,payload:m.CommandAck,current:Device):
         if not row: raise HTTPException(404,'Không tìm thấy lệnh cho thiết bị.')
         if row['status'] in ('executed','failed','expired'):
             if row['status']==payload.status: return {'status':row['status']}
-            raise HTTPException(409,'Lệnh đã kết thúc.')
+            raise HTTPException(409,{'message':'Lệnh đã kết thúc.','status':row['status']})
         if row['expires']<time.time() and row['status']!='executing': raise HTTPException(409,'Lệnh đã hết hạn.')
         stages={'pending':0,'accepted':1,'executing':2,'executed':3,'failed':3}
         if stages.get(row['status'],0)>stages[payload.status]: raise HTTPException(409,'Không được lùi trạng thái lệnh.')

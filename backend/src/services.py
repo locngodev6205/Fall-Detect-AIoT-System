@@ -19,6 +19,7 @@ import urllib.request
 from fastapi import HTTPException
 from cryptography.fernet import Fernet
 from . import db, models
+from .audio_output import audio_output_state, heartbeat_capabilities
 from .email_templates import render_email
 from .security import digest, verification_code_digest, reset_code_digest, membership, camera_access, effective_camera_permissions, session_user
 
