@@ -155,3 +155,18 @@ For classroom deployment, stage the tested PR revision beside the current releas
 ### Physical 3.5 mm comparison
 
 With a 3.5 mm device connected, the operator confirmed that a five-second continuous 48 kHz stereo tone and the offline eSpeak NG Vietnamese sentence were clear and uninterrupted. Each was played separately using the explicitly selected bcm2835 Headphones PipeWire node, with fallback disabled and 12% stream volume. Both children exited 0. The same listener heard dropouts on the Bluetooth comparison at both 200 and 600 ms. This validates the analog output as a hardware fallback. The deployed default sink and Bluetooth-only runtime routing were left in place. Integrated Reminder and Push-to-Talk through the wired output still require a staged demo test and authorization before runtime cutover.
+
+### Explicit analog demo mode
+
+Set `ANNHA_AUDIO_OUTPUT=analog_demo` in the Edge demo env file. The default remains `bluetooth`. Analog mode selects a PipeWire sink whose ALSA card is exactly `bcm2835 Headphones`, targets its object serial, and fails closed if it cannot find it. File playback, TTS, reminders, local warning audio and Push-to-Talk share that selection. The demo scales volume per stream to at most 25%, preserving the volume setting's relative range. Bluetooth commands are unavailable in analog mode. Neither mode sets the system default sink.
+
+**Staging and cutover**
+
+1. The Pi checkout at `~/annha-audio-demo-cba5ea0` runs the tested Edge source. Keep the demo env and cache separate under `~/annha-audio-analog-demo`. The isolated PTT fixture uses a loopback tunnel. For the class demo, first configure a reachable matching backend and frontend with the newer WebSocket protocol, a demo camera/account and separate backend data. Put the demo device credentials only in the private demo env file.
+2. Keep `annha-edge.service` and release `0.1.0` running during prep. Before a full-runtime cutover, supply the normal model/dependencies in a separate demo checkout or release bundle. Confirm that the demo env explicitly selects analog, points to the demo backend, and uses its own cache. The CLI default cache is relative to its source checkout.
+3. After the operator approves downtime, stop the current service and verify that its process released camera/serial. Run exactly one candidate Edge with the separate env and matching web/backend. Verify the demo controls and media routing. Do not install an OTA or overwrite the active release.
+4. To roll back, stop the candidate and start the original `annha-edge.service`. Verify its working directory is still release `0.1.0`, then verify the current camera and sensor functions. The staging database, env and cache stay separate.
+
+Focused regression tests passed (29), and the frontend build succeeded. Listener-confirmed WAV, MP3 and offline Vietnamese TTS passed through the real `AudioPlayer` targeting headphone serial 59. A cached one-time reminder with no backend configured started 0.40 seconds into the due minute on the repeat test, completed, and returned no duplicate. The listener heard it exactly once. The priority and local warning routing were verified with safe subprocess fixtures. No physical gas or fall alarm was triggered.
+
+The physical live acceptance used Chrome with the operator's real microphone and the PR's actual `LiveAudio` React component, an isolated FastAPI `AudioRelay` with fixture identity, and the staged Edge on Pi. The operator heard audio while speaking and confirmed the speaker went quiet on Stop. Pi logged target serial 59 and `PTT STOP: -9 -9 busy=False` twice. The integrated staging path is demo-ready. The full installed service still requires the approved cutover above.
