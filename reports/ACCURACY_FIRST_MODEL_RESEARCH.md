@@ -301,3 +301,137 @@ Các cache, checkpoint, JSON toàn bộ timestamp và ảnh đối chiếu giữ
 | CTR-GCN Full checkpoint | `d593c64276dabba7b281e4a681b50a0a74845286e97f261845369568c2beec80` |
 
 Checkpoint nạp lại được với `weights_only=True` và trỏ đúng SHA manifest. 18 test liên quan đạt.
+
+## Robust validation · Ba seed cố định
+
+Lặp lại 6 lượt trên hai cache đã ghim, `42/123/2026`, width 8, window 20, stride 3, gap-3, cùng recipe 12 epoch và threshold 0,5. Seed 42 tái lập loss, chỉ số và SHA checkpoint của lượt trước cho cả hai extractor. Không chọn seed từ 29 recording Validation. Bảng dưới là **DEVELOPMENT**. SD là sample SD qua seed, không phải CI tổng quát hóa.
+
+| Model | Seed | TP | FP | FN | Recall | Precision | F2 | Trễ p50 (s) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| lite | 42 | 9.000 | 11.000 | 6.000 | 0.600 | 0.450 | 0.562 | 1.020 |
+| lite | 123 | 11.000 | 15.000 | 4.000 | 0.733 | 0.423 | 0.640 | 1.170 |
+| lite | 2026 | 11.000 | 14.000 | 4.000 | 0.733 | 0.440 | 0.647 | 1.260 |
+| lite | Mean ± SD | 10.333 ± 1.155 | 13.333 ± 2.082 | 4.667 ± 1.155 | 0.689 ± 0.077 | 0.438 ± 0.014 | 0.616 ± 0.047 | 1.150 ± 0.121 |
+| full | 42 | 13.000 | 14.000 | 2.000 | 0.867 | 0.481 | 0.747 | 1.000 |
+| full | 123 | 11.000 | 5.000 | 4.000 | 0.733 | 0.688 | 0.724 | 0.960 |
+| full | 2026 | 11.000 | 10.000 | 4.000 | 0.733 | 0.524 | 0.679 | 1.170 |
+| full | Mean ± SD | 11.667 ± 1.155 | 9.667 ± 4.509 | 3.333 ± 1.155 | 0.778 ± 0.077 | 0.564 ± 0.109 | 0.717 ± 0.035 | 1.043 ± 0.112 |
+
+| Hành động / subject | Lite TP/FP/FN theo seed 42, 123, 2026 | Full TP/FP/FN theo seed 42, 123, 2026 |
+| --- | --- | --- |
+| Fall backwards | 3/4/0 · 3/5/0 · 3/1/0 | 3/3/0 · 3/0/0 · 3/0/0 |
+| Fall forward | 0/0/3 · 1/0/2 · 1/0/2 | 2/0/1 · 2/0/1 · 1/0/2 |
+| Fall left | 2/1/1 · 3/0/0 · 2/1/1 | 2/1/1 · 2/1/1 · 2/1/1 |
+| Fall right | 1/1/2 · 1/0/2 · 2/1/1 | 3/0/0 · 1/1/2 · 2/2/1 |
+| Fall sitting | 3/2/0 · 3/3/0 · 3/4/0 | 3/3/0 · 3/1/0 · 3/1/0 |
+| Hop | 0/0/0 · 0/0/0 · 0/0/0 | 0/0/0 · 0/0/0 · 0/0/0 |
+| Kneel | 0/0/0 · 0/2/0 · 0/2/0 | 0/2/0 · 0/0/0 · 0/2/0 |
+| Pick up object | 0/1/0 · 0/1/0 · 0/3/0 | 0/1/0 · 0/1/0 · 0/2/0 |
+| Sit down | 0/2/0 · 0/4/0 · 0/2/0 | 0/2/0 · 0/1/0 · 0/1/0 |
+| Subject 6 | 3/5/2 · 3/4/2 · 3/3/2 | 4/6/1 · 3/2/2 · 3/3/2 |
+| Subject 7 | 4/4/1 · 4/5/1 · 5/6/0 | 5/6/0 · 5/3/0 · 5/4/0 |
+| Subject 9 | 2/2/3 · 4/6/1 · 3/5/2 | 4/2/1 · 3/0/2 · 3/3/2 |
+| Walk | 0/0/0 · 0/0/0 · 0/0/0 | 0/2/0 · 0/0/0 · 0/1/0 |
+
+
+Full vượt Lite về F2 ở cả ba seed. Recall vượt ở seed 42, ngang ở hai seed còn lại. Cả ba Full cao hơn E4-42 (66,7% Recall, F2 0,641), nhưng chỉ seed 123 ít FP hơn GRU (5 so với 8). Seed 42 cho 86,7% Recall, hai seed khác chỉ đạt 73,3%. Ngã trái Full giữ 2/3 qua cả ba, ngã phải thay đổi 3/3 → 1/3 → 2/3. Advantage trung bình có thật trên cohort phát triển, còn độ ổn định theo hướng ngã và số FP chưa đạt.
+
+### Chẩn đoán 14 FP của Full seed 42
+
+Bảy FP ADL gồm ngồi xuống (2), quỳ (2), đi bộ (2), nhặt đồ (1). Sáu alert có đầy đủ pose hợp lệ trong khoảng xấp xỉ một cửa sổ trước báo. Năm trong bảy alert ADL có score ở lần báo khoảng 0,51–0,56. Nhặt đồ S7 đạt 0,62 và lần quỳ thứ hai đạt 0,97, nên tăng threshold nhỏ không thể xử lý toàn bộ. Nhãn Train gồm bốn recording mỗi hành động, nhưng là nhãn clip ADL, chưa xác định pha chuyển tiếp cụ thể. Bảng trace ghi các lần chấm trong 2 s trước báo, thiếu score được giữ ngoài danh sách, không được coi là xác suất 0.
+
+Bảy FP còn lại là **late** theo tolerance PR-08. Các clip đó đều đã có một TP trước đó. Ảnh đối chiếu ở năm recording cho thấy người còn ở sàn quanh lần báo muộn đầu tiên, không có bằng chứng một Fall mới từ annotation. Trace xuất hiện các điểm thấp dưới 0,5 giữa các lần score cao. EventEngine hiện rearm bằng score thấp và cooldown 2 s, không yêu cầu quan sát phục hồi. Không có duplicate *trong* vùng match, nhưng bảy alert này vẫn là lặp theo episode đã quan sát hoặc ít nhất ngoài vùng sự kiện. Không tính chúng thành bảy Fall độc lập.
+
+| Recording | Loại | Alert (s) | Pose trong 2 s trước báo | Score 2 s trước báo (s@p) | Train cùng hoạt động |
+| --- | --- | ---: | ---: | --- | ---: |
+| SitDownS6 | ADL | 9.40 | 41/41 | 7.60@0.13 7.90@0.17 8.20@0.25 8.50@0.30 8.80@0.22 9.10@0.49 9.40@0.56 | 4 |
+| KneelS7 | ADL | 2.80 | 40/40 | 2.20@0.15 2.50@0.23 2.80@0.52 | 4 |
+| KneelS7 | ADL | 10.00 | 36/41 | 10.00@0.97 | 4 |
+| PickupobjectS7 | ADL | 3.40 | 40/40 | 1.90@0.14 2.20@0.34 2.50@0.41 2.80@0.36 3.10@0.30 3.40@0.62 | 4 |
+| SitDownS7 | ADL | 4.30 | 41/41 | 2.50@0.29 2.80@0.22 3.10@0.19 3.40@0.21 3.70@0.16 4.00@0.16 4.30@0.52 | 4 |
+| FallBackwardsS6 | late | 8.20 | 40/40 | 6.40@0.96 6.70@0.41 7.00@0.16 7.30@0.14 7.60@0.19 7.90@0.31 8.20@0.64 | 4 |
+| FallBackwardsS6 | late | 10.90 | 41/41 | 9.10@0.20 9.40@0.19 9.70@0.19 10.00@0.20 10.30@0.17 10.60@0.36 10.90@0.65 | 4 |
+| FallSittingS6 | late | 7.00 | 40/41 | 6.40@0.29 6.70@0.11 7.00@0.68 | 4 |
+| FallSittingS6 | late | 9.40 | 41/41 | 7.60@0.76 7.90@0.32 8.20@0.15 8.50@0.15 8.80@0.10 9.10@0.17 9.40@0.66 | 4 |
+| WalkS6 | ADL | 4.30 | 41/41 | 2.50@0.08 2.80@0.09 3.10@0.09 3.40@0.12 3.70@0.10 4.00@0.13 4.30@0.52 | 4 |
+| FallLeftS7 | late | 7.30 | 41/41 | 5.80@0.14 6.10@0.14 6.40@0.36 6.70@0.29 7.00@0.35 7.30@0.52 | 4 |
+| FallSittingS7 | late | 10.30 | 41/41 | 8.50@0.10 8.80@0.16 9.10@0.14 9.40@0.11 9.70@0.18 10.00@0.39 10.30@0.80 | 4 |
+| FallBackwardsS9 | late | 8.80 | 41/41 | 7.00@0.19 7.30@0.10 7.60@0.08 7.90@0.14 8.20@0.29 8.50@0.43 8.80@0.72 | 4 |
+| WalkS9 | ADL | 5.50 | 41/41 | 3.70@0.09 4.00@0.11 4.30@0.11 4.60@0.11 4.90@0.10 5.20@0.22 5.50@0.51 | 4 |
+
+### Thử giữ trạng thái episode sau lần báo đầu · DEVELOPMENT
+
+Một thử nghiệm, không dùng lại motion gate PR-08. Giữ EventEngine và lần báo đầu. Chỉ mở nhận lần báo tiếp theo sau khi score thấp dưới 0,5 và tư thế thân đứng được quan sát ở các lần chấm liên tục ít nhất một span cửa sổ (1,9 s). Mất pose hoặc gián đoạn score ngắt xác nhận hồi phục. Ngưỡng tư thế 13,66° lấy median của p90 góc thân trên bốn clip Walk Train S1/S2/S4/S8. Không fit bằng Validation. Policy replay ghép score với pose gần nhất đã đến, dùng dữ liệu quá khứ và không thay đổi thời điểm lần báo được giữ.
+
+| Seed Full | Policy | TP / FP / FN | Recall | Precision | F2 | Delay p50 | FP ADL |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 42 | Engine | 13 / 14 / 2 | 86,7% | 48,1% | 0,747 | 1,00 s | 7 |
+| 42 | Episode | 13 / 6 / 2 | 86,7% | 68,4% | 0,823 | 1,00 s | 6 |
+| 123 | Engine | 11 / 5 / 4 | 73,3% | 68,8% | 0,724 | 0,96 s | 2 |
+| 123 | Episode | 11 / 3 / 4 | 73,3% | 78,6% | 0,743 | 0,96 s | 2 |
+| 2026 | Engine | 11 / 10 / 4 | 73,3% | 52,4% | 0,679 | 1,17 s | 6 |
+| 2026 | Episode | 11 / 7 / 4 | 73,3% | 61,1% | 0,705 | 1,17 s | 6 |
+
+Giảm FP cả ba seed, TP/FN/delay giữ nguyên trong cohort. Tác dụng chủ yếu là bớt alert ngoài khoảng Fall. Chỉ bỏ một alert ADL lặp ở quỳ S7, phần lớn ADL vẫn cần cải thiện classifier hoặc dữ liệu. Policy chưa được xác nhận trên phiên có hai cú ngã của cùng người, mất pose lâu hoặc một báo giả trước một cú ngã thật. Nếu chưa nhận ra phục hồi, một alert trước đó có thể khóa alert tiếp theo. Chưa đưa lên Edge.
+
+### Cohort độc lập GMDCSA24 v2.1
+
+PR-03 xác minh CAUCAFall, Montréal và URFD. Le2i có nhãn OmniFall và nguồn mirror chia đoạn, nhưng lần này chưa kiểm chứng ghép lại clock từng recording. GMDCSA24 có nguồn v2.1 và danh mục video SHA-256, cộng nhãn temporal OmniFall có thể ghép trực tiếp theo subject/class/recording. Dùng bản gốc của tác giả tại commit `5abac76` với hash trùng catalog v2.1, thay vì dùng nội dung mirror. Đây là người diễn ngã có kiểm soát, không đại diện té ngã tự nhiên. [Video gốc](https://github.com/ekramalam/GMDCSA24-A-Dataset-for-Human-Fall-Detection-in-Videos/tree/5abac76) · [Bản v2.1](https://zenodo.org/records/13354453) · [Nhãn temporal GMDCSA24](https://huggingface.co/datasets/simplexsigil2/omnifall/blob/main/labels/GMDCSA24.csv) · [Nhãn Le2i](https://huggingface.co/datasets/simplexsigil2/omnifall/blob/main/labels/le2i.csv)
+
+Freeze trước inference, theo hash cố định của recording ID, ba Fall và ba ADL mỗi subject, tổng **24 recording, 12 Fall, 12 ADL, bốn subject**. Trong catalog 160 recording, loại khỏi pool 27 do clock annotation không qua giới hạn và một do số Fall segment không nhất quán với class recording. Không gán nhãn thay thế. Mỗi clip có media SHA-256 trùng catalog; kiểm tra frame count, FPS và duration giải mã. Mỗi Fall có đúng một segment label 1. Cohort SHA-256 `462913c2cd43d2bc4dddf79c5dc3f94869c8d15dbbdbf5a4a663d3270e185280`, nhãn `d4682729276a08be783a2c189c1617f6202f92c87c0b1b74ad88a2e1f634337a`, catalog nguồn `f933879456cb414d5704f41810f840e97885dc6e6d2b2b758e61e436a1b957d1`. Train của E4-42 và CTR-GCN dùng các nguồn khác. Giữ Test V2.1 khóa.
+
+Đối chiếu E4-42 với MediaPipe Lite và ba CTR-GCN Full checkpoint độc lập, cùng video chạy lại pose native cho mỗi loại, cùng EventEngine gốc, threshold và protocol event-level, không chọn seed dựa vào cohort. Thử nghiệm episode ở trên chỉ đo trên DEVELOPMENT. Không báo false alerts/hour từ các clip ngắn được phân tầng hoạt động.
+
+### Tái lập vòng robust validation
+
+Thêm `--seed 42`, `--seed 123`, `--seed 2026` vào lệnh train đã ghi ở trên và đặt output độc lập mỗi lần. Cố định tên `lite-42.json`, `full-42.json` và tương tự cho từng seed, checkpoint cùng stem. Với pose cache Full và thư mục artifact stability:
+
+```bash
+python scripts/ml/accuracy_stability.py "$dataset_v21" "$artifacts" "$full_cache"
+python scripts/ml/accuracy_episode.py "$dataset_v21" "$full_cache" "$artifacts" "$episode_output"
+python scripts/ml/accuracy_independent.py freeze "$labels" "$upstream/data/manifest.csv" "$cohort"
+# Tải URL từ manifest cohort và lưu từng file theo trường file.
+python scripts/ml/accuracy_independent.py evaluate "$upstream" "$dataset_v21" \
+  "$cohort" "$external_media" "$e4_checkpoint" "$full_cache" "$artifacts" "$external_output"
+```
+
+### Kết quả độc lập · GMDCSA24 pilot
+
+24/24 video qua preflight và chạy đủ hai extractor. Đối chiếu SHA-256 nội dung và luồng frame giải mã với toàn bộ nguồn Train đã xác minh, gồm recording thuộc Train subject từng rơi khỏi preflight 30 mẫu, không thấy trùng. Không phát hiện trùng hash frame giữa các recording trong pilot.
+
+| Model | TP / FP / FN | Recall | Precision | F2 | Trễ p50 | FP ADL |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| GRU E4-42 | 8 / 13 / 4 | 66.7% | 38.1% | 0.580 | 0.94 s | 10 |
+| Full 42 | 8 / 9 / 4 | 66.7% | 47.1% | 0.615 | 1.07 s | 7 |
+| Full 123 | 9 / 9 / 3 | 75.0% | 50.0% | 0.682 | 0.92 s | 5 |
+| Full 2026 | 9 / 13 / 3 | 75.0% | 40.9% | 0.643 | 0.95 s | 8 |
+
+| Subject | GRU TP/FP/FN | Full 42 | Full 123 | Full 2026 |
+| --- | --- | --- | --- | --- |
+| Subject 1 | 2/2/1 | 3/3/0 | 3/1/0 | 3/2/0 |
+| Subject 2 | 3/3/0 | 2/1/1 | 3/2/0 | 3/3/0 |
+| Subject 3 | 2/3/1 | 2/2/1 | 2/3/1 | 2/3/1 |
+| Subject 4 | 1/5/2 | 1/3/2 | 1/3/2 | 1/5/2 |
+
+- CTR-GCN Full recall mean ± SD 0.722 ± 0.048.
+- CTR-GCN Full precision mean ± SD 0.460 ± 0.046.
+- CTR-GCN Full f2 mean ± SD 0.647 ± 0.033.
+
+Hai seed Full phát hiện 9/12, seed 42 ngang GRU 8/12. Cả ba cải thiện F2 trên cohort này, nhưng lợi thế Recall tối đa một sự kiện và phân bố theo subject chưa đồng nhất. Cả bốn model chỉ phát hiện 1/3 Fall của Subject 4, nơi Full vẫn có 3–5 FP. Đây là bằng chứng chuyển miền bước đầu, chưa đủ để kết luận tổng quát hóa tốt hơn ra camera thực địa. Số liệu độc lập dùng policy gốc, không dùng chúng để chọn seed hoặc chỉnh episode.
+
+**Quyết định Pi.** Chưa chạy benchmark hardware cho ứng viên, chưa đổi Edge. Full vẫn có 9–13 FP trên 24 clip độc lập, gồm 5–8 FP trong 12 clip ADL. Đây là mức báo giả còn cao với mục tiêu demo. Cần xác minh policy episode trên cohort chưa dùng, có recovery và nhiều episode, đồng thời giảm FP ADL. Nếu qua gate đó mới đo toàn bộ capture → Full pose → CTR-GCN → event, sampling timestamp, CPU/RAM, nhiệt và throttling trên Pi.
+
+### Checkpoint và kết quả gốc
+
+Mọi hiện vật giữ ngoài Git tại `annha-recovery-payutch-v1/accuracy-pose-v1/stability`. Thư mục này gồm các checkpoint/JSON 6 lượt, episode replay, ảnh chẩn đoán và thư mục `independent` chứa cohort, video kiểm hash, nhãn và kết quả từng recording.
+
+| Checkpoint | SHA-256 |
+| --- | --- |
+| lite-42.pt | `503172d0d8f5b033219296e874a0d2d02b46c725b2153ed67a39347f97df79bf` |
+| lite-123.pt | `d14b3d3daf2fe0c387f71e852a49d7f30ba936a1b96d93269b8cb56aebf76e25` |
+| lite-2026.pt | `d83e5e36482dc6c43bbf5e74463395ae2dac04284dfc8a53b3bc13386d38afbc` |
+| full-42.pt | `d593c64276dabba7b281e4a681b50a0a74845286e97f261845369568c2beec80` |
+| full-123.pt | `5c02f4efb3c627a01e9f106c7d98450b6514de10bb1cd2d376bcc4c686c353f5` |
+| full-2026.pt | `78e66086814ded393df2c50c5cc2d92f95c20d460f1e5064707b34641282e6a2` |
+
+**41 test liên quan đạt.** Freeze tái tạo đúng byte JSON và hash cohort trước inference.

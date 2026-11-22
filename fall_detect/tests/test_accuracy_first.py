@@ -84,3 +84,63 @@ def test_pose_cache_rejects_split_mismatch_and_tampering(tmp_path):
     path.write_bytes(b"tampered")
     with pytest.raises(ValueError, match="SHA-256 mismatch"):
         cache.load(row)
+
+
+def test_episode_preserves_first_alert_and_needs_observed_recovery():
+    from accuracy_episode import Episode
+
+    policy = Episode(upright_limit=15)
+    assert policy.step(0., .9, None, True)
+    for i in range(1, 10):
+        assert not policy.step(i*.3, .1, None, False)
+    assert not policy.step(3., .8, 75., True)
+    for i in range(11, 19):
+        assert not policy.step(i*.3, .1, 5., False)
+    assert policy.step(5.7, .8, None, True)
+
+
+def test_episode_missing_score_breaks_upright_recovery():
+    from accuracy_episode import Episode
+
+    policy = Episode(upright_limit=15)
+    assert policy.step(0., .8, 20., True)
+    for i in range(1, 7):
+        policy.step(i*.3, .1, 8., False)
+    policy.step(2.1, None, None, False)
+    assert not policy.step(2.4, .1, 8., False)
+    assert not policy.step(2.7, .8, 8., True)
+
+
+def test_independent_annotations_must_have_one_fall_and_contiguous_clock():
+    from accuracy_independent import temporal_interval
+    import pytest
+
+    rows = [dict(start=0, end=1, label=4), dict(start=1, end=2, label=1),
+            dict(start=2, end=3, label=2)]
+    assert temporal_interval(rows, 3., True) == (1., 2.)
+    with pytest.raises(ValueError, match="Fall count"):
+        temporal_interval(rows, 3., False)
+    with pytest.raises(ValueError, match="recording clock"):
+        temporal_interval([rows[0], rows[2]], 3., False)
+
+
+def test_diagnosis_distinguishes_adl_late_and_duplicate():
+    from accuracy_stability import interval_flags
+
+    assert interval_flags(None, [1.]) == ["ADL"]
+    assert interval_flags((2., 9.), [1., 2.5, 4., 6.]) == ["early", "TP", "duplicate", "late"]
+
+
+def test_independent_duplicate_check_includes_training_subject_context_only():
+    from accuracy_independent import training_fingerprints
+
+    def recording(subject, name, **extra):
+        return dict(subject_id=subject, source_dataset="caucafall",
+                    video_sha256=name, decoded_sha256=name+"-frames", **extra)
+
+    videos, frames = training_fingerprints(dict(
+        sources=[recording("a", "train", split="train"), recording("b", "val", split="val")],
+        group_context=[recording("a", "train-extra"), recording("b", "val-extra")],
+    ))
+    assert videos == {"train", "train-extra"}
+    assert frames == {"train-frames", "train-extra-frames"}

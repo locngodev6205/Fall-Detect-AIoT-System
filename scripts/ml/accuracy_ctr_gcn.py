@@ -50,6 +50,7 @@ def main():
     parser.add_argument("--hard-negatives", action="store_true")
     parser.add_argument("--pose-cache", type=Path)
     parser.add_argument("--checkpoint-out", type=Path)
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     if args.checkpoint_out and args.checkpoint_out.exists():
         parser.error("Use a fresh checkpoint output")
@@ -64,7 +65,7 @@ def main():
     from src.model import CTRGCN
 
     torch.set_num_threads(2)
-    torch.manual_seed(42)
+    torch.manual_seed(args.seed)
     baseline = load_model(args.baseline)
     manifest = load_pinned(args.data/"annha-v2.1/manifest.json", MANIFEST)
     _, rows = development(args.data, manifest)
@@ -136,9 +137,9 @@ def main():
     if args.checkpoint_out:
         with args.checkpoint_out.open("xb") as target:
             torch.save(dict(state_dict=model.cpu().state_dict(), pose_cache_sha256=cache_hash,
-                            seed=42, manifest=MANIFEST, width=8, architecture=revision), target)
+                            seed=args.seed, manifest=MANIFEST, width=8, architecture=revision), target)
     with args.output.open("x") as target:
-        json.dump(dict(results=result, revision=revision, manifest=MANIFEST, seed=42,
+        json.dump(dict(results=result, revision=revision, manifest=MANIFEST, seed=args.seed,
                        train_recordings=len(set(ids)), hard_negative_recordings=sorted(hard_ids), train_windows=len(ids), device=str(device), pose_cache_sha256=cache_hash,
                        pose_extractor=cache.meta["model"] if cache else "legacy_lite_csv",
                        train_seconds=train_seconds, losses=losses,
