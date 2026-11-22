@@ -52,10 +52,11 @@ def summarize(rows, mode):
                 delay_p50_s=statistics.median(delays) if delays else None)
 
 
-def replay(row, model, start=None):
+def replay(row, model, start=None, *, poses=None):
     event = row["event"]
     trace, stream = Comparison(), Stream(model)
-    stamps, points = read_keypoints_csv(Path(row["keypoint_csv"]))
+    stamps, points = (read_keypoints_csv(Path(row["keypoint_csv"]))
+                      if poses is None else poses)
     for stamp, pose in zip(stamps, points, strict=True):
         if start is not None and stamp < start:
             continue

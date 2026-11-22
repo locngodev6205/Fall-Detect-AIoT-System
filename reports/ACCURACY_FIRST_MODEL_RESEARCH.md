@@ -177,3 +177,127 @@ Thêm `--hard-negatives` vào lệnh train ở trên để tái lập variant. C
 | FallBackwardsS7 | 252/252 → 252/252 | 49/49 → 49/49 | 40/40 → 40/40 | 119 → 34 | 0 → 0 | 24.08 → 1.42 | 37.68 → 677.06 | 515.50 → 514.32 |
 | FallLeftS7 | 207/212 → 174/212 | 36/40 → 16/40 | 40/40 → 36/40 | 186 → 652 | 3 → 16 | 23.96 → 1.33 | 41.07 → 704.40 | 565.50 → 514.32 |
 | PickupobjectS9 | 203/220 → 220/220 | — | — | 516 → 24 | — | 22.81 → 1.12 | 40.46 → 867.77 | 565.50 → 514.32 |
+
+## Thí nghiệm tiếp theo · MediaPipe Full và CTR-GCN
+
+Mục tiêu là đo xem pose tốt hơn có chuyển thành phát hiện đúng thời điểm hay không. Giữ cùng bảy AVI 720×480, 20 FPS ở vòng pose. Profile RTMPose-M chẩn đoán thêm bằng mỗi frame thứ 40 của đúng bảy clip. Median giữa các clip cho YOLOX-m khoảng 869 ms và RTMPose-m landmarks khoảng 54 ms. Median p95 pipeline trên mẫu thưa là 1.061 ms. Đây là profile stage, còn coverage RTMPose-M dùng lượt chạy mọi frame trước đó. Detector chạy lại trên mỗi frame, chiếm phần lớn thời gian. YOLOX-tiny 416×416 + RTMPose-S dùng cùng quy tắc chọn hộp lớn nhất. Hai thành phần nhỏ giảm median detector/landmarks xuống 71/23 ms, nhưng pipeline có thêm dropout ở một số clip. [Preset RTMLib và trọng số công khai](https://github.com/Tau-J/rtmlib/blob/main/rtmlib/tools/solution/body.py)
+
+MediaPipe Full là ứng viên duy nhất cho retrain. Cả Lite và Full tạo cache riêng từ cùng video CAUCAFall và timestamp, COCO-17, tọa độ chuẩn hóa theo ảnh và confidence trong [0,1]. Cả hai dùng cùng cổng pose, resample 10 Hz, normalize theo hông/thân, cửa sổ 20 mẫu, stride 3, gap-3. Tập raw gồm 39 recording Train từ 4 subject và 29 Validation từ 3 subject. So sánh này giới hạn ở CAUCAFall để tránh nhầm ảnh hưởng pose với thay đổi nguồn Train. URFD/Montreal vẫn thuộc dữ liệu nghiên cứu cũ. Test khóa giữ nguyên.
+
+Hai CTR-GCN dùng width 8, seed 42, batch 32, AdamW 0,001, 12 epoch, cùng trọng số cân bằng theo lớp/recording, không hard-negative bổ sung. Preflight có thể nhận số cửa sổ khác nhau theo pose. Đây là một phần tác động thực tế khi đổi pose, cũng khiến số cập nhật optimizer có thể chênh. GRU E4-42 luôn dùng pose MediaPipe gốc. Raw threshold crossings và EventEngine dùng cùng threshold 0,5, timestamp media, tolerance PR-08. Cold-start mô phỏng mất lịch sử trước onset bằng cách bắt đầu 0,5 s trước ngã, không suy rộng sang người mới vào camera thực tế.
+
+Cache version `accuracy-pose-v1`, mỗi NPZ có mảng timestamp và pose float32. Manifest khóa video SHA-256, checksum từng NPZ, tập con, nhãn và COCO-17 order. Runner kiểm hash và split trước huấn luyện. Lite và Full sử dụng MediaPipe 0.10.14, OpenCV 4.11, landmark asset SHA-256 lần lượt `1150dc68a713b80660b90ef46ce4e85c1c781bb88b6e3512cc64e6a685ba5588` và `e9a5c5cb17f736fafd4c2ec1da3b3d331d6edbe8a0d32395855aeb2cdfd64b9f`.
+
+### Lệnh tái lập
+
+```bash
+# Tạo output/cache mới ngoài Git.
+python scripts/ml/accuracy_pose.py lite "$dataset_v21" "$out/lite.json" --cache "$out/lite-cache"
+python scripts/ml/accuracy_pose.py full "$dataset_v21" "$out/full.json" --cache "$out/full-cache"
+python scripts/ml/accuracy_pose.py rtmpose_s "$dataset_v21" "$out/small.json" \
+  --detector "$yolox_tiny_onnx" --pose "$rtmpose_s_onnx"
+python scripts/ml/accuracy_pose.py rtmpose "$dataset_v21" "$out/medium-profile.json" \
+  --detector "$yolox_m_onnx" --pose "$rtmpose_m_onnx" --profile-step 40
+for pose in lite full; do
+  python scripts/ml/accuracy_ctr_gcn.py "$upstream" "$dataset_v21" "$e4_checkpoint" \
+    "$out/ctr-$pose.json" --pose-cache "$out/$pose-cache" --checkpoint-out "$out/ctr-$pose.pt"
+done
+```
+
+### Kết quả pose trên bảy clip · DEVELOPMENT
+
+Số p50/p95 trong bảng là median giữa các clip của percentile mỗi clip. FPS gồm decode. CPU 100% tương ứng một lõi. RSS là high-water tích lũy theo process. Các lượt chạy có tải nền khác nhau, nên dùng thời gian như ước lượng khả thi. Pose hợp lệ là qua cổng hình học và visibility đã dùng trong nghiên cứu, không phải số joint đúng theo ground truth. SimCC và MediaPipe visibility chưa được calibrate cùng thang. RTMPose-M p95 profile thưa được ghi riêng ở trên.
+| Pose extractor | Hợp lệ cả clip | Hợp lệ trong Fall | Hợp lệ sau Fall | Missing joints | FPS p50 | Pose ms p50 / p95 | CPU p50 | RSS đỉnh |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Lite | 1215/1578 | 213/315 | 200/240 | 7007 | 46.96 | 19.2 / 31.3 | 105% | 737 MiB |
+| Full | 1307/1578 | 256/315 | 200/240 | 5424 | 26.17 | 37.1 / 49.5 | 104% | 585 MiB |
+| RTMPose-M | 1530/1578 | 283/315 | 236/240 | 1012 | 1.29 | 730.7 / — | 263% | 514 MiB |
+| RTMPose-S | 1017/1578 | 222/315 | 86/240 | 9876 | 11.20 | 87.7 / 116.6 | 285% | 325 MiB |
+
+Mỗi ô ghi frame pose dùng được / tổng frame trong Fall và số frame dropout liên tục dài nhất.
+
+| Recording | Lite | Full | RTMPose-M | RTMPose-S |
+| --- | ---: | ---: | ---: | ---: |
+| FallForwardS6 | 24/56 · 18 | 33/56 · 14 | 55/56 · 1 | 45/56 · 6 |
+| FallLeftS6 | 19/51 · 32 | 21/51 · 30 | 44/51 · 4 | 25/51 · 20 |
+| FallRightS6 | 11/45 · 33 | 45/45 · 0 | 45/45 · 0 | 27/45 · 13 |
+| FallBackwardsS6 | 74/74 · 0 | 74/74 · 0 | 74/74 · 0 | 73/74 · 1 |
+| FallBackwardsS7 | 49/49 · 0 | 49/49 · 0 | 49/49 · 0 | 42/49 · 5 |
+| FallLeftS7 | 36/40 · 3 | 34/40 · 4 | 16/40 · 16 | 10/40 · 30 |
+| PickupobjectS9 | 203/220 · 8 | 212/220 · 8 | 220/220 · 0 | 208/220 · 4 |
+
+Frame đối chiếu riêng tư nằm ở `accuracy-pose-v1/pose-disagreements.jpg` ngoài Git. Ở FallRightS6, 5,30 s, Full giữ được mốc thân và chân khi người nằm nghiêng. Ở FallForwardS6, 3,90 s, Full khôi phục một phần mốc quanh thân và người đang đổ về trước. Ở FallLeftS6, 4,60 s, điểm Lite qua cổng nhưng nằm trên cụm bàn ghế, xa người nằm sàn. Full không ra pose ở frame này. Vì vậy cả coverage dương và số lượng mốc vẫn có thể đánh giá sai tracking. Việc chọn Full chỉ dựa trên tín hiệu đủ mạnh để kiểm chứng bằng retrain. RTMPose-S khá hơn Lite trong Fall về tổng frame nhưng mất 114 frame pose sau Fall so với Lite, và mất 30 frame liên tiếp ở FallLeftS7. Không dùng RTMPose-S cho retrain.
+
+### Kết quả event-level · DEVELOPMENT
+
+Cache xác minh đủ 68 cặp timestamp giống nhau và 136 hash tệp. Từ cùng 39 recording Train, Lite cho 453 cửa sổ thuộc 34 recording, Full cho 509 cửa sổ thuộc 36 recording. Huấn luyện lần lượt mất khoảng 25 và 22 giây CPU theo wall time trên máy phát triển. CTR-GCN Lite ở đây dùng CAUCAFall-only. Kết quả khác pilot trước vốn dùng thêm URFD/Montreal. Các model bên dưới đều được chấm trên đúng 29 recording Validation raw.
+
+| Model | TP / FP / FN | Recall | Precision | F2 | Trễ p50 | Raw TP/FP/FN | Cold-start TP/FP/FN |
+| --- | --- | ---: | ---: | ---: | ---: | --- | --- |
+| GRU E4-42 | 10/8/5 | 66.7% | 55.6% | 0.641 | 1.65 s | 10/13/5 | 11/2/4 |
+| CTR-GCN Lite | 9/11/6 | 60.0% | 45.0% | 0.562 | 1.02 s | 9/14/6 | 8/8/7 |
+| CTR-GCN Full | 13/14/2 | 86.7% | 48.1% | 0.747 | 1.00 s | 13/17/2 | 11/8/4 |
+
+| Recording | Fall (s) | GRU alert | CTR Lite alert | CTR Full alert | TP/FP/FN GRU → Lite → Full |
+| --- | --- | --- | --- | --- | --- |
+| PickupobjectS6 | No Fall | — | — | — | 0/0/0 → 0/0/0 → 0/0/0 |
+| SitDownS6 | No Fall | — | 8.80 | 9.40 | 0/0/0 → 0/1/0 → 0/1/0 |
+| KneelS7 | No Fall | — | — | 2.80 10.00 | 0/0/0 → 0/0/0 → 0/2/0 |
+| PickupobjectS7 | No Fall | — | 2.50 | 3.40 | 0/0/0 → 0/1/0 → 0/1/0 |
+| SitDownS7 | No Fall | 6.70 | — | 4.30 | 0/1/0 → 0/0/0 → 0/1/0 |
+| KneelS9 | No Fall | — | — | — | 0/0/0 → 0/0/0 → 0/0/0 |
+| PickupobjectS9 | No Fall | 3.40 7.90 | — | — | 0/2/0 → 0/0/0 → 0/0/0 |
+| SitDownS9 | No Fall | — | 11.80 | — | 0/0/0 → 0/1/0 → 0/0/0 |
+| FallBackwardsS6 | 2.22–5.92 | 6.10 | 4.60 7.90 10.30 | 4.60 8.20 10.90 | 0/1/1 → 1/2/0 → 1/2/0 |
+| FallForwardS6 | 2.36–5.20 | 6.70 | — | — | 0/1/1 → 0/0/1 → 0/0/1 |
+| FallLeftS6 | 1.08–3.64 | — | 1.90 | 1.90 | 0/0/1 → 1/0/0 → 1/0/0 |
+| FallRightS6 | 2.90–5.12 | — | — | 3.40 | 0/0/1 → 0/0/1 → 1/0/0 |
+| FallSittingS6 | 2.98–6.02 | 5.20 | 4.00 7.60 9.70 | 3.40 7.00 9.40 | 1/0/0 → 1/2/0 → 1/2/0 |
+| HopS6 | No Fall | — | — | — | 0/0/0 → 0/0/0 → 0/0/0 |
+| WalkS6 | No Fall | — | — | 4.30 | 0/0/0 → 0/0/0 → 0/1/0 |
+| FallBackwardsS7 | 3.09–5.55 | 2.80 | 3.40 12.40 | 4.00 | 0/1/1 → 1/1/0 → 1/0/0 |
+| FallForwardS7 | 0.78–2.64 | 2.50 | — | 2.20 | 1/0/0 → 0/0/1 → 1/0/0 |
+| FallLeftS7 | 2.36–4.38 | 3.40 | 2.80 7.90 | 3.10 7.30 | 1/0/0 → 1/1/0 → 1/1/0 |
+| FallRightS7 | 1.03–3.09 | 2.50 | 2.20 6.10 | 2.20 | 1/0/0 → 1/1/0 → 1/0/0 |
+| FallSittingS7 | 1.08–4.16 | 3.70 | 2.50 | 2.20 10.30 | 1/0/0 → 1/0/0 → 1/1/0 |
+| HopS7 | No Fall | — | — | — | 0/0/0 → 0/0/0 → 0/0/0 |
+| WalkS7 | No Fall | 1.90 | — | — | 0/1/0 → 0/0/0 → 0/0/0 |
+| FallBackwardsS9 | 1.66–5.08 | 3.70 | 1.90 7.30 | 2.20 8.80 | 1/0/0 → 1/1/0 → 1/1/0 |
+| FallForwardS9 | 1.25–3.45 | 4.00 | — | 2.80 | 1/0/0 → 0/0/1 → 1/0/0 |
+| FallLeftS9 | 0.92–4.32 | 2.50 | — | — | 1/0/0 → 0/0/1 → 0/0/1 |
+| FallRightS9 | 1.50–3.56 | 2.50 | — | 2.50 | 1/0/0 → 0/0/1 → 1/0/0 |
+| FallSittingS9 | 1.54–5.00 | 3.10 5.20 | 2.80 | 3.10 | 1/1/0 → 1/0/0 → 1/0/0 |
+| HopS9 | No Fall | — | — | — | 0/0/0 → 0/0/0 → 0/0/0 |
+| WalkS9 | No Fall | — | — | 5.50 | 0/0/0 → 0/0/0 → 0/1/0 |
+
+| Hành động | GRU | CTR Lite | CTR Full |
+| --- | --- | --- | --- |
+| Fall backwards | 1/2/2 | 3/4/0 | 3/3/0 |
+| Fall forward | 2/1/1 | 0/0/3 | 2/0/1 |
+| Fall left | 2/0/1 | 2/1/1 | 2/1/1 |
+| Fall right | 2/0/1 | 1/1/2 | 3/0/0 |
+| Fall sitting | 3/1/0 | 3/2/0 | 3/3/0 |
+| Hop | 0/0/0 | 0/0/0 | 0/0/0 |
+| Kneel | 0/0/0 | 0/0/0 | 0/2/0 |
+| Pick up object | 0/2/0 | 0/1/0 | 0/1/0 |
+| Sit down | 0/1/0 | 0/2/0 | 0/2/0 |
+| Walk | 0/1/0 | 0/0/0 | 0/2/0 |
+
+**Hiệu ứng extractor.** Với cùng CTR-GCN, Full thêm 4 TP tổng và 3 FP so với Lite. Cụ thể Full khôi phục ngã trước S7/S9, ngã phải S6/S9, nhưng trao đổi ca bắt được từ ngã trái S9 sang S6. Ngã phải S6 là ví dụ pose khôi phục tại khoảng ngã đi cùng sự kiện đúng lúc. Ở ngã trước S6, coverage tăng 24/56 → 33/56 nhưng cả hai classifier vẫn bỏ sót. So với GRU, Full giữ tổng ngã trước 2/3, tăng ngã phải 2/3 → 3/3 và ngã sau 1/3 → 3/3, nhưng mất ngã trái S9 mà GRU phát hiện.
+
+**Hiệu ứng classifier và EventEngine.** CTR-GCN Lite CAUCAFall-only cho ít TP và nhiều FP hơn E4-42, song hai model khác tập Train và E4-42 dùng CSV đã ghim, nên đây là đối chứng hệ thống. So raw crossing với EventEngine trên chính Full, TP giữ 13 trong khi FP giảm từ 17 xuống 14. Tăng cảnh báo Full so với Lite đến từ quỳ và đi bộ, ngoài những lần muộn trên clip Fall. Cold-start Full bằng GRU về TP (11/15) với 8 FP so với 2; các FP cold-start chỉ thuộc các clip Fall do stress test không gồm ADL. Không có đủ ADL liên tục cho false alarms/hour.
+
+**Quyết định.** Full + CTR-GCN có tín hiệu cải thiện Recall ở Validation, nhưng precision 48,1%, 14 FP, mất riêng ca ngã trái S9 và cold-start vẫn còn lỗi. Chưa đủ bằng chứng để chọn model hoặc kiểm chứng triển khai. Không tìm được cohort temporal độc lập phù hợp trong nguồn đã xác minh hiện có mà vẫn tránh Train, Validation đã xem và Test khóa. Dữ liệu độc lập cần gồm ngã trước/ngang và ADL quỳ/ngồi/nhặt đồ/đi bộ trong thời lượng liên tục. Nếu qua đó giữ được Recall và giảm báo giả mới đo capture → pose Full → CTR-GCN → alert trên ARM64. Các số desktop và replay pose CSV không xác nhận realtime trên Pi. Không nâng model Edge.
+
+### Hiện vật xác minh
+
+Các cache, checkpoint, JSON toàn bộ timestamp và ảnh đối chiếu giữ ngoài Git tại `annha-recovery-payutch-v1/accuracy-pose-v1`.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Lite cache manifest | `3d617ec6eb7a522c4574c9f0dad9fb939a69a69d458225cddbc405a8d6b9b215` |
+| Full cache manifest | `8b4cd4aa272ef8176bfe0406efc51f7c864780b99ee4ac5d5a931a77e9a0ecb6` |
+| CTR-GCN Lite checkpoint | `503172d0d8f5b033219296e874a0d2d02b46c725b2153ed67a39347f97df79bf` |
+| CTR-GCN Full checkpoint | `d593c64276dabba7b281e4a681b50a0a74845286e97f261845369568c2beec80` |
+
+Checkpoint nạp lại được với `weights_only=True` và trỏ đúng SHA manifest. 18 test liên quan đạt.

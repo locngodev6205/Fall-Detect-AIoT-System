@@ -54,3 +54,33 @@ def test_comparison_rejects_inconsistent_annotations():
     a = dict(id="clip", event=(1, 2), action="Fall forward")
     with pytest.raises(ValueError, match="Annotation mismatch"):
         list(paired([a], [dict(a, event=(1, 3))]))
+
+
+def test_pose_cache_rejects_split_mismatch_and_tampering(tmp_path):
+    import json
+    import pytest
+
+    from accuracy_pose_cache import PoseCache
+    from ml.features import SPEC
+    from ml.integrity import digest
+    from pr04_experiment import MANIFEST
+
+    path = tmp_path/"clip.npz"
+    np.savez_compressed(path, stamps=np.array([1., 1.1]),
+                        points=np.zeros((2, 17, 3), dtype=np.float32))
+    row = dict(video_id="clip", split="train", scene_id="Walk", event=None)
+    entry = dict(id="clip", split="train", action="Walk", event=None, video_sha256="abc",
+                 feature_file=path.name, feature_sha256=digest(path))
+    manifest = tmp_path/"manifest.json"
+    manifest.write_text(json.dumps(dict(cache_version="accuracy-pose-v1", manifest=MANIFEST,
+        joint_order=SPEC.keypoints, schema_version=SPEC.schema_version,
+        coordinate_space=SPEC.coordinate_space, recordings=[entry])))
+    pinned = dict(sources=[dict(video_id="clip", video_sha256="abc")], group_context=[])
+    with pytest.raises(ValueError, match="split mismatch"):
+        PoseCache(tmp_path, [dict(row, split="val")], pinned)
+    cache = PoseCache(tmp_path, [row], pinned)
+    stamps, points = cache.load(row)
+    assert points.shape == (2, 17, 3) and stamps.tolist() == [1., 1.1]
+    path.write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        cache.load(row)
