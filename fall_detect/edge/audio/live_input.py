@@ -14,7 +14,7 @@ SESSION_SECONDS = 60
 
 
 class LiveInput:
-    def __init__(self, mime, sink, backend):
+    def __init__(self, mime, sink, backend, *, stream_volume=None):
         self.decoder = self.output = None
         self.interrupted = False
         if backend == "mock":
@@ -30,6 +30,8 @@ class LiveInput:
                 raise FileNotFoundError("Push-to-Talk PipeWire cần pw-cat hoặc pw-play.")
             command = [player, "--playback", "--target", sink, "--latency", "100ms",
                        "--properties", '{"node.dont-fallback":true,"node.dont-reconnect":true}', "-"]
+            if stream_volume is not None:
+                command[-1:-1] = ["--volume", str(stream_volume)]
             # AU carries a streamable PCM header on PipeWire versions without --raw.
             codec, container = "pcm_s16be", "au"
         elif backend == "pactl":

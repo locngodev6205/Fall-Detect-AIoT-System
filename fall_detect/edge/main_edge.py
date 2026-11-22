@@ -191,6 +191,7 @@ class AnNhaEdgeRuntime:
         pan_direction: int = -1,
         tilt_direction: int = 1,
         gas_unit: str = "ADC",
+        audio_output: str = "bluetooth",
         bt_speaker_mac: str = "",
         bt_speaker_name: str = "",
         camera_id: int = 0,
@@ -235,6 +236,7 @@ class AnNhaEdgeRuntime:
         )
         self.tracker = PanTiltTracker(bridge=self.bridge)
         self.bt = BluetoothSpeakerManager(
+            output_mode=audio_output,
             speaker_mac=bt_speaker_mac,
             speaker_name=bt_speaker_name,
             force_mock=True if force_mock_hardware else None,
@@ -309,6 +311,8 @@ class AnNhaEdgeRuntime:
         if kind == "silence":
             return self.audio.execute_audio_command(cmd)
         if kind in ("bt_scan", "bt_connect", "bt_disconnect"):
+            if self.bt.analog_demo:
+                return False, "Thiết bị đang ở chế độ âm thanh demo 3,5 mm."
             return self._execute_bluetooth_command(cmd)
         return False, f"Không hỗ trợ loại lệnh: {kind!r}"
 
@@ -835,6 +839,7 @@ def main(argv: list[str] | None = None) -> int:
         pan_direction=int(os.getenv("PAN_DIRECTION", "-1")),
         tilt_direction=int(os.getenv("TILT_DIRECTION", "1")),
         gas_unit=os.getenv("GAS_UNIT", "ADC"),
+        audio_output=os.getenv("ANNHA_AUDIO_OUTPUT", "bluetooth"),
         bt_speaker_mac=os.getenv("BT_SPEAKER_MAC", ""),
         bt_speaker_name=os.getenv("BT_SPEAKER_NAME", ""),
         camera_id=int(os.getenv("CAMERA_ID", "0")),

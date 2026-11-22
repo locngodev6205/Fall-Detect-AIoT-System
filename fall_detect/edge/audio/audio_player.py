@@ -232,7 +232,7 @@ class AudioPlayer:
             logger.warning("[AudioPlayer] Lỗi giải mã: %s", type(error).__name__)
             return None
 
-    def _spawn_bluetooth_player(self, file_path: Path, sink: str, backend: str):
+    def _spawn_bluetooth_player(self, file_path: Path, sink: str, backend: str, *, stream_volume=None):
         if backend == "wpctl" and self._has_pw_play:
             command = ["pw-play", "--target", str(sink), "--latency", "200ms",
                        "--properties", '{"node.dont-fallback":true,"node.dont-reconnect":true}']
@@ -240,6 +240,8 @@ class AudioPlayer:
             command = ["paplay", f"--device={sink}"]
         else:
             raise OSError("Thiếu trình phát cho Bluetooth sink.")
+        if stream_volume is not None:
+            command.extend(["--volume", str(stream_volume)])
         return subprocess.Popen(
             [*command, str(file_path)], env=get_audio_env(),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -304,7 +306,7 @@ class AudioPlayer:
         original_to_remove = path if cleanup_after_play else None
         try:
             if not self.bt.is_speaker_ready():
-                return False, "Loa Bluetooth chưa kết nối."
+                return False, "Cổng 3,5 mm chưa sẵn sàng." if getattr(self.bt, "analog_demo", False) else "Loa Bluetooth chưa kết nối."
             if not self.bt.mock_mode:
                 prepared = self._prepare_file(path)
                 if prepared is None:
@@ -333,7 +335,8 @@ class AudioPlayer:
                 if not sink:
                     return False, "Loa Bluetooth đã ngắt kết nối."
                 if not status["mock_mode"]:
-                    proc = self._spawn_bluetooth_player(converted or path, sink, status["backend"])
+                    options = {"stream_volume": self._analog_volume(volume)} if getattr(self.bt, "analog_demo", False) else {}
+                    proc = self._spawn_bluetooth_player(converted or path, sink, status["backend"], **options)
                     self._current_proc = proc
                     self._current_priority = priority
                     self._current_is_gas = is_gas
@@ -380,6 +383,10 @@ class AudioPlayer:
                     if temporary is not None:
                         temporary.unlink(missing_ok=True)
 
+    @staticmethod
+    def _analog_volume(volume: int) -> float:
+        return max(0, min(100, volume)) / 400
+
     def start_live_stream(self, mime: str) -> LiveInput | None:
         if mime not in FORMATS or not self.bt.is_speaker_ready():
             return None
@@ -399,7 +406,8 @@ class AudioPlayer:
                     return None
                 if not self.bt.apply_volume(85, refresh=False):
                     return None
-                self._live_input = LiveInput(mime, target, backend)
+                options = {"stream_volume": self._analog_volume(85)} if getattr(self.bt, "analog_demo", False) else {}
+                self._live_input = LiveInput(mime, target, backend, **options)
                 return self._live_input
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             logger.warning("[AudioPlayer] Push-to-Talk chưa sẵn sàng: %s", exc)
