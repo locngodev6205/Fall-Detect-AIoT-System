@@ -319,7 +319,7 @@ class AudioPlayer:
         original_to_remove = path if cleanup_after_play else None
         try:
             if not self.bt.is_speaker_ready():
-                return False, "Cổng 3,5 mm chưa sẵn sàng." if getattr(self.bt, "analog_demo", False) else "Loa Bluetooth chưa kết nối."
+                return False, "Cổng 3,5 mm chưa sẵn sàng." if getattr(self.bt, "uses_analog", False) else "Loa Bluetooth chưa kết nối."
             if not self.bt.mock_mode:
                 prepared = self._prepare_file(path)
                 if prepared is None:
@@ -348,7 +348,7 @@ class AudioPlayer:
                 if not sink:
                     return False, "Loa Bluetooth đã ngắt kết nối."
                 if not status["mock_mode"]:
-                    options = {"stream_volume": self._analog_volume(volume)} if getattr(self.bt, "analog_demo", False) else {}
+                    options = {"stream_volume": self._analog_volume(volume)} if getattr(self.bt, "uses_analog", False) else {}
                     proc = self._spawn_bluetooth_player(converted or path, sink, status["backend"], **options)
                     self._current_proc = proc
                     self._current_priority = priority
@@ -420,7 +420,7 @@ class AudioPlayer:
                     return None
                 if not self.bt.apply_volume(85, refresh=False):
                     return None
-                options = {"stream_volume": self._analog_volume(85)} if getattr(self.bt, "analog_demo", False) else {}
+                options = {"stream_volume": self._analog_volume(85)} if getattr(self.bt, "uses_analog", False) else {}
                 self._live_input = LiveInput(mime, target, backend, **options)
                 return self._live_input
         except (OSError, ValueError, subprocess.SubprocessError) as exc:

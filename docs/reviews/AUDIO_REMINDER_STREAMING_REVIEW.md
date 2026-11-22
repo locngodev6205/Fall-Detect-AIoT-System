@@ -156,9 +156,9 @@ For classroom deployment, stage the tested PR revision beside the current releas
 
 With a 3.5 mm device connected, the operator confirmed that a five-second continuous 48 kHz stereo tone and the offline eSpeak NG Vietnamese sentence were clear and uninterrupted. Each was played separately using the explicitly selected bcm2835 Headphones PipeWire node, with fallback disabled and 12% stream volume. Both children exited 0. The same listener heard dropouts on the Bluetooth comparison at both 200 and 600 ms. This validates the analog output as a hardware fallback. The deployed default sink and Bluetooth-only runtime routing were left in place. Integrated Reminder and Push-to-Talk through the wired output still require a staged demo test and authorization before runtime cutover.
 
-### Explicit analog demo mode
+### Wired audio output
 
-Set `ANNHA_AUDIO_OUTPUT=analog_demo` in the Edge demo env file. The default remains `bluetooth`. Analog mode selects a PipeWire sink whose ALSA card is exactly `bcm2835 Headphones`, targets its object serial, and fails closed if it cannot find it. File playback, TTS, reminders, local warning audio and Push-to-Talk share that selection. The demo scales volume per stream to at most 25%, preserving the volume setting's relative range. Bluetooth commands are unavailable in analog mode. Neither mode sets the system default sink.
+Set `ANNHA_AUDIO_OUTPUT=analog` in the Edge env file. Existing local configurations with `analog_demo` still work. The default remains `bluetooth`. Analog mode selects a PipeWire sink whose ALSA card is exactly `bcm2835 Headphones`, targets its object serial, and fails closed if it cannot find it. File playback, TTS, reminders, local warning audio and Push-to-Talk share that selection. The wired output scales volume per stream to at most 25%, preserving the volume setting's relative range. Bluetooth commands are unavailable in analog mode. Neither mode sets the system default sink.
 
 **Staging and cutover**
 

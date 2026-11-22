@@ -314,8 +314,8 @@ class AnNhaEdgeRuntime:
         if kind == "silence":
             return self.audio.execute_audio_command(cmd)
         if kind in ("bt_scan", "bt_connect", "bt_disconnect"):
-            if self.bt.analog_demo:
-                return False, "Thiết bị đang ở chế độ âm thanh demo 3,5 mm."
+            if self.bt.uses_analog:
+                return False, "Thiết bị đang dùng loa có dây (3,5 mm). Hãy chọn loa Bluetooth để quản lý kết nối."
             return self._execute_bluetooth_command(cmd)
         return False, f"Không hỗ trợ loại lệnh: {kind!r}"
 

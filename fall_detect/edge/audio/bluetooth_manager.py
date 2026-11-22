@@ -116,7 +116,7 @@ class BluetoothSpeakerManager:
         return mode
 
     @property
-    def analog_demo(self) -> bool:
+    def uses_analog(self) -> bool:
         return self.output_mode == "analog"
 
     def select_output(self, mode: str) -> None:
@@ -805,7 +805,7 @@ class BluetoothSpeakerManager:
 
     def refresh_sink(self, *, attempt_connect: bool = False) -> str | None:
         with self._routing_lock:
-            if self.analog_demo and not self.mock_mode:
+            if self.uses_analog and not self.mock_mode:
                 sink, backend = self._detect_analog_sink()
             else:
                 sink, backend = self.detect_bluetooth_sink()
@@ -826,7 +826,7 @@ class BluetoothSpeakerManager:
         return sink is not None
 
     def resolve_live_target(self, sink: str, backend: str) -> str:
-        if self.analog_demo or backend != "wpctl":
+        if self.uses_analog or backend != "wpctl":
             return sink
         result = subprocess.run(["wpctl", "inspect", sink], capture_output=True, text=True,
                                 timeout=0.75, env=get_audio_env())
@@ -850,8 +850,8 @@ class BluetoothSpeakerManager:
             backend = self._active_backend
         if not sink:
             return False
-        if self.analog_demo:
-            return True  # Analog demo uses per-stream volume.
+        if self.uses_analog:
+            return True  # Wired output uses per-stream volume.
 
         env = get_audio_env()
         try:
