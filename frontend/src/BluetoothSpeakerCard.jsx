@@ -3,6 +3,7 @@ import { SpeakerHigh, ArrowsClockwise, MagnifyingGlass, X, LinkBreak, Bluetooth,
 import { api } from './api';
 import { useApp } from './context';
 import { Button, Badge } from './ui';
+import { audioOutputLabels, audioOutputStatus } from './audioOutputStatus.mjs';
 
 function makeBtKey(prefix = 'bt') {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -23,8 +24,83 @@ export function isAudioBluetoothDevice(name = '') {
   return AUDIO_KEYWORDS.some(kw => low.includes(kw));
 }
 
-export function BluetoothSpeakerCard({ cameraId, canControl = true, onCommandSent }) {
+function AudioOutputControls({ cameraId, canControl, onMode }) {
+  const [state, setState] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [test, setTest] = useState(null);
+
+  function receive(next) {
+    setState(previous => previous?.desired_version > next.desired_version ? previous : next);
+  }
+
+  useEffect(() => {
+    let active = true;
+    async function refresh() {
+      try {
+        const result = await api(`/cameras/${cameraId}/audio-output`);
+        if (active) { receive(result); setError(''); }
+        if (test?.id && !test.done) {
+          const commands = await api(`/cameras/${cameraId}/commands`);
+          const current = commands.find(command => command.id === test.id);
+          if (!active) return;
+          if (current?.status === 'executed') setTest({...test, done: true, label: 'Pi đã phát âm kiểm tra.'});
+          else if (['failed', 'expired'].includes(current?.status)) {
+            const detail = typeof current.result === 'string' ? current.result : current.result?.detail;
+            setTest({...test, done: true, label: detail || 'Pi không phát được âm kiểm tra.'});
+          } else if (Date.now() > test.deadline) setTest({...test, done: true, label: 'Chưa nhận kết quả phát từ Pi.'});
+        }
+      } catch (failure) {
+        if (active) setError(failure.message);
+      }
+    }
+    refresh();
+    const timer = setInterval(refresh, 2000);
+    return () => { active = false; clearInterval(timer); };
+  }, [cameraId, test]);
+
+  useEffect(() => { onMode(state?.actual_mode || null); }, [state?.actual_mode, onMode]);
+
+  async function selectOutput(mode) {
+    setSaving(true);
+    try {
+      receive(await api(`/cameras/${cameraId}/audio-output`, {method: 'PUT', body: {mode}}));
+      setError('');
+    } catch (failure) { setError(failure.message); }
+    finally { setSaving(false); }
+  }
+
+  async function testSpeaker() {
+    setTest({done: false, label: 'Đang gửi lệnh kiểm tra…'});
+    try {
+      const result = await api(`/cameras/${cameraId}/commands`, {
+        method: 'POST', body: {kind: 'test_speaker', ttl_seconds: 30, idempotency_key: makeBtKey('audio-test')},
+      });
+      setTest({id: result.id, deadline: Date.now() + 35000, label: 'Đang chờ Pi phát âm kiểm tra…'});
+    } catch (failure) { setTest({done: true, label: failure.message}); }
+  }
+
+  return (
+    <section className="spaced" aria-label="Đầu ra âm thanh">
+      <label>
+        <strong>Đầu ra âm thanh</strong>
+        <select value={state?.mode || 'bluetooth'} disabled={!state || saving || !canControl}
+          onChange={event => selectOutput(event.target.value)}>
+          {Object.entries(audioOutputLabels).map(([mode, label]) => <option key={mode} value={mode}>{label}</option>)}
+        </select>
+      </label>
+      <p role="status">{state?.actual_mode ? `Đang dùng ${audioOutputLabels[state.actual_mode]}` : 'Pi chưa báo đầu ra'} · {saving ? 'Đang gửi lựa chọn' : audioOutputStatus(state)}</p>
+      {error && <p role="alert">{error}</p>}
+      {canControl && <Button kind="secondary-btn" disabled={!state?.ready || state.switching || saving || (test && !test.done)}
+        onClick={testSpeaker}><SpeakerHigh size={16}/> Thử loa</Button>}
+      {test && <p role="status">{test.label}</p>}
+    </section>
+  );
+}
+
+export function BluetoothSpeakerCard({ cameraId, canControl = true, canControlAudio = canControl, onCommandSent }) {
   const { notify, tick } = useApp();
+  const [actualMode, setActualMode] = useState(null);
   const [btData, setBtData] = useState({
     connected: false,
     deviceName: '',
@@ -189,6 +265,8 @@ export function BluetoothSpeakerCard({ cameraId, canControl = true, onCommandSen
 
   return (
     <div className="bt-speaker-card">
+      <AudioOutputControls key={cameraId} cameraId={cameraId} canControl={canControlAudio} onMode={setActualMode}/>
+      {actualMode !== 'analog' && <>
       <div className="bt-speaker-header">
         <div className="bt-speaker-main">
           <div className={`bt-speaker-icon ${connected ? 'connected' : ''}`}>
@@ -201,7 +279,7 @@ export function BluetoothSpeakerCard({ cameraId, canControl = true, onCommandSen
             </div>
             <div className="bt-speaker-sub">
               {connected ? (
-                <span className="bt-status-online">🟢 Đã kết nối • Sẵn sàng phát âm thanh</span>
+                <span className="bt-status-online">🟢 Đã kết nối Bluetooth</span>
               ) : (
                 <span className="bt-status-offline">⚪ Chưa kết nối • Bấm &ldquo;Tìm loa&rdquo; để quét và ghép đôi</span>
               )}
@@ -233,6 +311,7 @@ export function BluetoothSpeakerCard({ cameraId, canControl = true, onCommandSen
         </div>
       </div>
 
+      {connected && /SRS-XB13/i.test(btData.deviceName) && <p className="notice">Loa này đã bị ngắt tiếng khi thử trên Pi. Có thể chọn loa có dây nếu âm thanh vẫn giật.</p>}
       {isOpen && (
         <div className="bt-picker-drawer">
           <div className="bt-picker-toolbar">
@@ -358,6 +437,7 @@ export function BluetoothSpeakerCard({ cameraId, canControl = true, onCommandSen
           </div>
         </div>
       )}
+      </>}
     </div>
   );
 }

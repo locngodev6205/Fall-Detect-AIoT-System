@@ -140,6 +140,18 @@ class AudioPlayer:
         self._pending_voice = 0
         self.history: deque[dict[str, Any]] = deque(maxlen=100)
 
+    def select_output(self, mode: str) -> bool:
+        """Change routes between playback sessions, including local warnings."""
+        mode = self.bt.normalize_output(mode)
+        with self._lock:
+            if mode == self.bt.output_mode:
+                return True
+            if (self._live_input is not None or self._pending_voice or self._siren_in_flight
+                    or (self._current_proc is not None and self._current_proc.poll() is None)):
+                return False
+            self.bt.select_output(mode)
+            return True
+
     def is_busy(self) -> bool:
         """Report playback until the child process has actually finished."""
         with self._lock:
@@ -234,7 +246,8 @@ class AudioPlayer:
 
     def _spawn_bluetooth_player(self, file_path: Path, sink: str, backend: str, *, stream_volume=None):
         if backend == "wpctl" and self._has_pw_play:
-            command = ["pw-play", "--target", str(sink), "--latency", "200ms",
+            target = self.bt.resolve_live_target(sink, backend)
+            command = ["pw-play", "--target", target, "--latency", "200ms",
                        "--properties", '{"node.dont-fallback":true,"node.dont-reconnect":true}']
         elif backend == "pactl" and self._has_paplay:
             command = ["paplay", f"--device={sink}"]
@@ -392,6 +405,7 @@ class AudioPlayer:
             return None
         status = self.bt.get_status()
         sink, backend = status["sink"], status["backend"]
+        mode = status.get("mode")
         if not sink:
             return None
         try:
@@ -402,7 +416,7 @@ class AudioPlayer:
                         or (self._current_proc is not None and self._current_proc.poll() is None)):
                     return None
                 current = self.bt.get_status()
-                if (current["sink"], current["backend"]) != (sink, backend):
+                if (current["sink"], current["backend"], current.get("mode")) != (sink, backend, mode):
                     return None
                 if not self.bt.apply_volume(85, refresh=False):
                     return None
@@ -442,6 +456,9 @@ class AudioPlayer:
             if kind in self._siren_in_flight or mono - last_ts < self.siren_cooldown_s:
                 return False, "Còi khẩn cấp đang phát hoặc trong chu kỳ chống dội."
             self._siren_in_flight.add(kind)
+            voice_pending = bool(reason and not self.bt.mock_mode and self._has_espeak)
+            if voice_pending:
+                self._pending_voice += 1
 
         def finished(success: bool) -> None:
             with self._lock:
@@ -450,26 +467,26 @@ class AudioPlayer:
                     self._last_siren_ts[kind] = mono
 
         ok = False
+        handed_off = False
         try:
             ok, detail = self.play_file(
                 self.siren_path, volume=100, priority=3 if is_gas else 2,
                 label=f"emergency_{kind}", bypass_silence=is_gas, is_gas=is_gas,
                 on_finished=finished,
             )
+            if ok and voice_pending:
+                tts_wav = self.synthesize_tts_wav(reason)
+                if tts_wav != self.chime_path:
+                    threading.Thread(target=self._delayed_voice_warning, args=(tts_wav, is_gas),
+                                     daemon=True).start()
+                    handed_off = True
+            return ok, detail
         finally:
             if not ok:
                 finished(False)
-        if ok and reason and not self.bt.mock_mode and self._has_espeak:
-            tts_wav = self.synthesize_tts_wav(reason)
-            if tts_wav != self.chime_path:
+            if voice_pending and not handed_off:
                 with self._lock:
-                    self._pending_voice += 1
-                threading.Thread(
-                    target=self._delayed_voice_warning,
-                    args=(tts_wav, is_gas),
-                    daemon=True,
-                ).start()
-        return ok, detail
+                    self._pending_voice -= 1
 
     def _delayed_voice_warning(self, tts_wav: Path, is_gas: bool) -> None:
         try:

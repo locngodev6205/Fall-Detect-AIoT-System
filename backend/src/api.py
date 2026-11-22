@@ -405,6 +405,28 @@ def config(camera_id:str,current:Current):
         return {'desired_version':camera['desired_version'],'applied_version':camera['applied_version'],'error':camera['config_error'],'payload':svc.current_config_payload(json.loads(row['payload']) if row else {})}
 
 
+@router.get('/cameras/{camera_id}/audio-output')
+def get_audio_output(camera_id: str, current: Current):
+    with db.connect() as conn:
+        camera = camera_access(conn, camera_id, current['id'])
+        row = conn.execute('SELECT payload FROM configurations WHERE camera_id=? ORDER BY version DESC LIMIT 1',
+                           (camera_id,)).fetchone()
+    payload = json.loads(row['payload']) if row else {}
+    capabilities = json.loads(camera['capabilities'])
+    online = bool(camera['last_seen'] and (datetime.now(timezone.utc) - datetime.fromisoformat(camera['last_seen'])).total_seconds() < 45)
+    return svc.audio_output_state(payload, capabilities, camera['desired_version'], camera['applied_version'], online, camera['config_error'])
+
+
+@router.put('/cameras/{camera_id}/audio-output')
+def put_audio_output(camera_id: str, payload: m.AudioOutput, current: Current):
+    with db.connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        camera = camera_access(conn, camera_id, current['id'], 'audio')
+        svc.revision(conn, camera_id, {'audio_output': payload.mode})
+        db.audit(conn, camera['home_id'], current['id'], 'camera.audio_output', camera_id)
+    return get_audio_output(camera_id, current)
+
+
 @router.get('/cameras/{camera_id}/smart-modes')
 def get_smart_modes(camera_id:str,current:Current):
     with db.connect() as conn:
@@ -1028,7 +1050,7 @@ def deliveries(home_id:str,current:Current):
 @router.post('/device/heartbeat')
 def heartbeat(payload:m.Heartbeat,current:Device):
     with db.connect() as conn:
-        conn.execute('UPDATE cameras SET last_seen=?,observation=?,capabilities=? WHERE id=?',(db.now(),payload.observation,db.dumps(payload.capabilities),current['id']))
+        conn.execute('UPDATE cameras SET last_seen=?,observation=?,capabilities=? WHERE id=?',(db.now(),payload.observation,db.dumps(svc.heartbeat_capabilities(payload)),current['id']))
         if isinstance(payload.bluetooth,dict):
             _save_camera_bluetooth(conn,current['id'],payload.bluetooth)
     return {'server_time':db.now(),'desired_version':current['desired_version']}

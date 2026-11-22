@@ -79,10 +79,8 @@ class BluetoothSpeakerManager:
         reconnect_interval_s: float = 12.0,
         env_file_path: Path | None = None,
     ) -> None:
-        if output_mode not in ("bluetooth", "analog_demo"):
-            raise ValueError("ANNHA_AUDIO_OUTPUT must be bluetooth or analog_demo")
-        self.output_mode = output_mode
-        self.analog_demo = output_mode == "analog_demo"
+        self.output_mode = self.normalize_output(output_mode)
+        self._routing_lock = threading.RLock()
         raw_mac = (speaker_mac or "").strip().upper()
         if raw_mac and not MAC_RE.fullmatch(raw_mac):
             logger.warning("[BluetoothAudio] Địa chỉ BT_SPEAKER_MAC không hợp lệ (%r) -> bỏ qua.", speaker_mac)
@@ -110,6 +108,22 @@ class BluetoothSpeakerManager:
         self._mock_connected: bool = True
         self._last_scanned_devices: list[dict[str, Any]] = []
 
+    @staticmethod
+    def normalize_output(mode: str) -> str:
+        mode = "analog" if mode == "analog_demo" else mode
+        if mode not in ("bluetooth", "analog"):
+            raise ValueError("ANNHA_AUDIO_OUTPUT must be bluetooth or analog")
+        return mode
+
+    @property
+    def analog_demo(self) -> bool:
+        return self.output_mode == "analog"
+
+    def select_output(self, mode: str) -> None:
+        with self._routing_lock:
+            self.output_mode = self.normalize_output(mode)
+            self.refresh_sink()
+
     def set_mock_connected(self, connected: bool) -> None:
         """Hỗ trợ kiểm thử kịch bản mất kết nối loa Bluetooth."""
         with self._lock:
@@ -123,8 +137,6 @@ class BluetoothSpeakerManager:
             return self
 
         self.refresh_sink(attempt_connect=True)
-        if self.analog_demo:
-            return self
         self._running = True
         self._thread = threading.Thread(
             target=self._reconnect_loop,
@@ -792,17 +804,18 @@ class BluetoothSpeakerManager:
         return None, "none"
 
     def refresh_sink(self, *, attempt_connect: bool = False) -> str | None:
-        if self.analog_demo and not self.mock_mode:
-            sink, backend = self._detect_analog_sink()
-        else:
-            sink, backend = self.detect_bluetooth_sink()
-            if sink is None and attempt_connect and not self.mock_mode and self._bluetoothctl_connect():
+        with self._routing_lock:
+            if self.analog_demo and not self.mock_mode:
+                sink, backend = self._detect_analog_sink()
+            else:
                 sink, backend = self.detect_bluetooth_sink()
+                if sink is None and attempt_connect and not self.mock_mode and self._bluetoothctl_connect():
+                    sink, backend = self.detect_bluetooth_sink()
 
-        with self._lock:
-            self._active_sink = sink
-            self._active_backend = backend
-        return sink
+            with self._lock:
+                self._active_sink = sink
+                self._active_backend = backend
+            return sink
 
     def is_speaker_ready(self) -> bool:
         """Kiểm tra Loa Bluetooth đã sẵn sàng nhận âm thanh chưa."""
@@ -885,6 +898,7 @@ class BluetoothSpeakerManager:
     def get_status(self) -> dict[str, Any]:
         with self._lock:
             return {
+                "mode": self.output_mode,
                 "ready": bool(self._mock_connected) if self.mock_mode else (self._active_sink is not None),
                 "mock_mode": self.mock_mode,
                 "sink": self._active_sink,

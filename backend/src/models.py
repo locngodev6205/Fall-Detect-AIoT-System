@@ -180,10 +180,19 @@ class SmartModes(Model):
                 raise ValueError('Giờ chế độ ban đêm không hợp lệ')
         return self
 
+class AudioOutput(Model):
+    mode: Literal['bluetooth', 'analog']
+
+class AudioOutputReport(AudioOutput):
+    ready: bool
+    version: int = Field(ge=0)
+    error: str = Field(default='', max_length=240)
+
 class Heartbeat(Model):
     observation: Literal['unknown','clear','no_person','occluded','camera_error'] = 'unknown'
     capabilities: dict[Literal['camera','speaker','sensors'],bool] = Field(default_factory=dict)
     bluetooth: dict | None = None
+    audio_output: AudioOutputReport | None = None
 
 class ConfigAck(Model):
     version: int = Field(ge=1)

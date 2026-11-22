@@ -404,6 +404,29 @@ def config(camera_id:str,current:Current):
         row=conn.execute('SELECT payload FROM annha.camera_configurations WHERE camera_id=%s ORDER BY version DESC LIMIT 1',(camera_id,)).fetchone()
     return {'desired_version':state.get('desired_version',0),'applied_version':state.get('applied_version') or 0,'error':state.get('error'),'payload':svc.current_config_payload(row['payload'] if row else {})}
 
+@router.get('/cameras/{camera_id}/audio-output')
+def get_audio_output(camera_id: str, current: Current):
+    camera = camera_access(camera_id, current['id'])
+    with db.connect('app', camera['home_id'], current['id']) as conn:
+        state = conn.execute('SELECT desired_version,applied_version,error FROM annha.camera_config_state WHERE camera_id=%s',
+                             (camera_id,)).fetchone() or {}
+        row = conn.execute('SELECT payload FROM annha.camera_configurations WHERE camera_id=%s ORDER BY version DESC LIMIT 1',
+                           (camera_id,)).fetchone()
+    online = bool(camera['last_seen_at'] and (db.now() - camera['last_seen_at']).total_seconds() < 45)
+    return svc.audio_output_state(row['payload'] if row else {}, camera['capabilities'],
+                                  state.get('desired_version'), state.get('applied_version'), online, state.get('error'))
+
+
+@router.put('/cameras/{camera_id}/audio-output')
+def put_audio_output(camera_id: str, payload: m.AudioOutput, current: Current):
+    camera = camera_access(camera_id, current['id'], 'audio')
+    if svc.compile_config(camera['home_id'], camera_id, {'audio_output': payload.mode}) is None:
+        raise HTTPException(404, 'Không tìm thấy camera.')
+    with db.connect('app', camera['home_id'], current['id']) as conn:
+        db.audit(conn, camera['home_id'], current['id'], 'camera.audio_output', camera_id)
+    return get_audio_output(camera_id, current)
+
+
 @router.get('/cameras/{camera_id}/smart-modes')
 def get_smart_modes(camera_id:str,current:Current):
     camera=camera_access(camera_id,current['id'])
@@ -1250,7 +1273,7 @@ def deliveries(home_id:str,current:Current,recipient_id:UUID|None=None,page:int|
 @router.post('/device/heartbeat')
 def heartbeat(payload:m.Heartbeat,current:Device):
     with db.connect('worker',current['home_id'],camera=current['id']) as conn:
-        conn.execute('UPDATE annha.cameras SET last_seen_at=now(),observation=%s,capabilities=%s WHERE id=%s',(payload.observation,db.J(payload.capabilities),current['id']))
+        conn.execute('UPDATE annha.cameras SET last_seen_at=now(),observation=%s,capabilities=%s WHERE id=%s',(payload.observation,db.J(svc.heartbeat_capabilities(payload)),current['id']))
         state=conn.execute('SELECT desired_version FROM annha.camera_config_state WHERE camera_id=%s',(current['id'],)).fetchone()
     if isinstance(payload.bluetooth,dict):
         _PG_BT_STATE[str(current['id'])]={

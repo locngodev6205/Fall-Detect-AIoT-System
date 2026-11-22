@@ -62,3 +62,59 @@ class AnalogDemoTests(unittest.TestCase):
                 self.assertIs(player.start_live_stream("audio/webm"), live.return_value)
                 live.assert_called_once_with("audio/webm", "123", "wpctl", stream_volume=0.2125)
                 player.finish_live_stream(live.return_value)
+
+    def test_hot_switch_waits_for_live_and_emergency_and_restores_from_cache(self):
+        from fall_detect.edge.client.device_client import ConfigDeferred, DeviceClient
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bt = BluetoothSpeakerManager(force_mock=True)
+            player = AudioPlayer(bt, root / 'sound')
+            client = DeviceClient('http://fixture', 'fixture', cache_dir=root)
+
+            def apply(config):
+                if not player.select_output(config['audio_output']):
+                    raise ConfigDeferred()
+
+            client.on_config_updated(apply)
+            revision = {'audio_output': 'analog', 'version': 2}
+            requests = []
+
+            def request(method, path, **kwargs):
+                requests.append((path, kwargs.get('json_body')))
+                return SimpleNamespace(status_code=200, json=lambda: revision)
+
+            client._request = request
+            stream = player.start_live_stream('audio/webm')
+            self.assertIsNotNone(stream)
+            self.assertIsNone(client.sync_config())
+            self.assertEqual(bt.output_mode, 'bluetooth')
+            self.assertFalse((root / 'device_config.json').exists())
+            player.finish_live_stream(stream)
+
+            player._siren_in_flight.add('gas')
+            self.assertIsNone(client.sync_config())
+            self.assertEqual([path for path, _ in requests], ['/api/device/config'] * 2)
+            player._siren_in_flight.clear()
+            self.assertEqual(client.sync_config(), revision)
+            self.assertEqual(bt.output_mode, 'analog')
+            self.assertEqual(requests[-1][1]['version'], 2)
+
+            report = {'mode': 'analog', 'ready': True, 'error': ''}
+            client.send_heartbeat(audio_output=report)
+            self.assertIn(('/api/device/heartbeat', {
+                'observation': 'clear',
+                'capabilities': {'camera': True, 'speaker': True, 'sensors': True},
+                'audio_output': {**report, 'version': 2},
+            }), requests)
+            client.stop()
+            player.stop()
+
+            restarted = DeviceClient('http://fixture', '', cache_dir=root)
+            fallback = BluetoothSpeakerManager(force_mock=True, output_mode='analog_demo')
+            self.assertEqual(fallback.output_mode, 'analog')
+            fallback.select_output('bluetooth')
+            restarted.on_config_updated(lambda cfg: fallback.select_output(cfg['audio_output']))
+            self.assertEqual(fallback.output_mode, 'analog')
+            self.assertEqual(restarted.applied_version, 2)
+            restarted.stop()

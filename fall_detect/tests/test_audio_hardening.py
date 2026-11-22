@@ -175,6 +175,7 @@ class AudioHardeningTests(unittest.TestCase):
                     raise requests.Timeout("fixture")
 
                 getattr(runtime.client, blocked_path).side_effect = block
+                runtime.bt.get_status.return_value = {"mode": "bluetooth", "ready": True}
                 clock = Mock()
                 clock.monotonic.side_effect = [0, 10] + [10] * 30
                 io = threading.Thread(target=main_edge.AnNhaEdgeRuntime._background_io_loop, args=(runtime,))

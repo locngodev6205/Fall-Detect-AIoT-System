@@ -675,6 +675,10 @@ class PostgresTests(unittest.TestCase):
         # Re-read persisted data from PostgreSQL.
         self.assertEqual(len(owner.get(f"/api/homes/{home['id']}/events").json()),1)
 
+    def test_camera_audio_output_config_and_actual_state(self):
+        from backend.tests.audio_output_cases import exercise_audio_output
+        exercise_audio_output(self)
+
     def test_reminder_commands_assets_and_telemetry(self):
         owner,_=self.account('owner@example.com');home,room,camera,provision=self.home_camera(owner);device=self.device(provision)
         payload={'camera_id':camera['id'],'name':'Nhắc ăn','time':'07:00','text':'Nhớ ăn sáng nhé','source':'tts'}

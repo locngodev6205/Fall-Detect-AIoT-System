@@ -65,7 +65,7 @@ from edge.audio.audio_player import AudioPlayer  # noqa: E402
 from edge.audio.bluetooth_manager import BluetoothSpeakerManager  # noqa: E402
 from edge.audio.worker import AudioWorker
 from edge.audio.scheduler import ReminderScheduler  # noqa: E402
-from edge.client.device_client import DeviceClient  # noqa: E402
+from edge.client.device_client import ConfigDeferred, DeviceClient  # noqa: E402
 from edge.client.live_streamer import LiveStreamer  # noqa: E402
 from edge.pairing import pair_device  # noqa: E402
 from edge.sensors.arduino_bridge import ArduinoBridge  # noqa: E402
@@ -292,6 +292,9 @@ class AnNhaEdgeRuntime:
         self.client.set_command_handler(self._on_web_command)
 
     def _on_config_updated(self, cfg: dict[str, Any]) -> None:
+        mode = cfg.get("audio_output")
+        if mode is not None and not self.audio.select_output(mode):
+            raise ConfigDeferred()
         modes = cfg.get("smart_modes")
         self.tracker.update_smart_modes(modes)
         self.show_landmarks = modes.get("show_landmarks", True) is not False if isinstance(modes, dict) else True
@@ -448,10 +451,18 @@ class AnNhaEdgeRuntime:
                 # 2. Heartbeat & đồng bộ cấu hình
                 if self.device_token and now >= next_hb:
                     sensors_ok = bool(self.bridge.is_hardware_connected or self.force_mock_hardware)
+                    speaker_ready = self.bt.is_speaker_ready()
+                    audio = self.bt.get_status()
                     self.client.send_heartbeat(
                         observation=self._observation,
                         camera_ok=self._camera_ok,
-                        speaker_ok=self.bt.is_speaker_ready(),
+                        speaker_ok=speaker_ready,
+                        audio_output={
+                            "mode": audio["mode"], "ready": audio["ready"],
+                            "error": "" if audio["ready"] else (
+                                "Không tìm thấy cổng âm thanh 3,5 mm." if audio["mode"] == "analog"
+                                else "Loa Bluetooth chưa sẵn sàng."),
+                        },
                         sensors_ok=sensors_ok,
                         bluetooth=self.bt.get_bluetooth_report(),
                     )

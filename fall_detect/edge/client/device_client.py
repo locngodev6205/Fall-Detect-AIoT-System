@@ -16,6 +16,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
 import logging
+import os
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -122,6 +123,10 @@ class ThingsBoardPublisher:
                 pass
             self._client = None
             self._connected = False
+
+
+class ConfigDeferred(Exception):
+    """Retry configuration on the next heartbeat after playback finishes."""
 
 
 class DeviceClient:
@@ -267,12 +272,13 @@ class DeviceClient:
         return {}
 
     def _save_cached_config(self, cfg: dict[str, Any]) -> None:
-        try:
-            self._config_cache_file().write_text(
-                json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-        except Exception as exc:
-            logger.warning("[DeviceClient] Không lưu được cache cấu hình: %s", exc)
+        path = self._config_cache_file()
+        temporary = path.with_suffix(".tmp")
+        with temporary.open("w", encoding="utf-8") as output:
+            json.dump(cfg, output, ensure_ascii=False, indent=2)
+            output.flush()
+            os.fsync(output.fileno())
+        temporary.replace(path)
 
     # ------------------------------------------------------------------
     # 1. Heartbeat & Đồng bộ Cấu hình (`desired_version`)
@@ -286,6 +292,7 @@ class DeviceClient:
         speaker_ok: bool = True,
         sensors_ok: bool = True,
         bluetooth: dict[str, Any] | None = None,
+        audio_output: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         obs = observation if observation in ALLOWED_OBSERVATIONS else "unknown"
         body: dict[str, Any] = {
@@ -298,6 +305,8 @@ class DeviceClient:
         }
         if bluetooth is not None:
             body["bluetooth"] = bluetooth
+        if audio_output is not None:
+            body["audio_output"] = {**audio_output, "version": int(self.current_config.get("version") or 0)}
         try:
             resp = self._request("POST", "/api/device/heartbeat", json_body=body)
             if resp.status_code != 200:
@@ -338,6 +347,8 @@ class DeviceClient:
             for listener in self._config_listeners:
                 try:
                     listener(cfg)
+                except ConfigDeferred:
+                    return None
                 except Exception as exc:
                     errors.append(str(exc))
 
@@ -352,8 +363,8 @@ class DeviceClient:
                     )
                 return cfg
 
-            self.current_config = cfg
             self._save_cached_config(cfg)
+            self.current_config = cfg
             self._sync_asset_readiness()
             return cfg
         except Exception as exc:
