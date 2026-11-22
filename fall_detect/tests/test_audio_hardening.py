@@ -176,13 +176,14 @@ class AudioHardeningTests(unittest.TestCase):
 
                 getattr(runtime.client, blocked_path).side_effect = block
                 clock = Mock()
-                clock.monotonic.side_effect = [0, 10]
+                clock.monotonic.side_effect = [0, 10] + [10] * 30
                 io = threading.Thread(target=main_edge.AnNhaEdgeRuntime._background_io_loop, args=(runtime,))
                 with patch.object(main_edge, "time", clock):
                     io.start()
                     try:
                         self.assertTrue(entered.wait(2))
                         reminder_runtime = SimpleNamespace(
+                            update_lock=threading.RLock(), maintenance_until=0,
                             _stop_event=SimpleNamespace(is_set=lambda: elapsed > 125, wait=delay),
                             scheduler=SimpleNamespace(evaluate_due=lambda: results.extend(
                                 scheduler.evaluate_due(start + timedelta(seconds=elapsed)))),

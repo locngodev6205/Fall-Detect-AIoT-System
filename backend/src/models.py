@@ -169,6 +169,7 @@ class Command(Model):
 class SmartModes(Model):
     fall_detection: bool = True
     servo_tracking: bool = True
+    show_landmarks: bool = True
     night_mode_enabled: bool = True
     night_start: str = '22:00'
     night_end: str = '06:00'

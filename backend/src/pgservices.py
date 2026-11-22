@@ -147,6 +147,7 @@ def camera_public(conn,row,permissions=None): return cameras_public(conn,[row],p
 DEFAULT_SMART_MODES = {
     'fall_detection': True,
     'servo_tracking': True,
+    'show_landmarks': True,
     'night_mode_enabled': True,
     'night_start': '22:00',
     'night_end': '06:00',

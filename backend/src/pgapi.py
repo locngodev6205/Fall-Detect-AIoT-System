@@ -424,14 +424,18 @@ def put_smart_modes(camera_id:str,payload:m.SmartModes,current:Current):
 
 @router.get('/homes/{home_id}/events')
 def events(home_id:str,current:Current,limit:int=100,status:str|None=None,kind:str|None=None,
-           room_id:str|None=None,camera_id:str|None=None,hours:int|None=None,page:int|None=None,page_size:int=10,start:str|None=None,end:str|None=None,severity:str|None=None):
+           room_id:str|None=None,camera_id:str|None=None,hours:int|None=None,page:int|None=None,page_size:int=10,start:str|None=None,end:str|None=None,severity:str|None=None,active_only:bool=False):
     membership(home_id,current['id'])
     if not 1<=limit<=500 or not 1<=page_size<=50 or (page is not None and page<1): raise HTTPException(422,'Giới hạn/trang không hợp lệ.')
     if hours is not None and not 1<=hours<=87600: raise HTTPException(422,'Khoảng thời gian không hợp lệ.')
+    if active_only and not camera_id:
+        raise HTTPException(422,'Chọn camera để xem các cảnh báo đang chặn OTA.')
     if kind and kind not in ('fall','immobility','environment','device'): raise HTTPException(422,'Loại sự kiện không hợp lệ.')
     a,b=time_range(start,end,hours)
     if severity and severity not in ('info','warning','critical'): raise HTTPException(422,'Mức cảnh báo không hợp lệ.')
     clauses=['e.home_id=%s'];args=[home_id]
+    if active_only:
+        clauses.append("e.status IN ('OPEN','ACKNOWLEDGED')")
     if a: clauses.append('e.first_observed_at>=%s');args.append(a)
     if b: clauses.append('e.first_observed_at<%s');args.append(b)
     for column,value in [('e.status',status),('e.kind',kind),('c.room_id',room_id),('e.camera_id',camera_id),('e.severity',severity)]:
@@ -462,6 +466,10 @@ def active_events(home_id:str,current:Current,page_size:int=5):
     return {'count':count,'unread_count':unread_count,'items':items,'as_of':as_of}
 
 def event_scope(event_id,current,action='view'):
+    try:
+        UUID(event_id)
+    except ValueError:
+        raise HTTPException(404,'Không tìm thấy sự kiện.') from None
     # Resolve the tenant from trusted records, then enforce RLS and camera permission.
     with db.connect('auth') as auth:
         homes=[str(row['home_id']) for row in auth.execute('SELECT home_id FROM annha_private.home_memberships WHERE user_id=%s AND revoked_at IS NULL',(current['id'],))]
@@ -480,26 +488,28 @@ def get_event(event_id:str,current:Current):
     with db.connect('app',home,current['id']) as conn: return svc.event_public(conn,conn.execute('SELECT e.*,EXISTS (SELECT 1 FROM annha.event_reads er WHERE er.event_id=e.id AND er.user_id=%s) AS is_read FROM annha.events e WHERE e.id=%s',(current['id'],event_id)).fetchone())
 
 def _read_event(conn,event,current):
-    conn.execute('''INSERT INTO annha.event_reads(home_id,camera_id,event_id,user_id)
-        VALUES(%s,%s,%s,%s) ON CONFLICT(event_id,user_id) DO NOTHING''',
-        (event['home_id'],event['camera_id'],event['id'],current['id']))
+    inserted=conn.execute('''INSERT INTO annha.event_reads(home_id,camera_id,event_id,user_id)
+        VALUES(%s,%s,%s,%s) ON CONFLICT(event_id,user_id) DO NOTHING RETURNING event_id''',
+        (event['home_id'],event['camera_id'],event['id'],current['id'])).fetchone() is not None
     allowed=conn.execute('SELECT annha_private.can_camera(%s,%s,%s) AS allowed',
         (event['home_id'],event['camera_id'],'events')).fetchone()['allowed']
     if allowed and event['status']=='OPEN':
-        conn.execute("UPDATE annha.events SET status='ACKNOWLEDGED',updated_at=now() WHERE id=%s",(event['id'],))
+        updated=conn.execute("UPDATE annha.events SET status='ACKNOWLEDGED',updated_at=now() WHERE id=%s AND status='OPEN' RETURNING id",(event['id'],)).fetchone()
+        if not updated:
+            return inserted,False
         conn.execute('''INSERT INTO annha.event_actions(home_id,camera_id,event_id,user_id,action,request_id)
             VALUES(%s,%s,%s,%s,'acknowledge',%s)''',
             (event['home_id'],event['camera_id'],event['id'],current['id'],db.uid()))
         db.audit(conn,event['home_id'],current['id'],'event.acknowledge',event['id'])
-        return True
-    return False
+        return inserted,True
+    return inserted,False
 
 @router.post('/events/{event_id}/read')
 async def mark_event_read(event_id:str,current:Current):
     home=event_scope(event_id,current)
     with db.connect('app',home,current['id']) as conn:
-        event=fail_if_missing(conn.execute('SELECT * FROM annha.events WHERE id=%s FOR UPDATE',(event_id,)).fetchone())
-        changed=_read_event(conn,event,current)
+        event=fail_if_missing(conn.execute('SELECT * FROM annha.events WHERE id=%s',(event_id,)).fetchone())
+        _,changed=_read_event(conn,event,current)
         result=svc.event_public(conn,conn.execute('SELECT * FROM annha.events WHERE id=%s',(event_id,)).fetchone()) if changed else None
     if result: await svc.broadcast(result)
     return {'id':event_id,'read':True}
@@ -509,11 +519,10 @@ async def mark_all_events_read(home_id:str,current:Current):
     membership(home_id,current['id'])
     changed=[];count=0
     with db.connect('app',home_id,current['id']) as conn:
-        rows=conn.execute("SELECT * FROM annha.events WHERE home_id=%s AND status IN ('OPEN','ACKNOWLEDGED') ORDER BY received_at FOR UPDATE",(home_id,)).fetchall()
+        rows=conn.execute("SELECT * FROM annha.events WHERE home_id=%s AND status IN ('OPEN','ACKNOWLEDGED') ORDER BY received_at,id",(home_id,)).fetchall()
         for event in rows:
-            previously_read=conn.execute('SELECT 1 FROM annha.event_reads WHERE event_id=%s AND user_id=%s',(event['id'],current['id'])).fetchone()
-            acknowledged=_read_event(conn,event,current)
-            if not previously_read:count+=1
+            inserted,acknowledged=_read_event(conn,event,current)
+            count+=inserted
             if acknowledged:changed.append(event['id'])
         broadcasts=svc.events_public(conn,conn.execute('SELECT * FROM annha.events WHERE id=ANY(%s::uuid[])',(changed,)).fetchall()) if changed else []
     for event in broadcasts:await svc.broadcast(event)
@@ -531,9 +540,9 @@ def event_updates(event_id:str,current:Current,page:int=1,page_size:int=10):
 async def event_action(event_id:str,payload:m.Action,current:Current):
     home=event_scope(event_id,current,'events');command=None
     with db.connect('app',home,current['id']) as conn:
-        row=conn.execute('SELECT * FROM annha.events WHERE id=%s FOR UPDATE',(event_id,)).fetchone()
+        row=fail_if_missing(conn.execute('SELECT * FROM annha.events WHERE id=%s FOR UPDATE',(event_id,)).fetchone())
         closing=payload.action in ('resolve','safe','false_alarm')
-        if closing and row['observation'] in ('abnormal','suspected') and (not payload.confirm_abnormal or not payload.note): raise HTTPException(409,'Còn bất thường; cần xác nhận và ghi chú.')
+        if closing and row['observation'] in ('abnormal','suspected') and (not payload.confirm_abnormal or not payload.note.strip()): raise HTTPException(409,'Còn bất thường; cần xác nhận và ghi chú.')
         if row['status'] in ('RESOLVED','FALSE_ALARM') and payload.action!='note': raise HTTPException(409,'Sự kiện đã kết thúc.')
         if payload.action=='acknowledge': conn.execute("UPDATE annha.events SET status='ACKNOWLEDGED',updated_at=now() WHERE id=%s",(event_id,))
         if closing: conn.execute('UPDATE annha.events SET status=%s,updated_at=now() WHERE id=%s',('FALSE_ALARM' if payload.action=='false_alarm' else 'RESOLVED',event_id))

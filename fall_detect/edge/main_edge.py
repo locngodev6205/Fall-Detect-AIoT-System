@@ -92,6 +92,20 @@ def load_env_file(path: Path) -> dict[str, str]:
     return loaded
 
 
+def draw_ota_version_badge(frame: Any, version: str) -> None:
+    """Hiển thị phiên bản ứng dụng đang chạy trên luồng camera để demo OTA."""
+    if cv2 is None or not version or version == "unmanaged":
+        return
+    label = f"AnNha Edge v{version}"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    (text_w, text_h), baseline = cv2.getTextSize(label, font, 0.6, 2)
+    frame_h, frame_w = frame.shape[:2]
+    if frame_w < text_w + 24 or frame_h < text_h + baseline + 24:
+        return
+    cv2.rectangle(frame, (8, 8), (text_w + 24, text_h + baseline + 20), (18, 28, 36), -1)
+    cv2.putText(frame, label, (16, text_h + 14), font, 0.6, (0, 255, 180), 2, cv2.LINE_AA)
+
+
 def render_synthetic_hud_jpeg(
     *,
     width: int = 640,
@@ -159,6 +173,9 @@ def render_synthetic_hud_jpeg(
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=78)
     return buf.getvalue()
+
+
+from edge.update_status import UpdateStatusServer, maintenance_guard
 
 
 class AnNhaEdgeRuntime:
@@ -257,6 +274,15 @@ class AnNhaEdgeRuntime:
         }
         self._observation: str = "clear"
         self._camera_ok: bool = True
+        self.update_lock = threading.RLock()
+        self.maintenance_until = 0.0
+        self.last_camera_frame = 0.0
+        self.last_safety_check = 0.0
+        self.local_danger = False
+        self.unreported_alert = False
+        self.model_inference_ok = False
+        self.show_landmarks = True
+        self.update_status = UpdateStatusServer(self, FALL_DETECT_DIR)
         self._stop_event = threading.Event()
         self._workers: list[threading.Thread] = []
 
@@ -264,12 +290,15 @@ class AnNhaEdgeRuntime:
         self.client.set_command_handler(self._on_web_command)
 
     def _on_config_updated(self, cfg: dict[str, Any]) -> None:
-        self.tracker.update_smart_modes(cfg.get("smart_modes"))
+        modes = cfg.get("smart_modes")
+        self.tracker.update_smart_modes(modes)
+        self.show_landmarks = modes.get("show_landmarks", True) is not False if isinstance(modes, dict) else True
         self.scheduler.apply_config(cfg)
         env = cfg.get("environment")
         if isinstance(env, dict):
             self._env_thresholds.update(env)
 
+    @maintenance_guard
     def _on_web_command(self, cmd: dict[str, Any]) -> tuple[bool, str] | Future:
         kind = str(cmd.get("kind") or "")
         if kind in ("ptz_move", "ptz_center"):
@@ -316,6 +345,7 @@ class AnNhaEdgeRuntime:
 
         def can_start():
             return (not self._stop_event.is_set()
+                    and time.monotonic() >= self.maintenance_until
                     and (not expires or time.time() < expires))
 
         if not can_start():
@@ -325,14 +355,20 @@ class AnNhaEdgeRuntime:
         )
 
     def _start_ptt(self, mime):
-        return self.audio.start_live_stream(mime)
+        with self.update_lock:
+            if time.monotonic() >= self.maintenance_until:
+                return self.audio.start_live_stream(mime)
+        return None
 
+    @maintenance_guard
     def _evaluate_local_autonomous_safety(self, readings: dict[str, dict[str, Any]]) -> None:
         """Kiểm tra ngưỡng khí gas độc lập ngay tại biên mỗi 1.5s — hú còi tại chỗ kể cả khi rớt mạng!"""
         gas_info = readings.get("gas") or {}
+        self.local_danger = gas_info.get("quality") != "valid"
         if gas_info.get("quality") == "valid" and gas_info.get("value") is not None:
             gas_val = float(gas_info["value"])
             gas_high = float(self._env_thresholds.get("gas_high") or 450.0)
+            self.local_danger = gas_val >= gas_high
             if gas_val >= gas_high:
                 logger.critical("[LocalSafety] CẢNH BÁO RÒ RỈ KHÍ GAS: %.1f >= %.1f!", gas_val, gas_high)
                 siren_ok, _ = self.audio.trigger_emergency_siren(
@@ -351,10 +387,12 @@ class AnNhaEdgeRuntime:
                             reason=f"Nồng độ khí gas vượt ngưỡng nguy hiểm ({gas_val:.0f} >= {gas_high:.0f}).",
                         )
 
+    @maintenance_guard
     def handle_fall_detected(self, confidence: float, reason: str, jpeg_evidence: bytes | None = None) -> None:
         """Xử lý tức thời khi AI phát hiện té ngã: Hú còi tại phòng trước -> Gửi Event + Ảnh lên Backend."""
         if not self.tracker.is_fall_detection_enabled():
             return
+        self.unreported_alert = True
         # 1. Còi báo động tại chỗ NGAY LẬP TỨC (0 độ trễ mạng)
         self.audio.trigger_emergency_siren("fall", "Cảnh báo! Phát hiện người thân có dấu hiệu té ngã!")
 
@@ -368,6 +406,8 @@ class AnNhaEdgeRuntime:
             reason=reason,
             confidence=confidence,
         )
+        if ev and ev.get("id"):
+            self.unreported_alert = False
         if ev and ev.get("id") and jpeg_evidence:
             self.client.upload_evidence(
                 jpeg_evidence,
@@ -434,7 +474,9 @@ class AnNhaEdgeRuntime:
     def _reminder_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                self.scheduler.evaluate_due()
+                with self.update_lock:
+                    if time.monotonic() >= self.maintenance_until:
+                        self.scheduler.evaluate_due()
             except Exception:
                 logger.exception("[EdgeRuntime] Lỗi kiểm tra lịch nhắc.")
             self._stop_event.wait(5.0)
@@ -481,6 +523,7 @@ class AnNhaEdgeRuntime:
                     self._stop_event.wait(0.5)
                     continue
                 self._camera_ok = True
+                self.last_camera_frame = time.monotonic()
                 self._observation = "clear"
 
                 now_m = time.monotonic()
@@ -503,6 +546,7 @@ class AnNhaEdgeRuntime:
                 cv2.rectangle(frame, (bx1, by1), (bx1 + box_w, by1 + box_h), (0, 230, 150), 1)
                 cv2.putText(frame, f"FPS: {current_fps:4.1f}", (bx1 + 14, by1 + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 180), 1, cv2.LINE_AA)
 
+                draw_ota_version_badge(frame, self.update_status.version)
                 ok_enc, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                 if ok_enc:
                     self.streamer.update_frame_jpeg(buf.tobytes())
@@ -541,6 +585,11 @@ class AnNhaEdgeRuntime:
                     event_cooldown=fd_cfg.FALL_EVENT_COOLDOWN,
                     on_fall_alert=_on_fall,
                 )
+                # Probe inference without triggering event callbacks or requiring a person.
+                import numpy as np
+                tensor = detector.input_details[0]
+                detector.interpreter.set_tensor(tensor["index"], np.zeros(tuple(tensor["shape"]), dtype=tensor["dtype"]))
+                detector.interpreter.invoke()
             except Exception as exc:
                 logger.warning("[Vision] Không khởi tạo được TFLite FallDetector (%s) -> chỉ chạy Pose Tracking.", exc)
 
@@ -569,9 +618,17 @@ class AnNhaEdgeRuntime:
                         continue
 
                     self._camera_ok = True
+                    self.last_camera_frame = time.monotonic()
                     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     rgb.flags.writeable = False
                     pose_res = pose.process(rgb)
+                    if detector is not None and not self.model_inference_ok and not self.force_mock_hardware:
+                        try:
+                            detector.interpreter.invoke()
+                            self.model_inference_ok = True
+                        except Exception:
+                            logger.warning("[Vision] OTA inference probe failed")
+
 
                     present = is_person_present(pose_res.pose_landmarks)
                     self._observation = "clear" if present else "no_person"
@@ -611,10 +668,11 @@ class AnNhaEdgeRuntime:
                             feats = extract_and_normalize_features(pose_res.pose_landmarks) if present else None
                             detector.update(feats, person_present=present)
                         except Exception as exc:
+                            self.model_inference_ok = False
                             logger.warning("[Vision] Lỗi FallDetector: %s", exc)
 
                     # 1. Vẽ khung xương MediaPipe lên khung hình khi phát hiện người
-                    if present and pose_res.pose_landmarks and mp_drawing and mp_styles:
+                    if self.show_landmarks and present and pose_res.pose_landmarks and mp_drawing and mp_styles:
                         try:
                             mp_drawing.draw_landmarks(
                                 frame,
@@ -643,6 +701,7 @@ class AnNhaEdgeRuntime:
                         cv2.LINE_AA,
                     )
 
+                    draw_ota_version_badge(frame, self.update_status.version)
                     ok_enc, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                     if ok_enc:
                         jpg_bytes = buf.tobytes()
@@ -682,6 +741,7 @@ class AnNhaEdgeRuntime:
         logger.info("==========================================================")
         logger.info(" KHỞI ĐỘNG ANNHÀ AIoT EDGE NODE -> %s", self.base_url)
         logger.info("==========================================================")
+        self.update_status.start()
         self.bridge.start()
         self.bridge.center()
         self.bt.start()
@@ -701,6 +761,7 @@ class AnNhaEdgeRuntime:
         return self
 
     def stop(self) -> None:
+        self.update_status.stop()
         self._stop_event.set()
         for t in self._workers:
             if t.is_alive():

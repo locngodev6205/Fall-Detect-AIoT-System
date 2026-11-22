@@ -45,9 +45,11 @@ def visible_cameras(conn, home_id, user_id):
     return [camera_public(row,permissions[row['id']]) for row in rows if row['id'] in permissions]
 
 
-def event_public(conn, row):
+def event_public(conn, row, user_id=None):
     result=dict(row)
     result['payload']=json.loads(result['payload'])
+    if user_id is not None:
+        result['is_read']=bool(conn.execute('SELECT 1 FROM event_reads WHERE event_id=? AND user_id=?',(row['id'],user_id)).fetchone())
     result['actions']=[dict(x) for x in conn.execute('SELECT a.*,u.name AS user_name FROM actions a JOIN users u ON u.id=a.user_id WHERE event_id=? ORDER BY created_at',(row['id'],))]
     result['evidence']=[{k:a[k] for k in ('id','name','mime','status','error','created_at')} for a in conn.execute('SELECT * FROM assets WHERE event_id=?',(row['id'],))]
     return result
@@ -63,6 +65,7 @@ def reminder_public(row):
 DEFAULT_SMART_MODES = {
     'fall_detection': True,
     'servo_tracking': True,
+    'show_landmarks': True,
     'night_mode_enabled': True,
     'night_start': '22:00',
     'night_end': '06:00',
@@ -178,15 +181,18 @@ def ingest_event(camera, payload):
             raise HTTPException(422,'Phiên bản cấu hình không thuộc camera.')
         values=payload.model_dump()
         event_id=old['id'] if old else db.uid()
+        received_at=db.now()
         if old:
             status='OPEN' if old['status'] in ('RESOLVED','FALSE_ALARM') and payload.observation=='abnormal' else old['status']
             if status=='OPEN' and old['status'] in ('RESOLVED','FALSE_ALARM'):
                 conn.execute("UPDATE deliveries SET status='pending',sent_count=0,attempts=0,next_attempt=0,error=NULL WHERE event_id=?",(event_id,))
             conn.execute('UPDATE events SET sequence=?,observation=?,payload=?,received_at=?,severity=?,status=? WHERE id=?',
-                         (payload.sequence,payload.observation,db.dumps(values),db.now(),payload.severity,status,event_id))
+                         (payload.sequence,payload.observation,db.dumps(values),received_at,payload.severity,status,event_id))
         else:
             conn.execute('INSERT INTO events(id,camera_id,home_id,source_id,sequence,kind,severity,observed_at,received_at,observation,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-                         (event_id,camera['id'],camera['home_id'],payload.event_id,payload.sequence,payload.kind,payload.severity,payload.observed_at,db.now(),payload.observation,db.dumps(values)))
+                         (event_id,camera['id'],camera['home_id'],payload.event_id,payload.sequence,payload.kind,payload.severity,payload.observed_at,received_at,payload.observation,db.dumps(values)))
+        conn.execute('INSERT INTO event_updates(event_id,sequence,observed_at,received_at,observation,severity,payload) VALUES(?,?,?,?,?,?,?)',
+                     (event_id,payload.sequence,payload.observed_at,received_at,payload.observation,payload.severity,db.dumps(values)))
         settings=models.Settings(**json.loads(conn.execute('SELECT settings FROM homes WHERE id=?',(camera['home_id'],)).fetchone()[0]))
         if settings.telegram_enabled and payload.severity!='info':
             conn.execute('INSERT OR IGNORE INTO deliveries(id,home_id,event_id) VALUES(?,?,?)',(db.uid(),camera['home_id'],event_id))

@@ -3,6 +3,7 @@ import { Plus, VideoCamera, Thermometer, Drop, Leaf, WarningCircle, Clock, Speak
 import { api, go, roleNames, statusNames, eventNames, dateTime } from './api';
 import { Badge, Button, CameraImage, CameraThumbnail, Empty, Field, Heading, Modal, PagedList, Pagination } from './ui';
 import { useApp, useResource, ResourceState } from './context';
+import { DeviceUpdates } from './DeviceUpdates';
 import { LiveAudio } from './LiveAudio';
 import { BluetoothSpeakerCard } from './BluetoothSpeakerCard';
 const EnvironmentChart=lazy(()=>import('./EnvironmentChart').then(module=>({default:module.EnvironmentChart})));
@@ -100,6 +101,7 @@ export function CameraDetail({ id }) {
   const [modesDraft, setModesDraft] = useState({
     fall_detection: true,
     servo_tracking: true,
+    show_landmarks: true,
     night_mode_enabled: true,
     night_start: '22:00',
     night_end: '06:00',
@@ -219,6 +221,14 @@ export function CameraDetail({ id }) {
           </label>
           <label className="smart-mode-item">
             <span className="smart-mode-info">
+              <strong><Eye/>Hiện điểm khớp trên video</strong>
+              <small>Bật hoặc tắt hình vẽ khớp trên luồng camera web.</small>
+            </span>
+            <input type="checkbox" checked={modesDraft.show_landmarks !== false} disabled={!canEditModes || modesBusy}
+              onChange={e => toggleMode('show_landmarks', e.target.checked, 'hiển thị điểm khớp trên video')}/>
+          </label>
+          <label className="smart-mode-item">
+            <span className="smart-mode-info">
               <strong><Bed/>Chế độ ban đêm yên tĩnh</strong>
               <small>Khóa động cơ Servo (0 tiếng ồn) và tạm hoãn lời nhắc thường; giữ 100% còi khẩn cấp.</small>
             </span>
@@ -233,6 +243,8 @@ export function CameraDetail({ id }) {
         </form>}
       </section>
     </div>
+
+    {can(camera, 'manage') && <DeviceUpdates cameraId={id}/>}
 
     <div className="two-grid spaced"><section className="panel"><h2>Tình trạng giám sát</h2><p>Quan sát: {camera.online ? observationNames[camera.observation] || 'Chưa có quan sát' : 'Chưa nhận quan sát mới'}</p><p>Cấu hình: {camera.applied_version}/{camera.desired_version} · {statusNames[camera.sync_status]}</p>{camera.config_error && <p role="alert">{camera.config_error}</p>}</section><section className="panel"><h2>Kết nối với người thân &amp; Loa Bluetooth</h2><p>Quét, ghép đôi loa Bluetooth tại phòng và gửi lời nhắn hoặc đàm thoại trực tiếp.</p><BluetoothSpeakerCard cameraId={id} canControl={canControlPtz}/><div className="actions">{can(camera, 'audio') && <Button onClick={() => go('/reminders/send?camera=' + id)}><SpeakerHigh/>Gửi âm thanh</Button>}<a className="button secondary-btn" href="#/environment">Xem môi trường</a></div>{can(camera, 'audio') && <LiveAudio cameraId={id} disabled={!camera.online}/>}</section></div>
   </>;
