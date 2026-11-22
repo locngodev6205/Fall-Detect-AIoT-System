@@ -632,6 +632,56 @@ class PostgresTests(unittest.TestCase):
         with db.connect('worker',home['id'],camera=camera['id']) as conn:
             self.assertEqual(conn.execute('SELECT count(*) AS n FROM annha.camera_configurations WHERE camera_id=%s',(camera['id'],)).fetchone()['n'],3)
 
+    def test_telemetry_evidence_correlation_and_upload_retry(self):
+        from .event_image_cases import exercise_telemetry_evidence
+        exercise_telemetry_evidence(self)
+
+    def test_consented_event_images_and_test_event_text_only(self):
+        from io import BytesIO
+        from unittest.mock import patch
+        from PIL import Image
+
+        owner, user = self.account('image-notifications@example.invalid')
+        home, _, camera, provision = self.home_camera(owner)
+        device = self.device(provision)
+        image = BytesIO()
+        Image.new('RGB', (4, 4), 'blue').save(image, format='PNG')
+        picture = image.getvalue()
+        preference = {'enabled':True, 'event_kinds':['fall'], 'minimum_severity':'warning',
+                      'camera_scope_all':True, 'camera_ids':[], 'allow_media':True}
+        settings = f"/api/homes/{home['id']}/notification-recipients/{user['id']}"
+        with patch.dict(os.environ, {'EMAIL_ALERTS_ENABLED':'true','TELEGRAM_BOT_TOKEN':'fixture-only'}), \
+             patch.object(services, 'send_mail') as mail, \
+             patch.object(services, 'send_telegram_photo', return_value='photo-fixture') as photo, \
+             patch.object(services, 'send_telegram_text', return_value='text-fixture') as text:
+            saved = owner.put(settings, json={'email':preference, 'telegram':{**preference,'chat_id':'-100123456789'}})
+            self.assertEqual(saved.status_code, 200, saved.text)
+            for source_id, attachment_expected in (('camera-fall', True), ('fixture:fall', False)):
+                response = device.post('/api/device/events', json={'event_id':source_id,'kind':'fall',
+                    'severity':'critical','observation':'abnormal','observed_at':db.now().isoformat()})
+                self.assertEqual(response.status_code, 200, response.text)
+                event_id = response.json()['id']
+                evidence = device.post(f'/api/device/evidence?event_id={event_id}', content=picture,
+                                       headers={'Content-Type':'image/png'})
+                self.assertEqual(evidence.status_code, 201, evidence.text)
+                with db.connect('worker',home['id']) as conn:
+                    deliveries = conn.execute('SELECT id FROM annha.notification_deliveries WHERE event_id=%s',(event_id,)).fetchall()
+                self.assertEqual(len(deliveries), 2)
+                for delivery in deliveries:
+                    services.process_notifications(home['id'], str(delivery['id']))
+                mail.assert_called_once()
+                if attachment_expected:
+                    self.assertEqual(mail.call_args.kwargs['attachment'], (picture,'image/png','fall_event.png'))
+                    photo.assert_called_once()
+                    self.assertEqual(photo.call_args.args[-1], picture)
+                    text.assert_not_called()
+                else:
+                    self.assertNotIn('attachment', mail.call_args.kwargs)
+                    photo.assert_not_called()
+                    text.assert_called_once()
+                for transport in (mail, photo, text):
+                    transport.reset_mock()
+
     def test_event_management_and_ota_safety(self):
         from backend.tests.event_management_cases import exercise_event_management
         owner,_=self.account('events-owner@example.com')
@@ -1610,7 +1660,7 @@ class PostgresTests(unittest.TestCase):
             self.assertIn('AnNhà',matching[0].args[1])
             self.assertIn('Nhà test '+self.suffix,matching[0].args[2])
             self.assertIn('Nghi ngờ té ngã',matching[0].args[2])
-            self.assertIn('không đính kèm ảnh hoặc video',matching[0].args[2])
+            self.assertIn('Ảnh sự kiện chỉ được đính kèm khi đã cho phép',matching[0].args[2])
             self.assertIn('Nhà test '+self.suffix,matching[0].args[3])
             with db.connect('worker',home['id']) as conn:
                 row=conn.execute('SELECT status,media_result FROM annha.notification_deliveries WHERE id=%s',(delivery['id'],)).fetchone()

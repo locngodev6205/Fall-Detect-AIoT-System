@@ -420,10 +420,15 @@ async def revalidate_connections():
     from . import pgmedia
     await pgmedia.revalidate()
 
-def send_mail(recipient,subject,body,html_body=None):
+def send_mail(recipient,subject,body,html_body=None,attachment=None):
     message=EmailMessage();message['From']=os.getenv('SMTP_FROM','AnNhà <noreply@annha.local>');message['To']=recipient;message['Subject']=subject;message.set_content(body)
     if html_body:
         message.add_alternative(html_body,subtype='html')
+    if attachment:
+        data,mime,filename=attachment
+        if mime not in ('image/jpeg','image/png') or len(data)>5*1024*1024:
+            raise ValueError('Invalid email image attachment')
+        message.add_attachment(data,maintype='image',subtype=mime.split('/')[1],filename=filename)
     host=os.getenv('SMTP_HOST','localhost').strip()
     port=int(os.getenv('SMTP_PORT','1025'))
     starttls=os.getenv('SMTP_STARTTLS','false').lower()=='true'
@@ -923,6 +928,7 @@ def format_safety_email(event,recipient_name):
         event_id=event.get('id'))
 
 def _read_notification_image(row):
+    if row.get('upload_key','').startswith('demo:') or demo_camera(row.get('camera_id')): return None,'missing'
     from .media_storage import MediaNotFound,MediaUnavailable
     if row['status']!='ready' or (row['expires_at'] and row['expires_at']<=db.now()): return None,'missing'
     if row['mime_type'] not in ('image/jpeg','image/png') or int(row['size_bytes'] or 0)>10*1024*1024: return None,'unavailable'
@@ -946,6 +952,17 @@ def _read_notification_image(row):
     if len(data)>10*1024*1024: return None,'unavailable'
     expected=b'\xff\xd8\xff' if row['mime_type']=='image/jpeg' else b'\x89PNG\r\n\x1a\n'
     if not data.startswith(expected): return None,'unavailable'
+    from io import BytesIO
+    from PIL import Image
+    try:
+        with Image.open(BytesIO(data), formats=['JPEG' if row['mime_type']=='image/jpeg' else 'PNG']) as image:
+            if image.width+image.height>10000 or max(image.size)/min(image.size)>20:
+                return None,'unavailable'
+            image.verify()
+        with Image.open(BytesIO(data)) as image:
+            image.load()
+    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
+        return None,'unavailable'
     return data,'sent'
 
 def schedule_notification_reminders(home):
@@ -988,10 +1005,20 @@ def process_notifications(home_id=None,delivery_id=None):
               LEFT JOIN annha.rooms r ON r.id=c.room_id AND r.home_id=e.home_id
               JOIN annha.homes h ON h.id=e.home_id WHERE e.id=%s AND e.home_id=%s''',(job['event_id'],home)).fetchone()
             destination=conn.execute('SELECT destination_ciphertext FROM annha_private.notification_secrets WHERE home_id=%s AND channel_id=%s',(home,channel['id'])).fetchone() if channel['kind']=='telegram' else None
+            media_allowed=(channel['allow_media'] and not demo_camera(job['camera_id'])
+                and not event.get('source_id','').casefold().startswith(('test:', 'test-', 'fixture:', 'fixture-', 'demo:', 'demo-'))
+                and not (event.get('reason') or '').casefold().startswith('kiểm thử'))
             evidence=conn.execute('''SELECT * FROM annha.media_assets WHERE home_id=%s AND event_id=%s
-              AND kind IN ('event_image','snapshot') AND mime_type IN ('image/jpeg','image/png') AND status='ready'
-              AND upload_key<>'demo:snapshot' AND (expires_at IS NULL OR expires_at>now())
-              ORDER BY created_at DESC,id DESC LIMIT 1''',(home,job['event_id'])).fetchone() if channel['kind']=='telegram' and channel['allow_media'] else None
+              AND camera_id=%s AND kind IN ('event_image','snapshot') AND mime_type IN ('image/jpeg','image/png') AND status='ready'
+              AND upload_key NOT LIKE 'demo:%%' AND (expires_at IS NULL OR expires_at>now())
+              ORDER BY created_at DESC,id DESC LIMIT 1''',(home,job['event_id'],job['camera_id'])).fetchone() if media_allowed else None
+            # Defer the same pending delivery without holding a lock or consuming a retry.
+            try: wait_s=max(0,min(10,float(os.getenv('NOTIFICATION_EVIDENCE_WAIT_SECONDS','3'))))
+            except ValueError: wait_s=3
+            deadline=job['created_at']+timedelta(seconds=wait_s)
+            if media_allowed and not evidence and db.now()<deadline:
+                conn.execute('UPDATE annha.notification_deliveries SET next_attempt_at=%s WHERE id=%s',(deadline,job['id']))
+                continue
             conn.execute("UPDATE annha.notification_deliveries SET status='sending',attempt_count=attempt_count+1,next_attempt_at=now()+interval '2 minutes',last_dispatch_at=now() WHERE id=%s",(job['id'],))
         message=format_telegram_event({'name':event['home_name'],'timezone':event['timezone']},event)
         state='accepted';error=None;provider_id=None;media_result='not_requested';retry_after=None;provider_account_ref='default'
@@ -1000,15 +1027,32 @@ def process_notifications(home_id=None,delivery_id=None):
                 if os.getenv('EMAIL_ALERTS_ENABLED','false').lower()!='true': raise RuntimeError('EmailProviderDisabled')
                 with db.connect('auth') as conn: recipient=conn.execute('SELECT email,name,email_version FROM annha_private.users WHERE id=%s AND disabled_at IS NULL AND deleted_at IS NULL',(channel['recipient_user_id'],)).fetchone()
                 if not recipient or recipient['email_version']!=job['email_version']: raise RuntimeError('StaleEmail')
+                photo=None
+                if media_allowed:
+                    photo,media_result=_read_notification_image(evidence) if evidence else (None,'missing')
+                    if photo and len(photo)>5*1024*1024: photo=None;media_result='unavailable'
+                elif channel['allow_media']: media_result='missing'
                 with db.connect('worker',home) as conn:
                     if not conn.execute('SELECT annha_private.can_dispatch_notification(%s) AS ok',(job['id'],)).fetchone()['ok']: raise RuntimeError('NotEligible')
+                    latest=conn.execute('SELECT allow_media FROM annha.notification_channels WHERE id=%s',(channel['id'],)).fetchone()
+                    if photo and (not latest or not latest['allow_media']): photo=None;media_result='consent_disabled'
                 rendered=format_safety_email(event,recipient['name'])
-                send_mail(recipient['email'],rendered.subject,rendered.text,rendered.html)
+                if photo:
+                    ext='jpg' if evidence['mime_type']=='image/jpeg' else 'png'
+                    try:
+                        send_mail(recipient['email'],rendered.subject,rendered.text,rendered.html,
+                            attachment=(photo,evidence['mime_type'],event['kind']+'_event.'+ext))
+                    except smtplib.SMTPDataError as exc:
+                        if not 500 <= exc.smtp_code < 600:
+                            raise
+                        send_mail(recipient['email'],rendered.subject,rendered.text,rendered.html)
+                        media_result='text_fallback'
+                else: send_mail(recipient['email'],rendered.subject,rendered.text,rendered.html)
             else:
                 if not destination or not os.getenv('TELEGRAM_BOT_TOKEN','').strip(): raise TelegramDeliveryError('TelegramNotConfigured')
                 chat_id=decrypt(destination['destination_ciphertext'])['chat_id']
                 photo=None
-                if channel['allow_media']:
+                if media_allowed:
                     if not evidence: media_result='missing'
                     else: photo,media_result=_read_notification_image(evidence)
                 else: media_result='consent_disabled'
@@ -1051,6 +1095,14 @@ def process_notifications(home_id=None,delivery_id=None):
                 (state,error,1 if state=='accepted' else 0,state=='accepted',due,media_result,job['id']))
 
 # These monitors persist their state so a restart cannot reset the hold timer.
+def telemetry_event_sources(message_id):
+    from hashlib import sha256
+
+    digest = sha256(message_id.encode()).hexdigest()
+    return {key: f'environment:telemetry:{key}:{digest}' for key in
+            ('temperature_high', 'temperature_low', 'humidity_high', 'gas_high')}
+
+
 def evaluate_environment(camera,telemetry):
     stamp=datetime.fromisoformat(telemetry.observed_at)
     if abs((db.now()-stamp).total_seconds())>120: return []
@@ -1074,7 +1126,7 @@ def evaluate_environment(camera,telemetry):
                 elif delta>0:
                     since=since or stamp
                     if not active and (stamp-since).total_seconds()>=settings['environment_hold_seconds']:
-                        active=True;source='environment:'+key+':'+db.uid()
+                        active=True;source=telemetry_event_sources(telemetry.message_id)[key]
                         emissions.append(models.EventInput(event_id=source,kind='environment',severity='critical' if metric=='gas' else 'warning',observation='abnormal',observed_at=stamp.isoformat(),reason=f'{metric}: {reading.value} {unit}; ngưỡng {settings[key]}',duration_s=(stamp-since).total_seconds()))
                 elif not active: since=None
             conn.execute('''INSERT INTO annha.monitor_states(home_id,camera_id,monitor_key,active,since_at,state) VALUES(%s,%s,%s,%s,%s,%s)

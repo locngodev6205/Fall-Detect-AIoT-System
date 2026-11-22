@@ -169,6 +169,7 @@ class DeviceClient:
         self._command_handler: Callable[[dict[str, Any]], tuple[bool, str] | Future] | None = None
         self._processed_commands: deque[str] = deque(maxlen=256)
         self._outbox_telemetry: deque[dict[str, Any]] = deque(maxlen=200)
+        self._outbox_images: deque[tuple[bytes, str, str, float]] = deque(maxlen=20)
         self._outbox_events: deque[dict[str, Any]] = deque(maxlen=200)
         self._audio_db = self.cache_dir / "audio_outbox.sqlite3"
         self._audio_store_ok = True
@@ -403,9 +404,12 @@ class DeviceClient:
         self,
         readings: dict[str, dict[str, Any]],
         *,
+        jpeg_evidence: bytes | None = None,
         observed_at: str | None = None,
         message_id: str | None = None,
     ) -> bool:
+        if not self._valid_event_jpeg(jpeg_evidence):
+            jpeg_evidence = None
         obs_ts = observed_at or iso_now_local()
         msg_id = message_id or f"tel-{uuid.uuid4().hex}"
         payload = {
@@ -420,14 +424,33 @@ class DeviceClient:
         try:
             resp = self._request("POST", "/api/device/telemetry", json_body=payload)
             if resp.status_code == 200:
+                self._telemetry_evidence(resp, msg_id, jpeg_evidence)
                 return True
-            logger.warning("[DeviceClient] Telemetry HTTP %d: %s", resp.status_code, resp.text[:200])
-            return False
+            if resp.status_code < 500 and resp.status_code != 429:
+                return False
         except Exception as exc:
-            logger.warning("[DeviceClient] Đứt mạng khi gửi Telemetry -> Xếp vào Outbox (%s).", exc)
+            logger.warning("[DeviceClient] Telemetry failed: %s", exc)
+        with self._lock:
+            self._outbox_telemetry.append({**payload, "_evidence_jpeg": jpeg_evidence})
+        return False
+
+    def _telemetry_evidence(self, response, message_id, jpeg):
+        if not jpeg:
+            return
+        result = response.json()
+        if result.get("message_id") == message_id:
+            for event in result.get("events", []):
+                if event.get("id"):
+                    self._send_event_image(jpeg, str(event["id"]), "environment_event.jpg")
+
+    @staticmethod
+    def _valid_event_jpeg(jpeg: bytes | None) -> bool:
+        return bool(jpeg and len(jpeg) <= 512 * 1024 and jpeg.startswith(b"\xff\xd8\xff"))
+
+    def _send_event_image(self, jpeg: bytes, event_id: str, filename: str) -> None:
+        if self._valid_event_jpeg(jpeg):
             with self._lock:
-                self._outbox_telemetry.append(payload)
-            return False
+                self._outbox_images.append((jpeg, event_id, filename, time.monotonic() + 300))
 
     # ------------------------------------------------------------------
     # 3. Sự kiện An toàn & Upload Ảnh Bằng chứng / Snapshot
@@ -436,6 +459,7 @@ class DeviceClient:
     def send_event(
         self,
         *,
+        jpeg_evidence: bytes | None = None,
         kind: str,
         severity: str,
         observation: str,
@@ -446,6 +470,8 @@ class DeviceClient:
         confidence: float | None = None,
         observed_at: str | None = None,
     ) -> dict[str, Any] | None:
+        if not self._valid_event_jpeg(jpeg_evidence):
+            jpeg_evidence = None
         src_id = event_id or f"{kind}-{uuid.uuid4().hex[:16]}"
         body: dict[str, Any] = {
             "event_id": src_id,
@@ -465,12 +491,20 @@ class DeviceClient:
         try:
             resp = self._request("POST", "/api/device/events", json_body=body)
             if resp.status_code in (200, 201):
-                return resp.json()
+                event = resp.json()
+                if jpeg_evidence and event.get("id"):
+                    self._send_event_image(jpeg_evidence, str(event["id"]), f"{kind}_event.jpg")
+                return event
             logger.warning("[DeviceClient] Gửi sự kiện HTTP %d: %s", resp.status_code, resp.text[:240])
+            if resp.status_code >= 500 or resp.status_code == 429:
+                with self._lock:
+                    body["_evidence_jpeg"] = jpeg_evidence
+                    self._outbox_events.append(body)
             return None
         except Exception as exc:
             logger.warning("[DeviceClient] Đứt mạng khi gửi sự kiện '%s' -> Xếp vào Outbox (%s).", kind, exc)
             with self._lock:
+                body["_evidence_jpeg"] = jpeg_evidence
                 self._outbox_events.append(body)
             return None
 
@@ -736,27 +770,50 @@ class DeviceClient:
         with self._lock:
             ev_batch = [self._outbox_events.popleft() for _ in range(min(10, len(self._outbox_events)))]
             tel_batch = [self._outbox_telemetry.popleft() for _ in range(min(10, len(self._outbox_telemetry)))]
-        for item in ev_batch:
+        for index, item in enumerate(ev_batch):
+            jpeg = item.pop("_evidence_jpeg", None)
             try:
                 r = self._request("POST", "/api/device/events", json_body=item)
-                if r.status_code >= 500:
+                if r.status_code in (200, 201) and jpeg:
+                    event = r.json()
+                    if event.get("id"):
+                        self._send_event_image(jpeg, str(event["id"]), f'{item["kind"]}_event.jpg')
+                if r.status_code >= 500 or r.status_code == 429:
+                    item["_evidence_jpeg"] = jpeg
                     with self._lock:
-                        self._outbox_events.appendleft(item)
+                        self._outbox_events.extendleft(reversed(ev_batch[index:]))
                     break
             except Exception:
+                item["_evidence_jpeg"] = jpeg
                 with self._lock:
-                    self._outbox_events.appendleft(item)
+                    self._outbox_events.extendleft(reversed(ev_batch[index:]))
                 break
-        for item in tel_batch:
+        for index, item in enumerate(tel_batch):
+            jpeg = item.pop("_evidence_jpeg", None)
             try:
                 r = self._request("POST", "/api/device/telemetry", json_body=item)
-                if r.status_code >= 500:
-                    with self._lock:
-                        self._outbox_telemetry.appendleft(item)
-                    break
+                if r.status_code == 200:
+                    self._telemetry_evidence(r, item["message_id"], jpeg)
+                if r.status_code < 500 and r.status_code != 429:
+                    continue
             except Exception:
-                with self._lock:
-                    self._outbox_telemetry.appendleft(item)
-                break
+                pass
+            item["_evidence_jpeg"] = jpeg
+            with self._lock:
+                self._outbox_telemetry.extendleft(reversed(tel_batch[index:]))
+            break
+        self.flush_event_images()
         if self._audio_store_ok:
             self._flush_executions()
+
+    def flush_event_images(self) -> None:
+        """Send evidence from the IO loop without waiting for the next heartbeat."""
+        with self._lock:
+            images = [self._outbox_images.popleft() for _ in range(min(3, len(self._outbox_images)))]
+        for image in images:
+            jpeg, event_id, filename, expires = image
+            if time.monotonic() >= expires:
+                continue
+            if self.upload_evidence(jpeg, internal_event_id=event_id, filename=filename) is None:
+                with self._lock:
+                    self._outbox_images.append(image)

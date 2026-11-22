@@ -173,7 +173,7 @@ def render_email(kind, *, public_url='http://localhost:8188', **values):
                    ('Camera', values.get('camera_name')), ('Thời điểm ghi nhận', values.get('occurred_at'))]
         cta = 'Mở sự kiện trong AnNhà'
         expiry = None
-        note = 'Để bảo vệ riêng tư, email không đính kèm ảnh hoặc video gia đình.'
+        note = 'Ảnh sự kiện chỉ được đính kèm khi đã cho phép riêng cho Email và người nhận còn quyền xem camera.'
         subject = 'AnNhà · Thông tin an toàn cần lưu ý'
     else:
         raise ValueError(f'Unknown email template: {kind}')

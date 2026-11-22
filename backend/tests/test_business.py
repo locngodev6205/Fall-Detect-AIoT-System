@@ -255,6 +255,10 @@ class BusinessTests(unittest.TestCase):
         self.assertEqual(owner.get(url,params={'hours':24,'start':start.isoformat()}).status_code,422)
         self.assertEqual(outsider.get(url,params={'page':1}).status_code,404)
 
+    def test_telemetry_evidence_correlation_and_upload_retry(self):
+        from .event_image_cases import exercise_telemetry_evidence
+        exercise_telemetry_evidence(self)
+
     def test_event_management_and_ota_safety(self):
         from backend.tests.event_management_cases import exercise_event_management
         owner,_=self.account('events-owner@example.com')

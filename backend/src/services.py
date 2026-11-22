@@ -287,21 +287,10 @@ def deliver_telegram():
                 continue
             if not token or not settings.telegram_chat_id: raise RuntimeError('Chưa cấu hình bot hoặc người nhận Telegram')
             text=f"AnNhà: {job['kind']} tại {job['name']}\nThời điểm: {job['observed_at']}\nVui lòng mở ứng dụng để kiểm tra."
-            photo=None
-            if settings.telegram_photos:
-                with db.connect() as conn:
-                    photo=conn.execute("SELECT * FROM assets WHERE event_id=? AND mime IN ('image/jpeg','image/png') AND status='ready' ORDER BY created_at DESC LIMIT 1",(job['event_id'],)).fetchone()
-            if photo:
-                boundary='AnNha'+secrets.token_hex(16)
-                chunks=[]
-                for key,value in [('chat_id',settings.telegram_chat_id),('caption',text)]:
-                    chunks.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n'.encode())
-                chunks.append(f'--{boundary}\r\nContent-Disposition: form-data; name="photo"; filename="event{Path(photo["path"]).suffix}"\r\nContent-Type: {photo["mime"]}\r\n\r\n'.encode())
-                chunks.append(asset_path(photo).read_bytes());chunks.append(f'\r\n--{boundary}--\r\n'.encode())
-                data=b''.join(chunks);headers={'Content-Type':f'multipart/form-data; boundary={boundary}'};method='sendPhoto'
-            else:
-                data=db.dumps({'chat_id':settings.telegram_chat_id,'text':text}).encode();headers={'Content-Type':'application/json'};method='sendMessage'
-            request=urllib.request.Request(f'https://api.telegram.org/bot{token}/{method}',data=data,headers=headers)
+            # Legacy SQLite destinations are not tied to a verified camera viewer.
+            data=db.dumps({'chat_id':settings.telegram_chat_id,'text':text}).encode()
+            request=urllib.request.Request(f'https://api.telegram.org/bot{token}/sendMessage',data=data,
+                headers={'Content-Type':'application/json'})
             with urllib.request.urlopen(request,timeout=8) as response:
                 if not json.load(response).get('ok'): raise RuntimeError('Telegram từ chối yêu cầu')
             sent=job['sent_count']+1
@@ -345,6 +334,14 @@ async def worker():
         await asyncio.sleep(5)
 
 
+def telemetry_event_sources(message_id):
+    from hashlib import sha256
+
+    digest = sha256(message_id.encode()).hexdigest()
+    return {key: f'environment:telemetry:{key}:{digest}' for key in
+            ('temperature_high', 'temperature_low', 'humidity_high', 'gas_high')}
+
+
 def evaluate_environment(camera,telemetry):
     """Evaluate fresh readings with persisted hold timers and hysteresis; never use invalid samples."""
     stamp=datetime.fromisoformat(telemetry.observed_at).timestamp()
@@ -369,8 +366,8 @@ def evaluate_environment(camera,telemetry):
                 active=False;since=None;source_id=None
             elif exceeds:
                 if since is None: since=stamp
-                if stamp-since>=settings.environment_hold_seconds:
-                    active=True;source_id=source_id or f'environment:{metric}:{db.uid()}'
+                if not active and stamp-since>=settings.environment_hold_seconds:
+                    active=True;source_id=telemetry_event_sources(telemetry.message_id)[metric]
                     emissions.append(models.EventInput(event_id=source_id,kind='environment',severity='critical' if key=='gas' else 'warning',observation='abnormal',observed_at=telemetry.observed_at,reason=f'{key}: {reading.value} {reading.unit}, vượt ngưỡng {threshold}',duration_s=max(0,stamp-since)))
             elif not active: since=None
             conn.execute('INSERT INTO environment_states VALUES(?,?,?,?,?) ON CONFLICT(camera_id,metric) DO UPDATE SET since=excluded.since,source_id=excluded.source_id,active=excluded.active',(camera['id'],metric,since,source_id,int(active)))

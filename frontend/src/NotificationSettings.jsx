@@ -241,6 +241,10 @@ export function NotificationSettings({onRecipients}) {
             </Button>}
           />
           <ChannelEditor title="Email" channel="emailPreference" person={person} data={data} busy={telegramBusy}
+            onConsent={async checked => {
+              if (!checked || await confirm({ title: 'Cho phép gửi ảnh qua Email?', message: `Ảnh có thể hiển thị người thân và không gian riêng tư. Chỉ gửi tới Email của ${person.name} khi còn quyền xem camera.`, confirmLabel: 'Cho phép gửi ảnh', tone: 'privacy' }))
+                updateRecipient(person.user_id,'emailPreference',{allow_media:checked});
+            }}
             onUpdate={patch => updateRecipient(person.user_id, 'emailPreference', patch)}
             onCameraScope={checked => updateCameraScope(person, 'emailPreference', checked)}
             onKind={(kind,checked) => updateKinds(person,'emailPreference',kind,checked)}
@@ -311,9 +315,9 @@ function ChannelEditor({ title, channel, person, data, busy, onUpdate, onCameraS
         {Object.entries(severityNames).map(([value,label]) => <option key={value} value={value}>{label}</option>)}
       </select></Field>
     </div>
-    {isTelegram && <label className="checkbox notification-consent"><input type="checkbox" checked={preference.allow_media}
-      onChange={event => onConsent(event.target.checked)}/><span>Cho phép gửi kèm ảnh bằng chứng khi có ảnh hợp lệ</span></label>}
-    {isTelegram && preference.allow_media && <small className="notification-note">Ảnh chỉ được gửi nếu bạn cho phép và người nhận còn quyền xem camera. Nếu không có ảnh, cảnh báo vẫn được gửi bằng chữ.</small>}
+    <label className="checkbox notification-consent"><input type="checkbox" checked={preference.allow_media}
+      onChange={event => onConsent(event.target.checked)}/><span>{isTelegram ? 'Cho phép gửi kèm ảnh bằng chứng khi có ảnh hợp lệ' : 'Cho phép gửi ảnh sự kiện qua Email'}</span></label>
+    {preference.allow_media && <small className="notification-note">Ảnh chỉ được gửi nếu bạn cho phép và người nhận còn quyền xem camera. Nếu không có ảnh, cảnh báo vẫn được gửi bằng chữ.</small>}
     {isTelegram && <details className="notification-template"><summary>Xem mẫu cảnh báo</summary><pre>{[
       '🚨 AnNhà · Cảnh báo trong gia đình',
       `Nhà: ${data.home.name}`,

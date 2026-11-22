@@ -185,7 +185,7 @@ class EmailTemplateTests(unittest.TestCase):
         self.assertIn('https://annha.example/#/event/event-123', rendered.text)
         self.assertIn('Nghiêm trọng', rendered.text)
         self.assertIn('05/11/2026 08:30:00', rendered.text)
-        self.assertIn('không đính kèm ảnh hoặc video', rendered.text)
+        self.assertIn('Ảnh sự kiện chỉ được đính kèm khi đã cho phép', rendered.text)
 
     def test_email_job_worker_passes_html_alternative_to_smtp(self):
         from contextlib import contextmanager
