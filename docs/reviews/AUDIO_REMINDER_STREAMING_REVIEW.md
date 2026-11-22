@@ -130,3 +130,15 @@ Read-only SSH reached the Pi and returned `Permission denied (publickey,password
 - `python -m unittest fall_detect.tests.test_audio_acceptance_fixtures fall_detect.tests.test_audio_hardening fall_detect.tests.test_group4_audio_scheduler` · 25 PASS. This run observed at most 6.5 ms for trigger-to-cleanup in the preemption fixture.
 - `python -m unittest fall_detect.tests.test_group1_sensors fall_detect.tests.test_group2_device_client fall_detect.tests.test_group3_tracking_ptz fall_detect.tests.test_group5_main_edge` · 11 PASS with the isolated SQLite Docker fixture.
 - `python -m compileall -q fall_detect/edge fall_detect/tests` and `git diff --check` · PASS.
+
+## Classroom demo verification on Raspberry Pi 4
+
+The running `annha-edge.service` reported release `0.1.0` at commit `483adb543a6a8cad76065ace2f70f7d9508a84bc`. The deployed Edge file hashes differ from PR #2 at `ddd7136a883812816d6071a03fcc0f099998cdf6`. Deployed Push-to-Talk still joins its chunks on Stop, and the release lacks `live_input.py`. The service retained PID 1248 throughout the test.
+
+- Sony SRS-XB13 was the selected BlueZ sink. PipeWire and WirePlumber were active, and FFmpeg 7.1.5 decoded WAV and MP3. Both low-volume test tones reached the speaker and were heard by the operator.
+- A short Vietnamese speech asset played successfully on the physical speaker. In the first Pi session, temporarily extracted eSpeak NG generated and played a 2.88-second Vietnamese WAV. The system still lacks eSpeak NG, so runtime offline synthesis remains blocked until that dependency is provisioned.
+- The exact PR scheduler ran out of a temporary directory, with only a cached audio resolver and no backend configured. A one-time schedule was empty before the due minute, returned `played` at about 0.91 seconds into the minute and returned no duplicate.
+- In the isolated browser test, Chrome with a synthetic microphone sent 13 chunks via the PR relay. The Pi showed an active PipeWire link to SRS-XB13 before Stop. Chrome closed with code 1000. Separate direct fixture playback reaped both child processes on Stop. The browser tunnel ended without a WebSocket close frame at teardown, so the full browser disconnect path and a real microphone on the deployed UI still need a final demo check.
+- The 25 focused audio regression tests passed. No deployed files, service restarts, OTA, or changes to the production backend were needed.
+
+For classroom deployment, stage the tested PR revision beside the current release using a separate checkout and demo cache. Pair the matching demo frontend and backend with the staged Edge and prepare eSpeak NG or cache the TTS assets required for the presentation. Leave the existing service online during staging. Switch runtime ownership of the camera and speaker only during an approved cutover. Keep release 0.1.0 available so the service can be switched back and verified if the demo fails.
