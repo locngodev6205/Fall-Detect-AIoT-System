@@ -61,6 +61,7 @@ def open_working_camera(
     """
     for source in camera_sources(camera_id, device_root):
         capture = None
+        usable = False
         try:
             backend = getattr(cv2, "CAP_V4L2", None)
             capture = cv2.VideoCapture(source, backend) if backend is not None else cv2.VideoCapture(source)
@@ -69,15 +70,12 @@ def open_working_camera(
             for _ in range(max(1, probe_reads)):
                 ok, frame = capture.read()
                 if ok and frame is not None and getattr(frame, "size", 0) > 0:
+                    usable = True
                     logger.info("[Vision] Camera hoạt động: %s", source)
                     return capture, source
         except Exception as error:
             logger.warning("[Vision] Không đọc được %s: %s", source, error)
         finally:
-            # On success the returned capture stays opened; ownership moves to caller.
-            if capture is not None and (not capture.isOpened() or not (
-                'ok' in locals() and ok and 'frame' in locals() and
-                frame is not None and getattr(frame, "size", 0) > 0
-            )):
+            if capture is not None and not usable:
                 capture.release()
     return None, None
