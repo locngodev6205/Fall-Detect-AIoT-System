@@ -181,7 +181,7 @@ class SmartModes(Model):
 
 class Heartbeat(Model):
     observation: Literal['unknown','clear','no_person','occluded','camera_error'] = 'unknown'
-    capabilities: dict[Literal['camera','speaker','sensors'],bool] = Field(default_factory=dict)
+    capabilities: dict[Literal['camera','speaker','sensors','show_landmarks'],bool] = Field(default_factory=dict)
     bluetooth: dict | None = None
 
 class ConfigAck(Model):

@@ -139,6 +139,37 @@ class FallDetector:
             self.last_pose_result = None
             self.update(None, person_present=False)
 
+    def update_immobility(self, current_features):
+        # 2. Xử lý logic phát hiện bất động kéo dài (chỉ tính khi có người trong khung hình)
+        immobile_duration = 0.0
+        if self.enable_immobility:
+            # Chỉ lấy tọa độ không gian (x, y) của 17 khớp để đo độ dịch chuyển, bỏ qua kênh confidence
+            curr_xy = np.delete(current_features, np.arange(2, len(current_features), 3))
+            if self.prev_features is not None:
+                prev_xy = np.delete(self.prev_features, np.arange(2, len(self.prev_features), 3))
+                # Tính biến thiên tọa độ (x, y) trung bình giữa 2 frame liên tiếp
+                movement_delta = float(np.mean(np.abs(curr_xy - prev_xy)))
+                # Ngưỡng vi sai < 0.012 được xem là nằm/ngồi bất động
+                if movement_delta < 0.012:
+                    if self.immobility_start_time is None:
+                        self.immobility_start_time = time.time()
+                    else:
+                        immobile_duration = time.time() - self.immobility_start_time
+                        if immobile_duration >= self.immobility_timeout_seconds:
+                            now = time.time()
+                            if (now - self.last_immobility_alert_time) > self.event_cooldown:
+                                if self.on_immobility_alert:
+                                    self.on_immobility_alert(immobile_duration)
+                                self.last_immobility_alert_time = now
+                else:
+                    # Có chuyển động rõ ràng -> reset timer bất động
+                    self.immobility_start_time = None
+            else:
+                self.immobility_start_time = time.time()
+            self.prev_features = current_features.copy()
+
+        return immobile_duration
+
     def update(self, current_features, person_present=True):
         """
         Nhận vector 51 đặc trưng của frame hiện tại và cờ person_present,
@@ -168,33 +199,7 @@ class FallDetector:
         # 1. Cập nhật bộ đệm chuỗi (chỉ khi thực sự có người trong hình)
         self.sequence_buffer.append(current_features)
 
-        # 2. Xử lý logic phát hiện bất động kéo dài (chỉ tính khi có người trong khung hình)
-        immobile_duration = 0.0
-        if self.enable_immobility:
-            # Chỉ lấy tọa độ không gian (x, y) của 17 khớp để đo độ dịch chuyển, bỏ qua kênh confidence
-            curr_xy = np.delete(current_features, np.arange(2, len(current_features), 3))
-            if self.prev_features is not None:
-                prev_xy = np.delete(self.prev_features, np.arange(2, len(self.prev_features), 3))
-                # Tính biến thiên tọa độ (x, y) trung bình giữa 2 frame liên tiếp
-                movement_delta = float(np.mean(np.abs(curr_xy - prev_xy)))
-                # Ngưỡng vi sai < 0.012 được xem là nằm/ngồi bất động
-                if movement_delta < 0.012:
-                    if self.immobility_start_time is None:
-                        self.immobility_start_time = time.time()
-                    else:
-                        immobile_duration = time.time() - self.immobility_start_time
-                        if immobile_duration >= self.immobility_timeout_seconds:
-                            now = time.time()
-                            if (now - self.last_immobility_alert_time) > self.event_cooldown:
-                                if self.on_immobility_alert:
-                                    self.on_immobility_alert(immobile_duration)
-                                self.last_immobility_alert_time = now
-                else:
-                    # Có chuyển động rõ ràng -> reset timer bất động
-                    self.immobility_start_time = None
-            else:
-                self.immobility_start_time = time.time()
-            self.prev_features = current_features.copy()
+        immobile_duration = self.update_immobility(current_features)
 
         # 3. Phán đoán mô hình khi bộ đệm đủ 30 frames
         label = "no_fall"

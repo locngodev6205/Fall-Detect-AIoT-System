@@ -8,6 +8,8 @@ load_dotenv(BASE_DIR / ".env")
 
 # --- AI & Model Configuration ---
 MODEL_PATH = str(BASE_DIR / "models" / "fall_detection_transformer.tflite")
+FALL_MODEL_BACKEND = os.getenv("FALL_MODEL_BACKEND", "legacy_tflite")
+FALL_GRU_CHECKPOINT = os.getenv("FALL_GRU_CHECKPOINT", str(BASE_DIR / "models" / "full-E4-42.pt"))
 INPUT_TIMESTEPS = 30
 FALL_CONFIDENCE_THRESHOLD = float(os.getenv("FALL_CONFIDENCE_THRESHOLD", 0.85))
 FALL_EVENT_COOLDOWN = int(os.getenv("FALL_EVENT_COOLDOWN", 10))  # seconds

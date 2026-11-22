@@ -451,6 +451,8 @@ class AnNhaEdgeRuntime:
             self._run_mock_hud_loop()
             return
 
+        import config as fd_cfg
+
         while not self._stop_event.is_set():
             cap = cv2.VideoCapture(self.camera_id) if cv2 is not None else None
             if cap is None or not cap.isOpened():
@@ -464,7 +466,12 @@ class AnNhaEdgeRuntime:
                 self._stop_event.wait(5)
                 continue
 
+            if fd_cfg.FALL_MODEL_BACKEND == "gru_e4_42":
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, fd_cfg.FRAME_WIDTH)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, fd_cfg.FRAME_HEIGHT)
+
             if mp is None:
+                self.model_inference_ok = False
                 logger.warning("[Vision] DEGRADED: POSE_UNAVAILABLE; streaming camera without pose")
                 self._run_opencv_stream_loop(cap)
             else:
@@ -520,16 +527,10 @@ class AnNhaEdgeRuntime:
         finally:
             cap.release()
 
-    def _run_opencv_mediapipe_loop(self, cap: Any) -> None:
+    def _run_opencv_mediapipe_loop(self, cap: Any, *, frame_timestamp=None, metrics=None) -> None:
         from modules.detector import FallDetector
         from modules.skeleton import NUM_FEATURES, is_person_present
         import config as fd_cfg
-
-        model_path = fd_cfg.MODEL_PATH
-        if not os.path.exists(model_path):
-            candidate = FALL_DETECT_DIR / "models" / "fall_detection_transformer.tflite"
-            if candidate.exists():
-                model_path = str(candidate)
 
         next_video_frame = time.monotonic()
         evidence_frame = None
@@ -546,27 +547,35 @@ class AnNhaEdgeRuntime:
 
         detector = None
         self.model_inference_ok = False
-        if os.path.exists(model_path):
-            try:
+        backend = fd_cfg.FALL_MODEL_BACKEND
+        callback = self.make_fall_callback(encode_fall_frame)
+        try:
+            if backend == "gru_e4_42":
+                from modules.gru_detector import GruDetector
+                cv2.setNumThreads(1)
+                detector = GruDetector(fd_cfg.FALL_GRU_CHECKPOINT, callback)
+            elif backend == "legacy_tflite":
                 detector = FallDetector(
-                    model_path=model_path,
+                    model_path=(fd_cfg.MODEL_PATH if os.path.exists(fd_cfg.MODEL_PATH)
+                                else str(FALL_DETECT_DIR / "models" / "fall_detection_transformer.tflite")),
                     input_timesteps=fd_cfg.INPUT_TIMESTEPS,
                     num_features=NUM_FEATURES,
                     confidence_threshold=fd_cfg.FALL_CONFIDENCE_THRESHOLD,
                     event_cooldown=fd_cfg.FALL_EVENT_COOLDOWN,
-                    on_fall_alert=self.make_fall_callback(encode_fall_frame),
+                    on_fall_alert=callback,
                 )
-                # Probe inference without triggering event callbacks or requiring a person.
                 import numpy as np
                 tensor = detector.input_details[0]
                 detector.interpreter.set_tensor(tensor["index"], np.zeros(tuple(tensor["shape"]), dtype=tensor["dtype"]))
                 detector.interpreter.invoke()
-                self.model_inference_ok = True
-            except Exception as exc:
-                detector = None
-                logger.warning("[Vision] DEGRADED: MODEL_UNAVAILABLE (%s)", type(exc).__name__)
-        else:
-            logger.warning("[Vision] DEGRADED: MODEL_UNAVAILABLE (missing file)")
+            else:
+                raise ValueError("Unsupported fall model configuration")
+            self.model_inference_ok = True
+            logger.info("[Vision] Fall model ready: %s", backend)
+        except Exception as exc:
+            detector = None
+            logger.warning("[Vision] MODEL_UNAVAILABLE backend=%s (%s: %s)",
+                           backend, type(exc).__name__, exc)
 
         mp_pose = mp.solutions.pose
         mp_drawing = getattr(mp, "solutions", None) and getattr(mp.solutions, "drawing_utils", None)
@@ -601,7 +610,10 @@ class AnNhaEdgeRuntime:
                     self.last_camera_frame = time.monotonic()
                     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     rgb.flags.writeable = False
+                    pose_start = time.perf_counter() if metrics is not None else None
                     pose_res = pose.process(rgb)
+                    if metrics is not None:
+                        metrics["pose_ms"].append((time.perf_counter()-pose_start)*1000)
 
                     present = is_person_present(pose_res.pose_landmarks)
                     self._observation = "clear" if present else "no_person"
@@ -642,12 +654,21 @@ class AnNhaEdgeRuntime:
                         try:
                             evidence_frame = frame
                             try:
-                                result = detector.update_pose(pose_res.pose_landmarks, present, self.last_camera_frame)
+                                stamp = self.last_camera_frame if frame_timestamp is None else frame_timestamp()
+                                result = detector.update_pose(pose_res.pose_landmarks, present, stamp)
+                                if metrics is not None and backend == "gru_e4_42":
+                                    metrics["gru_ms"].extend(detector.last_inference_ms)
+                                    metrics["timestamp_resets"] = sum(
+                                        reason == "timestamp_gap" for reason, _ in detector.stream.resets)
                             finally:
                                 evidence_frame = None
                         except Exception as exc:
                             self.model_inference_ok = False
-                            logger.warning("[Vision] Lỗi FallDetector: %s", exc)
+                            if metrics is not None:
+                                metrics["model_errors"] += 1
+                            logger.warning("[Vision] MODEL_UNAVAILABLE backend=%s (%s)", backend, exc)
+                            if backend == "gru_e4_42":
+                                detector = None
                     elif detector is not None:
                         detector.reset_pose_stream()
 
@@ -659,6 +680,7 @@ class AnNhaEdgeRuntime:
                             "person_status": "CÓ NGƯỜI" if present else "TRỐNG",
                             "target_audience": fd_cfg.TARGET_AUDIENCE,
                             "ai_state": result.label.upper() if result else ("DISABLED" if not ai_enabled else "UNAVAILABLE"),
+                            "fall_model": backend if self.model_inference_ok else "unavailable",
                         }
                         if result is not None:
                             sample["fall_prob"] = result.raw_fall_prob
@@ -701,7 +723,8 @@ class AnNhaEdgeRuntime:
                     else:
                         status, color = "CO NGUOI", (0, 230, 150)
 
-                    osd_text = f"Pi FPS: {current_fps:4.1f} | {status}"
+                    model_status = backend if self.model_inference_ok else "MODEL UNAVAILABLE"
+                    osd_text = f"Pi FPS: {current_fps:4.1f} | {model_status} | {status}"
                     font = cv2.FONT_HERSHEY_SIMPLEX
                     (text_width, _), _ = cv2.getTextSize(osd_text, font, 0.55, 1)
                     h_f, w_f = frame.shape[:2]
