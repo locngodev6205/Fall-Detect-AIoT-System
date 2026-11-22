@@ -56,6 +56,7 @@ def measure(row, path, process):
     cap = cv2.VideoCapture(str(path))
     stamps, poses, times = [], [], []
     fps = cap.get(cv2.CAP_PROP_FPS)
+    size = [int(cap.get(key)) for key in (cv2.CAP_PROP_FRAME_WIDTH, cv2.CAP_PROP_FRAME_HEIGHT)]
     started, cpu = time.perf_counter(), time.process_time()
     try:
         while True:
@@ -77,7 +78,7 @@ def measure(row, path, process):
         raise ValueError("Invalid pose output")
     result = dict(id=row["video_id"], action=row["scene_id"], event=row["event"],
                   all=phase_summary(points), fps=len(stamps)/wall,
-                  source_fps=fps, pose_ms_p50=float(np.median(times)*1000),
+                  source_fps=fps, source_size=size, inference_errors=0, pose_ms_p50=float(np.median(times)*1000),
                   cpu_percent=100*(time.process_time()-cpu)/wall,
                   process_peak_rss_mib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024)
     if row["event"]:
