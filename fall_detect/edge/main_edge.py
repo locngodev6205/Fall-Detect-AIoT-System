@@ -67,6 +67,7 @@ from edge.audio.worker import AudioWorker
 from edge.audio.scheduler import ReminderScheduler  # noqa: E402
 from edge.client.device_client import ConfigDeferred, DeviceClient  # noqa: E402
 from edge.client.live_streamer import LiveStreamer  # noqa: E402
+from edge.camera_discovery import normalize_camera_id, open_working_camera  # noqa: E402
 from edge.pairing import pair_device  # noqa: E402
 from edge.sensors.arduino_bridge import ArduinoBridge  # noqa: E402
 from edge.tracking.pan_tilt_tracker import PanTiltTracker  # noqa: E402
@@ -194,7 +195,7 @@ class AnNhaEdgeRuntime:
         audio_output: str = "analog",
         bt_speaker_mac: str = "",
         bt_speaker_name: str = "",
-        camera_id: int = 0,
+        camera_id: str | int = "auto",
         live_fps: float = 5.0,
         heartbeat_interval_s: float = 10.0,
         telemetry_interval_s: float = 10.0,
@@ -209,7 +210,7 @@ class AnNhaEdgeRuntime:
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.device_token = device_token.strip()
-        self.camera_id = int(camera_id)
+        self.camera_id = normalize_camera_id(camera_id)
         self.heartbeat_interval_s = max(3.0, float(heartbeat_interval_s))
         self.telemetry_interval_s = max(3.0, float(telemetry_interval_s))
         self.command_poll_interval_s = max(0.5, float(command_poll_interval_s))
@@ -497,32 +498,50 @@ class AnNhaEdgeRuntime:
                 logger.exception("[EdgeRuntime] Lỗi kiểm tra lịch nhắc.")
             self._stop_event.wait(5.0)
 
-    def _vision_loop(self) -> None:
-        """Luồng thu hình Camera + AI Pose + Pan-Tilt Tracking (tự chuyển sang HUD Mock nếu thiếu Webcam/OpenCV)."""
-        use_real_camera = not self.force_mock_hardware and cv2 is not None
-        cap = None
-        if use_real_camera:
-            try:
-                cap = cv2.VideoCapture(self.camera_id)
-                if not cap.isOpened():
-                    cap.release()
-                    cap = None
-            except Exception:
-                cap = None
+    def _camera_unavailable(self) -> None:
+        """Invalidate old camera images and report a real device failure."""
+        self._camera_ok = False
+        self._observation = "camera_error"
+        self.model_inference_ok = False
+        self._last_evidence_frame = (0.0, None)
+        self.streamer.clear_frame()
 
-        if cap is not None:
-            w_cam = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            h_cam = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            logger.info("[Vision] Mở camera thành công: kích thước nguyên bản %dx%d px (tỷ lệ %.2f:1).", w_cam, h_cam, w_cam / h_cam if h_cam else 1.0)
-            if mp is not None:
-                logger.info("[Vision] Đang chạy luồng Camera thực + MediaPipe Pose (camera_id=%d).", self.camera_id)
-                self._run_opencv_mediapipe_loop(cap)
-            else:
-                logger.info("[Vision] Đang chạy luồng Camera thực không MediaPipe (Live Stream + Web PTZ).")
-                self._run_opencv_stream_loop(cap)
-        else:
-            logger.info("[Vision] Không phát hiện Webcam -> Tự động chạy bộ tạo hình trực tiếp HUD Mock.")
+    def _vision_loop(self) -> None:
+        """Discover a live camera, and reopen it when USB is unplugged/reconnected."""
+        if self.force_mock_hardware:
+            logger.warning("[Vision] Explicit --mock mode: synthetic HUD is enabled.")
             self._run_mock_hud_loop()
+            return
+        if cv2 is None:
+            logger.error("[Vision] OpenCV unavailable; cannot open a real camera.")
+        while not self._stop_event.is_set():
+            self._camera_unavailable()
+            if cv2 is None:
+                self._stop_event.wait(3.0)
+                continue
+            cap, source = open_working_camera(cv2, self.camera_id)
+            if cap is None:
+                logger.warning("[Vision] No usable camera found; retry in 3s (no synthetic stream).")
+                self._stop_event.wait(3.0)
+                continue
+
+            try:
+                self._camera_ok = True
+                w_cam = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                h_cam = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                logger.info("[Vision] Camera %s opened: %dx%d", source, w_cam, h_cam)
+                if mp is not None:
+                    self._run_opencv_mediapipe_loop(cap)
+                else:
+                    logger.warning("[Vision] MediaPipe unavailable; streaming without pose/inference.")
+                    self._run_opencv_stream_loop(cap)
+            except Exception:
+                logger.exception("[Vision] Camera pipeline failed; reconnecting.")
+            finally:
+                cap.release()
+                self._camera_unavailable()
+            if not self._stop_event.is_set():
+                self._stop_event.wait(2.0)
 
     def _run_opencv_stream_loop(self, cap: Any) -> None:
         """Thu hình trực tiếp từ USB Webcam khi không dùng MediaPipe (vẫn truyền Live Stream & Web PTZ đầy đủ)."""
@@ -530,14 +549,19 @@ class AnNhaEdgeRuntime:
         fps_t0 = time.monotonic()
         current_fps = 0.0
         last_log_ts = time.monotonic()
+        failed_reads = 0
         try:
             while not self._stop_event.is_set():
                 ok, frame = cap.read()
-                if not ok:
-                    self._camera_ok = False
-                    self._observation = "camera_error"
-                    self._stop_event.wait(0.5)
+                if not ok or frame is None or getattr(frame, "size", 0) == 0:
+                    self._camera_unavailable()
+                    failed_reads += 1
+                    if failed_reads >= 5:
+                        logger.warning("[Vision] Camera stopped delivering frames; rediscovering.")
+                        return
+                    self._stop_event.wait(0.3)
                     continue
+                failed_reads = 0
                 self._camera_ok = True
                 self.last_camera_frame = time.monotonic()
                 self._observation = "clear"
@@ -617,6 +641,7 @@ class AnNhaEdgeRuntime:
         fps_t0 = time.monotonic()
         current_fps = 0.0
         last_log_ts = time.monotonic()
+        failed_reads = 0
 
         try:
             with mp_pose.Pose(
@@ -628,12 +653,16 @@ class AnNhaEdgeRuntime:
             ) as pose:
                 while not self._stop_event.is_set():
                     ok, frame = cap.read()
-                    if not ok:
-                        self._camera_ok = False
-                        self._observation = "camera_error"
-                        self._stop_event.wait(0.5)
+                    if not ok or frame is None or getattr(frame, "size", 0) == 0:
+                        self._camera_unavailable()
+                        failed_reads += 1
+                        if failed_reads >= 5:
+                            logger.warning("[Vision] Camera stopped delivering frames; rediscovering.")
+                            return
+                        self._stop_event.wait(0.3)
                         continue
 
+                    failed_reads = 0
                     self._camera_ok = True
                     self.last_camera_frame = time.monotonic()
                     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -855,7 +884,7 @@ def main(argv: list[str] | None = None) -> int:
         audio_output=os.getenv("ANNHA_AUDIO_OUTPUT", "analog"),
         bt_speaker_mac=os.getenv("BT_SPEAKER_MAC", ""),
         bt_speaker_name=os.getenv("BT_SPEAKER_NAME", ""),
-        camera_id=int(os.getenv("CAMERA_ID", "0")),
+        camera_id=normalize_camera_id(os.getenv("CAMERA_ID", "auto")),
         live_fps=float(os.getenv("LIVE_STREAM_FPS", "5.0")),
         heartbeat_interval_s=float(os.getenv("HEARTBEAT_INTERVAL_S", "10.0")),
         telemetry_interval_s=float(os.getenv("TELEMETRY_INTERVAL_S", "10.0")),

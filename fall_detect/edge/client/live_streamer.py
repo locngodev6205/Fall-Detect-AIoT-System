@@ -69,6 +69,12 @@ class LiveStreamer:
             self._latest_jpeg = jpeg_bytes
             self._latest_seq += 1
 
+    def clear_frame(self) -> None:
+        """Stop reusing an old frame when a physical camera is disconnected."""
+        with self._lock:
+            self._latest_jpeg = None
+            self._latest_seq += 1
+
     def get_latest_jpeg(self) -> bytes | None:
         with self._lock:
             return self._latest_jpeg
