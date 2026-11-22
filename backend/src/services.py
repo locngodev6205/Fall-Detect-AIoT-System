@@ -63,6 +63,8 @@ def reminder_public(row):
 
 
 DEFAULT_SMART_MODES = {
+    'immobility_detection': True,
+    'immobility_timeout_seconds': 600,
     'fall_detection': True,
     'servo_tracking': True,
     'show_landmarks': True,
@@ -105,7 +107,8 @@ def revision(conn, camera_id, extra_patch=None):
     previous=conn.execute('SELECT payload FROM configurations WHERE camera_id=? ORDER BY version DESC LIMIT 1',(camera_id,)).fetchone()
     payload=current_config_payload(json.loads(previous['payload']) if previous else {})
     if extra_patch:
-        payload.update(extra_patch)
+        payload.update({key: value for key, value in extra_patch.items() if key != "smart_modes"})
+        payload["smart_modes"].update(extra_patch.get("smart_modes", {}))
     version=camera['desired_version']+1
     payload.update(version=version,camera_id=camera_id)
     payload['reminders']=[reminder_public(r) for r in conn.execute('SELECT * FROM reminders WHERE camera_id=?',(camera_id,))]

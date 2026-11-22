@@ -145,6 +145,8 @@ def cameras_public(conn,rows,permissions=None):
 def camera_public(conn,row,permissions=None): return cameras_public(conn,[row],permissions)[0]
 
 DEFAULT_SMART_MODES = {
+    'immobility_detection': True,
+    'immobility_timeout_seconds': 600,
     'fall_detection': True,
     'servo_tracking': True,
     'show_landmarks': True,
@@ -189,8 +191,11 @@ def compile_config(home,camera,extra_patch=None):
         previous=conn.execute('SELECT * FROM annha.camera_configurations WHERE camera_id=%s ORDER BY version DESC LIMIT 1',(camera,)).fetchone()
         prev_modes=current_config_payload(previous['payload'] if previous else {})['smart_modes']
         body=jsonable_encoder({'camera_id':camera,'environment':settings,'reminders':reminders,'smart_modes':prev_modes})
-        if extra_patch: body.update(jsonable_encoder(extra_patch))
-        if previous and {key:value for key,value in current_config_payload(previous['payload']).items() if key!='version'}==body: return previous['payload']
+        if extra_patch:
+            patch = jsonable_encoder(extra_patch)
+            body["smart_modes"].update(patch.pop("smart_modes", {}))
+            body.update(patch)
+        if previous and {key:value for key,value in current_config_payload(previous['payload']).items() if key!='version'}==body: return {**body, 'version': previous['version']}
         version=previous['version']+1 if previous else 1;body['version']=version
         conn.execute('INSERT INTO annha.camera_configurations(home_id,camera_id,version,payload) VALUES(%s,%s,%s,%s)',(home,camera,version,db.J(body)))
         conn.execute('''INSERT INTO annha.camera_config_state(home_id,camera_id,desired_version) VALUES(%s,%s,%s)

@@ -419,7 +419,7 @@ def put_smart_modes(camera_id:str,payload:m.SmartModes,current:Current):
     with db.connect() as conn:
         conn.execute('BEGIN IMMEDIATE')
         camera=camera_access(conn,camera_id,current['id'],'schedules')
-        updated=svc.revision(conn,camera_id,{'smart_modes':payload.model_dump()})
+        updated=svc.revision(conn,camera_id,{'smart_modes':payload.model_dump(exclude_unset=True)})
         db.audit(conn,camera['home_id'],current['id'],'camera.smart_modes',camera_id)
         return {'camera_id':camera_id,'desired_version':updated['version'],'applied_version':camera['applied_version'],'smart_modes':updated['smart_modes']}
 

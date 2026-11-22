@@ -15,10 +15,9 @@ FALL_EVENT_COOLDOWN = int(os.getenv("FALL_EVENT_COOLDOWN", 10))  # seconds
 # --- Target Audience & Immobility Configuration ---
 TARGET_AUDIENCE = os.getenv("TARGET_AUDIENCE", "elderly").lower()  # "elderly" hoặc "child"
 ENABLE_IMMOBILITY_DETECTION = os.getenv("ENABLE_IMMOBILITY_DETECTION", "true").lower() == "true"
-# Ngưỡng bất động: 30s cho trẻ em (tránh ngạt/co giật), 120s cho người già (đột quỵ/bất tỉnh)
-IMMOBILITY_TIMEOUT_SECONDS = int(
-    os.getenv("IMMOBILITY_TIMEOUT_SECONDS", 30 if TARGET_AUDIENCE == "child" else 120)
-)
+# Image-space motion threshold; duration applies to uninterrupted observation.
+IMMOBILITY_TIMEOUT_SECONDS = float(os.getenv("IMMOBILITY_TIMEOUT_SECONDS", "600"))
+IMMOBILITY_MOTION_THRESHOLD = float(os.getenv("IMMOBILITY_MOTION_THRESHOLD", "0.018"))
 
 # --- Camera Configuration ---
 CAMERA_SOURCE = os.getenv("CAMERA_SOURCE", "0")  # 0 for webcam or path to .mp4

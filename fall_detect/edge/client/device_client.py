@@ -379,6 +379,7 @@ class DeviceClient:
         duration_s: float | None = None,
         confidence: float | None = None,
         observed_at: str | None = None,
+        queue_on_failure: bool = True,
     ) -> dict[str, Any] | None:
         src_id = event_id or f"{kind}-{uuid.uuid4().hex[:16]}"
         body: dict[str, Any] = {
@@ -403,6 +404,9 @@ class DeviceClient:
             logger.warning("[DeviceClient] Gửi sự kiện HTTP %d: %s", resp.status_code, resp.text[:240])
             return None
         except Exception as exc:
+            if not queue_on_failure:
+                logger.warning("[DeviceClient] Gửi sự kiện %r thất bại: %s", kind, exc)
+                return None
             logger.warning("[DeviceClient] Đứt mạng khi gửi sự kiện '%s' -> Xếp vào Outbox (%s).", kind, exc)
             with self._lock:
                 self._outbox_events.append(body)

@@ -173,6 +173,8 @@ def render_synthetic_hud_jpeg(
     return buf.getvalue()
 
 
+from edge.immobility_events import ImmobilityEvents
+from modules.immobility import ImmobilityDetector, Reading, image_points
 from edge.update_status import UpdateStatusServer, maintenance_guard
 
 
@@ -278,6 +280,15 @@ class AnNhaEdgeRuntime:
         self.show_landmarks = True
         self.update_status = UpdateStatusServer(self, FALL_DETECT_DIR)
         self._stop_event = threading.Event()
+        self.immobility_events = ImmobilityEvents()
+        self.immobility = None
+        import config as fd_cfg
+        self._local_immobility = (fd_cfg.ENABLE_IMMOBILITY_DETECTION, fd_cfg.IMMOBILITY_TIMEOUT_SECONDS)
+        self._immobility_motion_threshold = fd_cfg.IMMOBILITY_MOTION_THRESHOLD
+        self._desired_immobility = None
+        self._active_immobility = None
+        self.immobility_reading = Reading()
+        self._immobility_servo = None
         self._workers: list[threading.Thread] = []
 
         self.client.on_config_updated(self._on_config_updated)
@@ -285,12 +296,22 @@ class AnNhaEdgeRuntime:
 
     def _on_config_updated(self, cfg: dict[str, Any]) -> None:
         modes = cfg.get("smart_modes")
+        settings = None
+        if isinstance(modes, dict) and (
+            "immobility_detection" in modes or "immobility_timeout_seconds" in modes
+        ):
+            enabled = modes.get("immobility_detection", True)
+            seconds = modes.get("immobility_timeout_seconds", 600)
+            if type(enabled) is not bool or type(seconds) is not int or seconds not in (30, 120, 300, 600, 900):
+                raise ValueError("Cấu hình phát hiện bất động không hợp lệ")
+            settings = (enabled, seconds)
         self.tracker.update_smart_modes(modes)
         self.show_landmarks = modes.get("show_landmarks", True) is not False if isinstance(modes, dict) else True
         self.scheduler.apply_config(cfg)
         env = cfg.get("environment")
         if isinstance(env, dict):
             self._env_thresholds.update(env)
+        self._desired_immobility = settings
 
     @maintenance_guard
     def _on_web_command(self, cmd: dict[str, Any]) -> tuple[bool, str]:
@@ -447,6 +468,9 @@ class AnNhaEdgeRuntime:
                             self.scheduler.evaluate_due()
                     next_sched = now + 5.0
 
+                if self.device_token:
+                    self.immobility_events.flush(self.client, now)
+
                 # 5. Cập nhật ảnh Snapshot đại diện phòng định kỳ
                 if self.device_token and now >= next_snap:
                     frame_jpg = self.streamer.get_latest_jpeg()
@@ -459,6 +483,31 @@ class AnNhaEdgeRuntime:
                 logger.warning("[EdgeRuntime] Lỗi chu kỳ nền: %s", exc)
 
             self._stop_event.wait(0.25)
+
+    def _observe_immobility(self, stamp, landmarks=None, servo=None, *, moved=False):
+        settings = self._desired_immobility or self._local_immobility
+        if settings != self._active_immobility:
+            enabled, seconds = settings
+            if self.immobility is not None:
+                self.immobility.update(stamp, None)
+                self.immobility.duration_s = seconds
+            elif enabled:
+                self.immobility = ImmobilityDetector(seconds, self._immobility_motion_threshold)
+            self.immobility_reading = Reading()
+            self._active_immobility = settings
+        if not settings[0]:
+            return
+        if servo is not None:
+            position = (servo.get("pan"), servo.get("tilt"))
+            moved = moved or bool(servo.get("moving")) or (
+                self._immobility_servo is not None and self._immobility_servo != position)
+            self._immobility_servo = position
+        points = image_points(landmarks)
+        self.immobility_reading = self.immobility.update(stamp, points, camera_moving=moved)
+        if self.immobility_reading.transition:
+            self.immobility_events.submit(self.immobility_reading)
+            logger.info("[Immobility] %s, duration_s=%.1f", self.immobility_reading.state.value,
+                        self.immobility_reading.duration_s)
 
     def _vision_loop(self) -> None:
         """Luồng thu hình Camera + AI Pose + Pan-Tilt Tracking (tự chuyển sang HUD Mock nếu thiếu Webcam/OpenCV)."""
@@ -538,6 +587,8 @@ class AnNhaEdgeRuntime:
         from modules.skeleton import NUM_FEATURES, extract_and_normalize_features, is_person_present
         import config as fd_cfg
 
+        self._observe_immobility(time.monotonic())
+
         model_path = fd_cfg.MODEL_PATH
         if not os.path.exists(model_path):
             candidate = FALL_DETECT_DIR / "models" / "fall_detection_transformer.tflite"
@@ -562,6 +613,7 @@ class AnNhaEdgeRuntime:
                     num_features=NUM_FEATURES,
                     confidence_threshold=fd_cfg.FALL_CONFIDENCE_THRESHOLD,
                     event_cooldown=fd_cfg.FALL_EVENT_COOLDOWN,
+                    enable_immobility=False,
                     on_fall_alert=_on_fall,
                 )
                 # Probe inference without triggering event callbacks or requiring a person.
@@ -591,6 +643,7 @@ class AnNhaEdgeRuntime:
                 while not self._stop_event.is_set():
                     ok, frame = cap.read()
                     if not ok:
+                        self._observe_immobility(time.monotonic())
                         self._camera_ok = False
                         self._observation = "camera_error"
                         self._stop_event.wait(0.5)
@@ -600,7 +653,11 @@ class AnNhaEdgeRuntime:
                     self.last_camera_frame = time.monotonic()
                     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     rgb.flags.writeable = False
-                    pose_res = pose.process(rgb)
+                    try:
+                        pose_res = pose.process(rgb)
+                    except Exception:
+                        self._observe_immobility(self.last_camera_frame)
+                        raise
                     if detector is not None and not self.model_inference_ok and not self.force_mock_hardware:
                         try:
                             detector.interpreter.invoke()
@@ -637,10 +694,17 @@ class AnNhaEdgeRuntime:
                         )
 
                     # Luôn gọi update_from_pose kể cả khi không có người để ngắt xung PWM khi tắt Tracking / giờ đêm
+                    tracking = None
                     try:
-                        self.tracker.update_from_pose(pose_res if present else None)
+                        tracking = self.tracker.update_from_pose(pose_res if present else None)
                     except Exception as exc:
                         logger.warning("[Vision] Lỗi tracking: %s", exc)
+
+                    # Observation and delivery are independent of Fall health and AI enable.
+                    self._observe_immobility(
+                        self.last_camera_frame, pose_res.pose_landmarks if present else None, servo_st,
+                        moved=bool(tracking and tracking.get("moved")),
+                    )
 
                     if detector is not None and self.tracker.is_fall_detection_enabled():
                         try:
@@ -664,8 +728,12 @@ class AnNhaEdgeRuntime:
 
                     # 2. Vẽ OSD hiển thị FPS, trạng thái và góc Servo góc dưới bên phải (vùng tối)
                     osd_text = f"FPS: {current_fps:4.1f} | Pan: {pan_val}d | Tilt: {tilt_val}d"
+                    if self._active_immobility and self._active_immobility[0]:
+                        imm = self.immobility_reading
+                        osd_text += f" | Still: {imm.state.value} {imm.duration_s:.0f}s"
                     h_f, w_f = frame.shape[:2]
-                    box_w, box_h = 320, 32
+                    text_w = cv2.getTextSize(osd_text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)[0][0]
+                    box_w, box_h = max(320, text_w + 24), 32
                     bx1, by1 = max(10, w_f - box_w - 15), max(10, h_f - box_h - 15)
                     cv2.rectangle(frame, (bx1, by1), (bx1 + box_w, by1 + box_h), (18, 28, 36), -1)
                     cv2.rectangle(frame, (bx1, by1), (bx1 + box_w, by1 + box_h), (0, 230, 150), 1)
@@ -687,6 +755,7 @@ class AnNhaEdgeRuntime:
                         latest_jpg_holder["jpg"] = jpg_bytes
                         self.streamer.update_frame_jpeg(jpg_bytes)
         finally:
+            self._observe_immobility(time.monotonic())
             cap.release()
 
     def _run_mock_hud_loop(self) -> None:
