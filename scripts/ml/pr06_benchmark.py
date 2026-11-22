@@ -76,7 +76,7 @@ def tcn_video(path, detector):
     )
 
 
-def bilstm_video(path, config, classifier):
+def bilstm_video(path, config, classifier, *, observe=None):
     import cv2
     import numpy as np
     from src.alarm.detector import AlarmDetector, FallState
@@ -84,6 +84,7 @@ def bilstm_video(path, config, classifier):
     from src.features.window import SlidingWindow
     from src.pose.estimator import PoseEstimator
     from research.benchmark import quantiles
+    from ml.features import video_frame_timestamp
 
     pose_cfg, alarm_cfg = config["pose"], config["alarm"]
     target_fps = config["video"]["target_fps"]
@@ -108,6 +109,7 @@ def bilstm_video(path, config, classifier):
     previous = None
     velocity = float("nan")
     detected = False
+    stamp = None
     started = time.perf_counter()
     try:
         if not cap.isOpened():
@@ -117,6 +119,9 @@ def bilstm_video(path, config, classifier):
             if not ok:
                 break
             frames += 1
+            if observe is not None:
+                stamp = video_frame_timestamp(cap.get(cv2.CAP_PROP_POS_MSEC),
+                                              cap.get(cv2.CAP_PROP_FPS), stamp)
             keypoints = estimator.estimate(frame)
             if keypoints is None:
                 continue
@@ -133,7 +138,10 @@ def bilstm_video(path, config, classifier):
                 if not math.isfinite(score):
                     raise ValueError("Non-finite BiLSTM score")
                 scores.append(score)
-                detected |= alarm.process_frame(score, features[0] < 45.0) == FallState.FALL_CONFIRMED
+                state = alarm.process_frame(score, features[0] < 45.0)
+                if observe is not None:
+                    observe(stamp, score, state == FallState.FALL_CONFIRMED)
+                detected |= state == FallState.FALL_CONFIRMED
     finally:
         cap.release()
         estimator.release()
@@ -141,7 +149,7 @@ def bilstm_video(path, config, classifier):
         raise ValueError("Empty video")
     return score_result(
         max(scores, default=None), detected, len(scores), pose_coverage=pose_frames/frames,
-        fps=frames/(time.perf_counter()-started), forward_ms=quantiles(durations),
+        fps=frames/(time.perf_counter()-started), forward_ms=quantiles(durations), frames=frames,
     )
 
 
