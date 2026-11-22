@@ -224,6 +224,7 @@ class AnNhaEdgeRuntime:
                 cache_dir = cache_dir / identity
         self.cache_dir = cache_dir
         self.force_mock_hardware = bool(force_mock_hardware)
+        self._last_evidence_frame = (0.0, None)
 
         port_arg = None if (not serial_port or serial_port.lower() == "auto") else serial_port
         self.bridge = ArduinoBridge(
@@ -412,16 +413,10 @@ class AnNhaEdgeRuntime:
             observation="abnormal",
             reason=reason,
             confidence=confidence,
+            jpeg_evidence=None if self.force_mock_hardware else jpeg_evidence,
         )
         if ev and ev.get("id"):
             self.unreported_alert = False
-        if ev and ev.get("id") and jpeg_evidence:
-            self.client.upload_evidence(
-                jpeg_evidence,
-                mime_type="image/jpeg",
-                filename="fall_evidence.jpg",
-                internal_event_id=str(ev["id"]),
-            )
 
     def _safety_loop(self) -> None:
         """Luồng giám sát an toàn rò rỉ khí gas độc lập hoàn toàn (1.5s), không bị nghẽn bởi I/O mạng hay lệnh âm thanh."""
@@ -438,6 +433,7 @@ class AnNhaEdgeRuntime:
         next_tel = 0.0
         next_cmd = 0.0
         next_snap = time.monotonic() + 2.0
+        next_evidence = 0.0
 
         while not self._stop_event.is_set():
             now = time.monotonic()
@@ -445,8 +441,13 @@ class AnNhaEdgeRuntime:
                 # 1. Gửi Telemetry môi trường định kỳ
                 if self.device_token and now >= next_tel:
                     readings = self.bridge.get_telemetry_readings()
-                    self.client.send_telemetry(readings)
+                    captured, jpeg = self._last_evidence_frame
+                    self.client.send_telemetry(readings, jpeg_evidence=jpeg if now - captured <= 2.0 else None)
                     next_tel = now + self.telemetry_interval_s
+
+                if self.device_token and now >= next_evidence:
+                    self.client.flush_event_images()
+                    next_evidence = time.monotonic() + 1.0
 
                 # 2. Heartbeat & đồng bộ cấu hình
                 if self.device_token and now >= next_hb:
@@ -564,7 +565,9 @@ class AnNhaEdgeRuntime:
                 draw_ota_version_badge(frame, self.update_status.version)
                 ok_enc, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                 if ok_enc:
-                    self.streamer.update_frame_jpeg(buf.tobytes())
+                    jpeg = buf.tobytes()
+                    self._last_evidence_frame = (time.monotonic(), jpeg)
+                    self.streamer.update_frame_jpeg(jpeg)
                 self._stop_event.wait(0.18)
         finally:
             cap.release()
@@ -580,13 +583,12 @@ class AnNhaEdgeRuntime:
             if candidate.exists():
                 model_path = str(candidate)
 
-        latest_jpg_holder: dict[str, bytes | None] = {"jpg": None}
-
         def _on_fall(confidence: float = 0.92, **_kw: Any) -> None:
+            captured, jpeg = self._last_evidence_frame
             self.handle_fall_detected(
                 confidence=float(confidence),
                 reason="Mô hình AI phát hiện chuyển động té ngã trên camera.",
-                jpeg_evidence=latest_jpg_holder["jpg"],
+                jpeg_evidence=jpeg if time.monotonic() - captured <= 2.0 else None,
             )
 
         detector = None
@@ -720,7 +722,7 @@ class AnNhaEdgeRuntime:
                     ok_enc, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                     if ok_enc:
                         jpg_bytes = buf.tobytes()
-                        latest_jpg_holder["jpg"] = jpg_bytes
+                        self._last_evidence_frame = (time.monotonic(), jpg_bytes)
                         self.streamer.update_frame_jpeg(jpg_bytes)
         finally:
             cap.release()

@@ -849,9 +849,9 @@ def save_notification_recipient(home_id:str,recipient_id:str,payload:m.Notificat
             channel=str(row['id']) if row else db.uid()
             if kind=='telegram': telegram_id=channel
             common=(preference.enabled,email_version,preference.event_kinds,preference.minimum_severity,
-              preference.camera_scope_all,preference.allow_media if kind=='telegram' else False,
-              db.now() if kind=='telegram' and preference.allow_media else None,
-              current['id'] if kind=='telegram' and preference.allow_media else None)
+              preference.camera_scope_all,preference.allow_media,
+              db.now() if preference.allow_media else None,
+              current['id'] if preference.allow_media else None)
             if row:
                 conn.execute('''UPDATE annha.notification_channels SET enabled=%s,email_version=%s,event_kinds=%s,
                   minimum_severity=%s,camera_scope_all=%s,allow_media=%s,media_consent_at=%s,consent_by=%s WHERE id=%s''',common+(channel,))
@@ -989,6 +989,15 @@ async def write_asset(request,home,camera,event=None,current=None):
             public_id=provider.public_id(asset)
             resource_type=provider.resource_type(mime)
         with db.connect('worker',home,camera=camera) as conn:
+            if event and kind=='event_image':
+                conn.execute('SELECT id FROM annha.events WHERE id=%s AND camera_id=%s FOR UPDATE',(event,camera))
+                previous=conn.execute("""SELECT id,name,status FROM annha.media_assets
+                    WHERE camera_id=%s AND event_id=%s AND kind='event_image' AND mime_type=%s
+                    AND sha256=%s AND status IN ('ready','uploading') ORDER BY created_at DESC LIMIT 1""",
+                    (camera,event,mime,digest)).fetchone()
+                if previous:
+                    path.unlink()
+                    return {'id':str(previous['id']),'mime':mime,'size':size,'name':previous['name'],'status':previous['status']}
             if cloud:
                 reserved=conn.execute('UPDATE annha.home_storage SET reserved_bytes=reserved_bytes+%s WHERE home_id=%s AND used_bytes+reserved_bytes+%s<=quota_bytes RETURNING home_id',(size,home,size)).fetchone()
                 if not reserved: raise HTTPException(413,'Dung lượng lưu trữ của nhà đã hết.')
@@ -1317,8 +1326,12 @@ def device_telemetry(payload:m.Telemetry,current:Device):
         if batch:
             for metric,value in payload.readings.items():
                 conn.execute('INSERT INTO annha.sensor_readings(home_id,camera_id,batch_id,metric,value,unit,quality) VALUES(%s,%s,%s,%s,%s,%s,%s)',(current['home_id'],current['id'],batch['id'],metric,value.value,value.unit,value.quality))
-    if batch: svc.evaluate_environment(current,payload)
-    return {'stored':True,'message_id':payload.message_id}
+    if batch:
+        svc.evaluate_environment(current,payload)
+    with db.connect('worker',current['home_id'],camera=current['id']) as conn:
+        rows=conn.execute("SELECT id FROM annha.events WHERE camera_id=%s AND kind='environment' AND source_id=ANY(%s) ORDER BY id",
+            (current['id'],list(svc.telemetry_event_sources(payload.message_id).values()))).fetchall()
+    return {'stored':True,'message_id':payload.message_id,'events':[{'id':str(row['id'])} for row in rows]}
 
 @router.get('/device/commands')
 def device_commands(current:Device):

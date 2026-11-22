@@ -835,14 +835,16 @@ async def write_asset(request,home_id,camera_id,event_id=None):
     asset_id=db.uid();filename=asset_id+extensions[mime];path=db.MEDIA_ROOT/filename
     size=0;prefix=b''
     quota=int(os.getenv('MAX_HOME_MEDIA_BYTES',str(512*1024*1024)))
-    with db.connect() as conn:
-        used=conn.execute("SELECT COALESCE(SUM(size),0) FROM assets WHERE home_id=? AND status='ready'",(home_id,)).fetchone()[0]
+    event_image=bool(event_id and mime.startswith('image/'))
+    if not event_image:
+        with db.connect() as conn:
+            used=conn.execute("SELECT COALESCE(SUM(size),0) FROM assets WHERE home_id=? AND status='ready'",(home_id,)).fetchone()[0]
     try:
         with path.open('wb') as output:
             async for chunk in request.stream():
                 size+=len(chunk)
                 if size>25*1024*1024: raise HTTPException(413,'File vượt quá 25 MB.')
-                if used+size>quota: raise HTTPException(413,'Nhà đã đạt giới hạn lưu trữ media.')
+                if not event_image and used+size>quota: raise HTTPException(413,'Nhà đã đạt giới hạn lưu trữ media.')
                 if len(prefix)<16: prefix=(prefix+chunk)[:16]
                 output.write(chunk)
         signatures={'image/jpeg':prefix.startswith(b'\xff\xd8\xff'),'image/png':prefix.startswith(b'\x89PNG\r\n\x1a\n'),
@@ -854,6 +856,14 @@ async def write_asset(request,home_id,camera_id,event_id=None):
         name=unquote(request.headers.get('x-file-name','Tài nguyên'))[:160]
         with db.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
+            if event_image:
+                content=path.read_bytes()
+                for existing in conn.execute("SELECT * FROM assets WHERE camera_id=? AND event_id=? AND mime=? AND size=? AND status='ready'",
+                                             (camera_id,event_id,mime,size)):
+                    previous=svc.asset_path(existing)
+                    if previous.is_file() and previous.read_bytes()==content:
+                        path.unlink()
+                        return {'id':existing['id'],'name':existing['name'],'mime':mime,'size':size,'status':'ready'}
             current_used=conn.execute("SELECT COALESCE(SUM(size),0) FROM assets WHERE home_id=? AND status='ready'",(home_id,)).fetchone()[0]
             if current_used+size>quota: raise HTTPException(413,'Nhà đã đạt giới hạn lưu trữ media.')
             conn.execute('INSERT INTO assets(id,home_id,camera_id,event_id,name,mime,size,path,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
@@ -1096,7 +1106,10 @@ async def device_telemetry(payload:m.Telemetry,current:Device):
                      (current['id'],payload.message_id,db.dumps(payload.model_dump()),payload.observed_at,db.now())).rowcount
     for event in (svc.evaluate_environment(current,payload) if inserted else []):
         await svc.broadcast(event)
-    return {'stored':True,'message_id':payload.message_id}
+    with db.connect() as conn:
+        rows=conn.execute("SELECT id FROM events WHERE camera_id=? AND kind='environment' AND source_id IN (?,?,?,?) ORDER BY id",
+            (current['id'],*svc.telemetry_event_sources(payload.message_id).values())).fetchall()
+    return {'stored':True,'message_id':payload.message_id,'events':[{'id':row['id']} for row in rows]}
 
 
 @router.get('/device/commands')
