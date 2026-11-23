@@ -68,7 +68,7 @@ from edge.audio.scheduler import ReminderScheduler  # noqa: E402
 from edge.client.device_client import ConfigDeferred, DeviceClient  # noqa: E402
 from edge.client.live_streamer import LiveStreamer  # noqa: E402
 from edge.immobility_events import ImmobilityEvents
-from modules.immobility import ImmobilityDetector, Reading, image_points, torso_diagnostics
+from modules.immobility import ImmobilityDetector, Reading, State, image_points, torso_diagnostics
 from edge.update_status import UpdateStatusServer, maintenance_guard
 from edge.camera_discovery import normalize_camera_id, open_working_camera  # noqa: E402
 from edge.pairing import pair_device  # noqa: E402
@@ -300,7 +300,7 @@ class AnNhaEdgeRuntime:
         self._active_immobility = None
         self.immobility_reading = Reading()
         self._immobility_servo = None
-        self._immobility_next_log = 0.0
+        self._immobility_next_log: dict[str, float] = {}
         self._workers: list[threading.Thread] = []
 
         self.client.on_config_updated(self._on_config_updated)
@@ -533,6 +533,8 @@ class AnNhaEdgeRuntime:
         settings = self._desired_immobility
         if settings is not self._active_immobility:
             enabled, seconds = settings
+            logger.info("[Immobility] config_changed enabled=%s timeout_s=%s previous=%s",
+                        enabled, seconds, self._active_immobility)
             if self.immobility is not None:
                 self.immobility.update(stamp, None)
                 self.immobility.duration_s = seconds
@@ -553,12 +555,14 @@ class AnNhaEdgeRuntime:
             points = image_points(landmarks)
         except (AttributeError, IndexError, TypeError):
             points = None
+        previous_state = self.immobility_reading.state
         self.immobility_reading = self.immobility.update(
             stamp, points, camera_moving=tracking_moved or servo_moving or position_changed,
         )
         reading = self.immobility_reading
-        if landmarks is not None and reading.reason and stamp >= self._immobility_next_log:
-            self._immobility_next_log = stamp + 5.0
+        # Limit each reason separately so warmup cannot hide the reset that preceded it.
+        if reading.reason and stamp >= self._immobility_next_log.get(reading.reason, -math.inf):
+            self._immobility_next_log[reading.reason] = stamp + 5.0
             logger.info(
                 "[Immobility] UNKNOWN reason=%s body=%s torso=%s gap_s=%s window_s=%s matched=%s "
                 "tracking_moved=%s servo_moving=%s position_changed=%s torso_detail=%s",
@@ -566,6 +570,10 @@ class AnNhaEdgeRuntime:
                 reading.window_span_s, reading.matched_samples, tracking_moved, servo_moving, position_changed,
                 torso_diagnostics(landmarks) if reading.reason in ("invalid_pose", "no_pose") else None,
             )
+        if (reading.state is State.STILL and reading.state != previous_state
+                and stamp >= self._immobility_next_log.get("STILL", -math.inf)):
+            self._immobility_next_log["STILL"] = stamp + 5.0
+            logger.info("[Immobility] STILL, duration_s=%.1f", reading.duration_s)
         if self.immobility_reading.transition:
             self.immobility_events.submit(self.immobility_reading)
             logger.info("[Immobility] %s, duration_s=%.1f", self.immobility_reading.state.value,
@@ -785,9 +793,10 @@ class AnNhaEdgeRuntime:
                     except Exception as exc:
                         logger.warning("[Vision] Lỗi tracking: %s", exc)
 
-                    # Observation and delivery are independent of Fall health and AI enable.
+                    # Immobility validates image-space joints itself. The Fall/tracking
+                    # presence gate uses a different visibility threshold.
                     self._observe_immobility(
-                        self.last_camera_frame, pose_res.pose_landmarks if present else None, servo_st,
+                        self.last_camera_frame, pose_res.pose_landmarks, servo_st,
                         moved=bool(tracking and tracking.get("moved")),
                     )
 
