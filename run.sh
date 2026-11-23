@@ -6,7 +6,7 @@ ANNHA_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)" || exit 1
 
 compose() {
   docker compose --project-directory "$ANNHA_DIR" \
-    --env-file "$ANNHA_DIR/.env" -f "$ANNHA_DIR/compose.yaml" "$@"
+    --env-file "$ANNHA_DIR/.env" "$@"
 }
 
 prepare() {

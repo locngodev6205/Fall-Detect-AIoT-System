@@ -14,7 +14,7 @@ popd
 exit /b 0
 
 :compose
-docker compose --project-directory "%CD%" --env-file "%CD%\.env" -f "%CD%\compose.yaml" %*
+docker compose --project-directory "%CD%" --env-file "%CD%\.env" %*
 exit /b %errorlevel%
 
 :prepare
@@ -131,15 +131,15 @@ exit /b 0
 :show_urls
 set "ANNHA_WEB_ADDRESS="
 set "ANNHA_MAIL_ADDRESS="
-for /f "delims=" %%P in ('docker compose --project-directory "%CD%" --env-file "%CD%\.env" -f "%CD%\compose.yaml" port frontend 80 2^>nul') do set "ANNHA_WEB_ADDRESS=%%P"
-for /f "delims=" %%P in ('docker compose --project-directory "%CD%" --env-file "%CD%\.env" -f "%CD%\compose.yaml" port mailpit 8025 2^>nul') do set "ANNHA_MAIL_ADDRESS=%%P"
+for /f "delims=" %%P in ('docker compose --project-directory "%CD%" --env-file "%CD%\.env" port frontend 80 2^>nul') do set "ANNHA_WEB_ADDRESS=%%P"
+for /f "delims=" %%P in ('docker compose --project-directory "%CD%" --env-file "%CD%\.env" port mailpit 8025 2^>nul') do set "ANNHA_MAIL_ADDRESS=%%P"
 if defined ANNHA_WEB_ADDRESS echo Ung dung AnNha: http://%ANNHA_WEB_ADDRESS%
 if defined ANNHA_MAIL_ADDRESS echo Hop thu xac minh: http://%ANNHA_MAIL_ADDRESS%
 exit /b 0
 
 :open_page
 set "ANNHA_ADDRESS="
-for /f "delims=" %%P in ('docker compose --project-directory "%CD%" --env-file "%CD%\.env" -f "%CD%\compose.yaml" port %1 %2 2^>nul') do set "ANNHA_ADDRESS=%%P"
+for /f "delims=" %%P in ('docker compose --project-directory "%CD%" --env-file "%CD%\.env" port %1 %2 2^>nul') do set "ANNHA_ADDRESS=%%P"
 if not defined ANNHA_ADDRESS (
   echo [LOI] Dich vu chua chay. Hay khoi dong ung dung truoc.
   exit /b 1
