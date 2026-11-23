@@ -145,14 +145,7 @@ def cameras_public(conn,rows,permissions=None):
 
 def camera_public(conn,row,permissions=None): return cameras_public(conn,[row],permissions)[0]
 
-DEFAULT_SMART_MODES = {
-    'fall_detection': True,
-    'servo_tracking': True,
-    'show_landmarks': True,
-    'night_mode_enabled': True,
-    'night_start': '22:00',
-    'night_end': '06:00',
-}
+DEFAULT_SMART_MODES = models.SmartModes().model_dump()
 
 def current_config_payload(payload):
     cleaned = {key:value for key,value in payload.items() if key not in ('zones','reference')}
@@ -192,8 +185,12 @@ def compile_config(home,camera,extra_patch=None):
         body=jsonable_encoder({'camera_id':camera,'environment':settings,'reminders':reminders,'smart_modes':prev_modes})
         if previous and 'audio_output' in previous['payload']:
             body['audio_output'] = previous['payload']['audio_output']
-        if extra_patch: body.update(jsonable_encoder(extra_patch))
-        if previous and {key:value for key,value in current_config_payload(previous['payload']).items() if key!='version'}==body: return previous['payload']
+        if extra_patch:
+            patch = jsonable_encoder(extra_patch)
+            body["smart_modes"].update(patch.pop("smart_modes", {}))
+            body.update(patch)
+        if previous and {key:value for key,value in current_config_payload(previous['payload']).items() if key!='version'}==body:
+            return {**body, 'version': previous['version']}
         version=previous['version']+1 if previous else 1;body['version']=version
         conn.execute('INSERT INTO annha.camera_configurations(home_id,camera_id,version,payload) VALUES(%s,%s,%s,%s)',(home,camera,version,db.J(body)))
         conn.execute('''INSERT INTO annha.camera_config_state(home_id,camera_id,desired_version) VALUES(%s,%s,%s)

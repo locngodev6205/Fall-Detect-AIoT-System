@@ -8,11 +8,14 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, PropertyMock, call, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from edge.sensors import arduino_bridge
 from edge.sensors.arduino_bridge import (  # noqa: E402
     ArduinoBridge,
     camera_delta,
@@ -22,6 +25,37 @@ from edge.sensors.arduino_bridge import (  # noqa: E402
 
 
 class Group1SensorBridgeTests(unittest.TestCase):
+    def test_uno_retries_failed_handshake_after_reasserting_line_coding(self) -> None:
+        bridge = ArduinoBridge(port="/dev/ttyACM0", baudrate=115200)
+        conn = Mock()
+        baudrate = PropertyMock()
+        dtr = PropertyMock()
+        type(conn).baudrate = baudrate
+        type(conn).dtr = dtr
+        driver = Mock()
+        driver.Serial.return_value = conn
+        driver.tools.list_ports.comports.return_value = [
+            SimpleNamespace(vid=0x2341, pid=0x0043, device="/dev/ttyACM0"),
+        ]
+
+        def handshake(port):
+            if not dtr.call_args_list or dtr.call_args_list[-1] != call(True):
+                return False
+            self.assertEqual(baudrate.call_args_list, [call(57600), call(115200)])
+            port.reset_input_buffer.assert_called_once()
+            return True
+
+        with patch.object(arduino_bridge, "serial", driver), patch.object(
+            bridge, "_wait_for_handshake", side_effect=handshake
+        ) as wait, patch.object(arduino_bridge.time, "sleep"):
+            self.assertTrue(bridge._try_connect_once())
+        self.assertEqual(wait.call_args_list, [call(conn), call(conn)])
+        self.assertEqual(dtr.call_args_list, [call(False), call(True)])
+        self.assertFalse(bridge.get_servo_state()["is_mock"])
+        conn.close.assert_not_called()
+        bridge.stop()
+        conn.close.assert_called_once()
+
     def test_parse_json_and_csv_and_ignore_protocol_lines(self) -> None:
         # Dòng JSON hợp lệ
         parsed = parse_sensor_line('{"temp":28.5,"hum":64.2,"gas":182,"gas_warmup":0,"pan":95,"tilt":88}')

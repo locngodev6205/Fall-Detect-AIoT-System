@@ -63,14 +63,7 @@ def reminder_public(row):
     return result
 
 
-DEFAULT_SMART_MODES = {
-    'fall_detection': True,
-    'servo_tracking': True,
-    'show_landmarks': True,
-    'night_mode_enabled': True,
-    'night_start': '22:00',
-    'night_end': '06:00',
-}
+DEFAULT_SMART_MODES = models.SmartModes().model_dump()
 
 
 def current_config_payload(payload):
@@ -106,7 +99,9 @@ def revision(conn, camera_id, extra_patch=None):
     previous=conn.execute('SELECT payload FROM configurations WHERE camera_id=? ORDER BY version DESC LIMIT 1',(camera_id,)).fetchone()
     payload=current_config_payload(json.loads(previous['payload']) if previous else {})
     if extra_patch:
-        payload.update(extra_patch)
+        patch = dict(extra_patch)
+        payload["smart_modes"].update(patch.pop("smart_modes", {}))
+        payload.update(patch)
     version=camera['desired_version']+1
     payload.update(version=version,camera_id=camera_id)
     payload['reminders']=[reminder_public(r) for r in conn.execute('SELECT * FROM reminders WHERE camera_id=?',(camera_id,))]

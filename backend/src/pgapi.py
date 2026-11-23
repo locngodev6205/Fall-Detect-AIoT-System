@@ -439,7 +439,7 @@ def get_smart_modes(camera_id:str,current:Current):
 @router.put('/cameras/{camera_id}/smart-modes')
 def put_smart_modes(camera_id:str,payload:m.SmartModes,current:Current):
     camera=camera_access(camera_id,current['id'],'schedules');home=camera['home_id']
-    updated=svc.compile_config(home,camera_id,{'smart_modes':payload.model_dump()})
+    updated=svc.compile_config(home,camera_id,{'smart_modes':payload.model_dump(exclude_unset=True)})
     with db.connect('app',home,current['id']) as conn:
         state=conn.execute('SELECT * FROM annha.camera_config_state WHERE camera_id=%s',(camera_id,)).fetchone() or {}
         db.audit(conn,home,current['id'],'camera.smart_modes',camera_id)

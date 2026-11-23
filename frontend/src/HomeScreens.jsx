@@ -100,6 +100,8 @@ export function CameraDetail({ id }) {
   const [ptzStatus, setPtzStatus] = useState('');
   const [modesDraft, setModesDraft] = useState({
     fall_detection: true,
+    immobility_detection: true,
+    immobility_timeout_seconds: 600,
     servo_tracking: true,
     show_landmarks: true,
     night_mode_enabled: true,
@@ -211,6 +213,25 @@ export function CameraDetail({ id }) {
             <input type="checkbox" checked={!!modesDraft.fall_detection} disabled={!canEditModes || modesBusy}
               onChange={e => toggleMode('fall_detection', e.target.checked, 'Phát hiện té ngã AI')}/>
           </label>
+          <label className="smart-mode-item">
+            <span className="smart-mode-info">
+              <strong><PersonSimple/>Phát hiện bất động kéo dài</strong>
+              <small>Cảnh báo khi camera quan sát thấy người bất động đủ thời gian.</small>
+            </span>
+            <input type="checkbox" checked={modesDraft.immobility_detection !== false} disabled={!canEditModes || modesBusy || !modesResource.data}
+              onChange={e => toggleMode('immobility_detection', e.target.checked, 'phát hiện bất động kéo dài')}/>
+          </label>
+          <Field label="Thời gian bất động trước khi cảnh báo">
+            <select value={modesDraft.immobility_timeout_seconds ?? 600}
+              disabled={!canEditModes || modesBusy || !modesResource.data || modesDraft.immobility_detection === false}
+              onChange={e => saveSmartModes({ ...modesDraft, immobility_timeout_seconds: Number(e.target.value) })}>
+              <option value={30}>30 giây</option>
+              <option value={120}>2 phút</option>
+              <option value={300}>5 phút</option>
+              <option value={600}>10 phút</option>
+              <option value={900}>15 phút</option>
+            </select>
+          </Field>
           <label className="smart-mode-item">
             <span className="smart-mode-info">
               <strong><Eye/>Tự động xoay Servo bám người</strong>
