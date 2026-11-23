@@ -119,7 +119,10 @@ class TelegramDeliveryTests(unittest.TestCase):
 
     def test_cloudinary_evidence_is_read_through_private_backend_provider(self):
         from unittest.mock import Mock
-        data=b'\x89PNG\r\n\x1a\nprivate-cloudinary-image'
+        from PIL import Image
+        buffer = io.BytesIO()
+        Image.new('RGB', (320, 240)).save(buffer, format='PNG')
+        data = buffer.getvalue()
         provider=Mock()
         provider.open_read.return_value=io.BytesIO(data)
         row={'status':'ready','expires_at':None,'mime_type':'image/png','size_bytes':len(data),
@@ -228,7 +231,7 @@ class TelegramDeliveryTests(unittest.TestCase):
         home='home-1';delivery='delivery-1';channel_id='channel-1';event_id='event-1'
         state={'due':True,'send_calls':0,'attempt':None,'update':None}
         job={'id':delivery,'event_id':event_id,'camera_id':'camera-1','channel_id':channel_id,
-             'generation':1,'attempt_count':0,'email_version':1}
+             'generation':1,'attempt_count':0,'email_version':1,'created_at':datetime.now(timezone.utc)}
         channel={'id':channel_id,'kind':'telegram','allow_media':False,'recipient_user_id':'recipient-1'}
         event={'id':event_id,'home_id':home,'kind':'fall','severity':'warning','camera_id':'camera-1',
                'camera_name':'Camera','room_name':'Phòng khách','home_name':'Nhà AnNhà','timezone':'Asia/Ho_Chi_Minh',

@@ -736,6 +736,13 @@ def telemetry_summary(camera_id:str,current:Current,hours:int|None=None,start:st
         }
 
 
+@router.get('/homes/{home_id}/notification-settings')
+def notification_settings_unavailable(home_id: str, current: Current):
+    with db.connect() as conn:
+        membership(conn, home_id, current['id'], owner=True)
+    raise HTTPException(501, 'Cài đặt thông báo an toàn cần backend PostgreSQL. Backend hiện dùng SQLite.')
+
+
 @router.get('/homes/{home_id}/settings')
 def settings(home_id:str,current:Current):
     with db.connect() as conn:

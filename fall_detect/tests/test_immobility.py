@@ -82,7 +82,7 @@ def test_delivery_retries_in_order_with_one_id():
     detector = ImmobilityDetector(2)
     events = ImmobilityEvents()
     for reading in feed(detector, 0., 32):
-        events.submit(reading)
+        events.submit(reading, jpeg_evidence=b"event-jpeg")
     for reading in feed(detector, 6.4, 10, lambda i: pose(.4+.03*i)):
         events.submit(reading)
     client = Mock()
@@ -91,6 +91,8 @@ def test_delivery_retries_in_order_with_one_id():
         events.flush(client, stamp)
     a, b, c = [call.kwargs for call in client.send_event.call_args_list]
     assert a == b
+    assert a["jpeg_evidence"] == b"event-jpeg"
+    assert c["jpeg_evidence"] is None
     assert a["event_id"] == c["event_id"]
     assert (a["sequence"], c["sequence"]) == (1, 2)
     assert (a["observation"], c["observation"]) == ("abnormal", "recovered")

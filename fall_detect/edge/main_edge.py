@@ -529,7 +529,7 @@ class AnNhaEdgeRuntime:
                 logger.exception("[EdgeRuntime] Lỗi kiểm tra lịch nhắc.")
             self._stop_event.wait(5.0)
 
-    def _observe_immobility(self, stamp, landmarks=None, servo=None, *, moved=False):
+    def _observe_immobility(self, stamp, landmarks=None, servo=None, *, moved=False, frame=None):
         settings = self._desired_immobility
         if settings is not self._active_immobility:
             enabled, seconds = settings
@@ -598,7 +598,15 @@ class AnNhaEdgeRuntime:
             logger.info("[Immobility] STILL progress duration_s=%.1f motion_score=%s motion_threshold=%.4f",
                         reading.duration_s, reading.motion_score, self.immobility.motion_threshold)
         if self.immobility_reading.transition:
-            self.immobility_events.submit(self.immobility_reading)
+            jpeg = None
+            if reading.transition is State.INACTIVE and frame is not None and not self.force_mock_hardware:
+                try:
+                    encoded, buffer = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+                    if encoded:
+                        jpeg = buffer.tobytes()
+                except cv2.error:
+                    logger.warning("[Immobility] Không mã hóa được ảnh bằng chứng")
+            self.immobility_events.submit(reading, jpeg_evidence=jpeg)
 
     def _camera_unavailable(self) -> None:
         """Invalidate old camera images and report a real device failure."""
@@ -818,7 +826,7 @@ class AnNhaEdgeRuntime:
                     # presence gate uses a different visibility threshold.
                     self._observe_immobility(
                         self.last_camera_frame, pose_res.pose_landmarks, servo_st,
-                        moved=bool(tracking and tracking.get("moved")),
+                        moved=bool(tracking and tracking.get("moved")), frame=frame,
                     )
 
                     if detector is not None and self.tracker.is_fall_detection_enabled():

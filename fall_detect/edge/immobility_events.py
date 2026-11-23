@@ -13,7 +13,7 @@ class ImmobilityEvents:
         self.pending = None
         self.retry_at = 0.
 
-    def submit(self, reading):
+    def submit(self, reading, *, jpeg_evidence=None):
         if reading.transition == State.INACTIVE:
             self.event_id = f"immobility-{uuid4().hex}"
             severity, observation, sequence = "warning", "abnormal", 1
@@ -25,7 +25,8 @@ class ImmobilityEvents:
             return
         self.queue.put(dict(kind="immobility", event_id=self.event_id, sequence=sequence,
                             duration_s=reading.duration_s, severity=severity,
-                            observation=observation, reason=reason, observed_at=iso_now_local()))
+                            observation=observation, reason=reason, observed_at=iso_now_local(),
+                            jpeg_evidence=jpeg_evidence if sequence == 1 else None))
         if sequence == 2:
             self.event_id = None
 
