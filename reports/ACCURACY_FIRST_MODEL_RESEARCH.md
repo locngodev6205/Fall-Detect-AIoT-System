@@ -518,3 +518,76 @@ Episode chỉ là ablation sau khi chọn checkpoint. Lần báo đầu giữ ng
 | single-42 | `04b7e07682741f2ae15d90a90c517fbd7275b62222dc4b87c4e29bbf3c8c3830` |
 
 Thêm URFD cải thiện F2 và giảm FP so với single-source ở cả ba seed. So với GRU, hai seed multi có F2 cao hơn, còn seed 42 thấp hơn. Cold-start vẫn có 7–9 TP so với 9 TP của GRU, và trễ trung vị multi cao hơn GRU ở cả ba seed. Không chọn seed dựa trên kết quả này. Đây là bằng chứng ưu tiên kiểm chứng tiếp multi-source, chưa đủ để đổi Edge. Các số trên được đo bằng CPU local.
+
+## Mở rộng dữ liệu và phân tích lỗi
+
+Cơ sở nghiên cứu là `59a2f03`. Test V2.1 và các recording Test kế thừa từ V2.0 tiếp tục khóa. GMDCSA24 24 clip đã được xem ở các vòng trước và chỉ dùng để đọc lại trace. Không chọn seed, threshold hoặc episode policy từ cohort đó.
+
+### Đối chiếu mô hình và chi phí CPU
+
+| Mô hình | Tham số | Cửa sổ | p50 / p95 CPU | Phạm vi đo |
+| --- | ---: | ---: | --- | --- |
+| GRU E4-42 | 8.193 | 20 | 0,180 / 0,217 ms | Checkpoint đã huấn luyện, 1 thread |
+| CTR-GCN nhỏ multi-source | 33.691 | 20 | 4,383–7,405 / 5,959–33,809 ms | Ba checkpoint, 1 thread, có tải đồng thời |
+| CTR-GCN upstream width 64 | 1.421.231 | 64 | 32,03 / 44,99 ms | Trọng số ngẫu nhiên, 2 threads |
+
+Đo forward trên i5-1235U với Torch 2.6 CPU và đầu vào cố định. GRU và CTR-GCN nhỏ dùng 50 warmup và 400 forwards mỗi checkpoint. Kiến trúc upstream dùng 25 warmup và 100 forwards. Các phép đo không bao gồm capture, pose, sampling hay EventEngine. Chúng chưa xác nhận FPS trên Pi. Không dùng kết quả chạy có tải đồng thời để xếp hạng tốc độ seed. Repository upstream công khai không cung cấp checkpoint classifier gốc có thể xác minh, nên chưa so sánh độ chính xác của cấu hình width 64. [Upstream](https://github.com/Datyth/cross-dataset-fall-detection)
+
+### Lỗi cấp recording và event
+
+Trong pilot GMDCSA24 đã xem trước, số FP trên ADL / trước onset / sau khoảng ghép lần lượt là **10/2/1** (GRU), **10/2/0** (multi-42), **3/1/0** (multi-123), **4/0/3** (multi-2026). Không thấy duplicate theo trace này. S4/Fall/04 thiếu score kịp thời ở cả bốn model. S3/Fall/18 có score kịp thời nhưng tất cả dưới 0,18. GRU ở S4/Fall/07 và multi-42 ở S3/Fall/14 từng phát cảnh báo sớm rồi bỏ lỡ thời điểm ghép dù có score cao, cho thấy policy cooldown/latch cũng góp phần vào FN. Không ước lượng được false alarms/hour hoặc khả năng xử lý nhiều cú ngã từ các clip ngắn có tối đa một sự kiện xác minh.
+
+Trên 10 recording S8, thống kê chuyển động chồng lấn giữa ADL và Fall. Tốc độ hạ hông p90 của Kneel đạt 1,114 chiều dài thân/giây, cao hơn FallLeft/FallRight (1,017/1,018). Pickup có vận tốc góc p90 90,1°/giây, cao hơn bốn Fall đo được (29,8–79,3°/giây). FallForward thiếu cặp pose đủ tin cậy để đo trên khoảng 0,3–0,4 giây. So sánh motion gate cũ giảm FP xuống 0 nhưng làm mất thêm TP ở cả bốn model, nên loại hướng đó. Chưa huấn luyện ablation motion mới trên một subject duy nhất.
+
+### Bundle mở rộng đã khóa
+
+Bundle Full COCO-17 mới có **45 recording Train đủ điều kiện / 528 windows**, tăng từ 40 / 503. Năm recording URFD cam0 thêm vào đều qua preflight theo recipe 20 mẫu ở 10 Hz.
+
+| Recording bổ sung | Nhãn | Windows |
+| --- | --- | ---: |
+| URFD adl-23 | ADL | 5 |
+| URFD adl-08 | ADL | 11 |
+| URFD fall-02 | Fall | 5 |
+| URFD fall-04 | Fall | 2 |
+| URFD fall-06 | Fall | 2 |
+
+Ba Fall dùng frame labels chính thức và clock cam0. Hai ADL dùng nhãn của bộ sưu tập nguồn. URFD được giữ trong Train vì subject ID chưa xác minh. Không suy ra người tham gia từ tên clip. Đối chiếu 73 mục được bảo vệ theo ID và hash, bao gồm Test V2.0, Validation/Test V2.1, raw Test và GMDCSA24. Loại `adl-16` và `fall-12` vì thuộc Test V2.0. Giữ nguyên 10 recording CAUCAFall S8 làm Validation nội bộ. Archive `adl-04` và `adl-06` đến sau khi khóa, nên nằm ngoài lượt train này. [URFD](https://fenix.ur.edu.pl/mkepski/ds/uf.html)
+
+Manifest SHA-256 `b89265f27d6d0c6f03c54e575b3db38d474c330e10a84bf52062770e19a8989c`. Lead xác minh byte hash của cả 56 mục pose, gồm một candidate Train cũ không qua preflight. Pose cache và video nằm ngoài Git.
+
+Audit bổ sung xác nhận có 100 AVI CAUCAFall trên đĩa. Con số này khác số recording có annotation và số vào Train ở bảng trước. Payutch vẫn có 6.988 MP4 với CSV, 3.140 Fall và 3.848 No Fall. Lượt mở rộng không đưa các clip Payutch chưa xác minh, Le2i chưa ghép clock, Montréal chưa rõ quyền bản media và GMD đã dùng cho pilot vào Train.
+
+Bundle lưu ngoài Git tại `annha-recovery-payutch-v1/accuracy-pose-v1/multisource-expanded-v1`. Lead dựng lại từ nguồn và đối chiếu manifest trùng byte với bản đã huấn luyện.
+
+Tái tạo bundle trong thư mục trống bằng Python 3.11, NumPy 1.26.4, MediaPipe 0.10.14, OpenCV 4.11 và FFmpeg/ffprobe. Thư mục `urfd_downloads` chứa ZIP RGB cam0 và CSV sync gốc của `adl-08`, `fall-02`, `fall-04`, `fall-06`. `adl-23` dùng bản PR-03 đã kiểm hash. Dữ liệu cục bộ phải giữ các đường dẫn mà các manifest đầu vào trỏ tới.
+
+```bash
+python scripts/ml/accuracy_urfd_expand.py "$data_root" "$urfd_downloads" "$new_output"
+for seed in 42 123 2026; do
+  OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python scripts/ml/accuracy_multisource.py train \
+    "$new_output/bundle-frozen" "$upstream" notebooks/ctr_gcn_kaggle_config.json \
+    "$training_output/expanded-$seed" --mode multi --seed "$seed" --cpu
+done
+```
+
+### Ablation thêm năm recording URFD · DEVELOPMENT
+
+Giữ nguyên width 8, MediaPipe Full, 20/3/gap-3, AdamW, 12 epoch, ngưỡng 0,5 và tiêu chí chọn epoch trên CAUCAFall S8. Cả ba seed hoàn tất trên CPU 2.6.0. Checkpoint tốt nhất theo từng lượt đã được nạp bằng `weights_only=True` và kiểm SHA-256. Cửa sổ Train gồm 381 CAUCAFall và 147 URFD.
+
+| Seed | S8 cũ TP/FP/FN → mới | F2 cũ → mới | Trễ p50 mới | Epoch mới | Train loss ở epoch chọn |
+| --- | --- | --- | ---: | ---: | ---: |
+| 42 | 3/4/2 → 3/5/2 | 0,556 → 0,536 | 1,37 s | 3 | 0,643555 |
+| 123 | 2/2/3 → 3/6/2 | 0,417 → 0,517 | 1,07 s | 12 | 0,171470 |
+| 2026 | 3/1/2 → 3/2/2 | 0,625 → 0,600 | 0,90 s | 12 | 0,147127 |
+
+Mean ± SD của bản mở rộng: Recall **0,600 ± 0,000**, Precision **0,436 ± 0,143**, F2 **0,551 ± 0,043**, FP **4,33 ± 2,08**. Cold-start đạt 2/5 TP ở cả ba seed. Seed 123 phát hiện thêm FallLeft cùng với FP mới ở Hop và Walk và nhiều FP hơn ở SitDown. SitDown còn xuất hiện trong lỗi của cả ba seed. Cả ba seed đều tăng FP trên S8. Đây là Validation một subject dùng để chọn epoch. Chênh lệch số window cũng làm thay đổi số bước tối ưu mỗi epoch. GMD và Test khóa không được chạy cho các checkpoint mới.
+
+| Checkpoint | SHA-256 |
+| --- | --- |
+| 42 | `cd3f144004e8237b3451a7ab3656ed7661c544c760c675d6cbd61470a08d80a5` |
+| 123 | `e34c4238d55dbad9d4edfa2cd85935bde06faa93caefe32f9775cc72b8584305` |
+| 2026 | `fd1e39580c320b46cb444233b2e45c65e9b545fffb9f95e1d279ea74e87a8d8e` |
+
+Mỗi `best.pt` có 370.072 byte. Đo riêng các checkpoint mới trên i5-1235U với hai threads, 25 warmup và 100 forward cho p50 4,62–4,77 ms và p95 5,67–9,31 ms. Artifacts, log và `summary.json` lưu ngoài Git trong `annha-recovery-payutch-v1/accuracy-pose-v1/multisource-expanded-local`. Lượt này không chạy Kaggle GPU. Bộ test `test_accuracy_first.py` đạt 12/12.
+
+**Quyết định.** Giữ GRU E4-42 làm baseline nghiên cứu. Giữ CTR-GCN nhỏ multi-source làm ứng viên, chưa chọn seed hoặc đưa lên Edge. Ưu tiên bổ sung ADL khó và ca đi rồi ngã có provenance, camera độc lập và timeline xác minh. Đóng băng model, extractor, threshold và episode policy trước khi dùng cohort độc lập chưa xem. Khi đủ bằng chứng, đo toàn bộ capture → pose → inference → event trên Pi, gồm FPS duy trì, gap timestamp, CPU/RAM và p95 delay. Upstream dùng 64 mẫu ở 15 Hz, stride 32 và MIL top-2 cấp recording. Cần chuyển sang đánh giá causal trước khi so sánh độ trễ cảnh báo.
