@@ -28,7 +28,9 @@ function AudioOutputControls({ cameraId, canControl, onMode }) {
   const [state, setState] = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [saveError, setSaveError] = useState('');
   const [test, setTest] = useState(null);
+  const [volume, setVolume] = useState(null);
 
   function receive(next) {
     setState(previous => previous?.desired_version > next.desired_version ? previous : next);
@@ -61,14 +63,25 @@ function AudioOutputControls({ cameraId, canControl, onMode }) {
 
   useEffect(() => { onMode(state?.actual_mode || null); }, [state?.actual_mode, onMode]);
 
-  async function selectOutput(mode) {
+  async function saveOutput(settings) {
     setSaving(true);
     try {
-      receive(await api(`/cameras/${cameraId}/audio-output`, {method: 'PUT', body: {mode}}));
-      setError('');
-    } catch (failure) { setError(failure.message); }
-    finally { setSaving(false); }
+      receive(await api(`/cameras/${cameraId}/audio-output`, {method: 'PUT', body: settings}));
+      setSaveError('');
+    } catch (failure) { setSaveError(failure.message); }
+    finally {
+      if (settings.volume != null) {
+        setVolume(current => current === settings.volume ? null : current);
+      }
+      setSaving(false);
+    }
   }
+
+  useEffect(() => {
+    if (volume == null || !state?.mode || !canControl || saving) return;
+    const timer = setTimeout(() => saveOutput({mode: state.mode, volume}), 180);
+    return () => clearTimeout(timer);
+  }, [volume, state?.mode, canControl, saving]);
 
   async function testSpeaker() {
     setTest({done: false, label: 'Đang gửi lệnh kiểm tra…'});
@@ -84,14 +97,21 @@ function AudioOutputControls({ cameraId, canControl, onMode }) {
     <section className="spaced" aria-label="Đầu ra âm thanh">
       <label>
         <strong>Đầu ra âm thanh</strong>
-        <select value={state?.mode || 'analog'} disabled={!state || saving || !canControl}
-          onChange={event => selectOutput(event.target.value)}>
+        <select value={state?.mode || 'analog'} disabled={!state || saving || volume != null || !canControl}
+          onChange={event => saveOutput({mode: event.target.value})}>
           {Object.entries(audioOutputLabels).map(([mode, label]) => <option key={mode} value={mode}>{label}</option>)}
         </select>
       </label>
-      <p role="status">{state?.actual_mode ? `Đang dùng ${audioOutputLabels[state.actual_mode]}` : 'Pi chưa báo đầu ra'} · {saving ? 'Đang gửi lựa chọn' : audioOutputStatus(state)}</p>
-      {error && <p role="alert">{error}</p>}
-      {canControl && <Button kind="secondary-btn" disabled={!state?.ready || state.switching || saving || (test && !test.done)}
+      <p role="status">{state?.actual_mode ? `Đang dùng ${audioOutputLabels[state.actual_mode]}` : 'Pi chưa báo đầu ra'} · {volume != null ? 'Đang cập nhật âm lượng' : saving ? 'Đang gửi lựa chọn' : audioOutputStatus(state)}</p>
+      {state && <div className="field">
+        <label>Âm lượng loa · {volume ?? state.volume ?? 100}%
+          <input type="range" min="0" max="100" step="1"
+            value={volume ?? state.volume ?? 100} disabled={!canControl || (saving && volume == null)}
+            onChange={event => setVolume(Number(event.target.value))}/>
+        </label>
+      </div>}
+      {(saveError || error) && <p role="alert">{saveError || error}</p>}
+      {canControl && <Button kind="secondary-btn" disabled={!state?.ready || state.switching || saving || volume != null || (test && !test.done)}
         onClick={testSpeaker}><SpeakerHigh size={16}/> Thử loa</Button>}
       {test && <p role="status">{test.label}</p>}
     </section>

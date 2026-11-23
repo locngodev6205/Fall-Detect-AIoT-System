@@ -129,6 +129,7 @@ class AudioPlayer:
 
         self._lock = threading.Lock()
         self._closed = False
+        self._output_volume = 100
         self._live_input: LiveInput | None = None
         self._interrupted = set()
         self._current_proc: subprocess.Popen[bytes] | None = None
@@ -151,6 +152,12 @@ class AudioPlayer:
                 return False
             self.bt.select_output(mode)
             return True
+
+    def set_output_volume(self, volume: int) -> None:
+        if type(volume) is not int or not 0 <= volume <= 100:
+            raise ValueError("Âm lượng đầu ra phải từ 0 đến 100")
+        with self._lock:
+            self._output_volume = volume
 
     def is_busy(self) -> bool:
         """Report playback until the child process has actually finished."""
@@ -342,6 +349,8 @@ class AudioPlayer:
                     if priority < 2:
                         return False, "Loa đang phát đàm thoại."
                     self._live_input.interrupt()
+                if priority < 2 and not is_gas:
+                    volume = round(volume * self._output_volume / 100)
                 self.bt.apply_volume(volume, refresh=False)
                 status = self.bt.get_status()
                 sink = status["sink"]
@@ -418,9 +427,10 @@ class AudioPlayer:
                 current = self.bt.get_status()
                 if (current["sink"], current["backend"], current.get("mode")) != (sink, backend, mode):
                     return None
-                if not self.bt.apply_volume(85, refresh=False):
+                volume = round(85 * self._output_volume / 100)
+                if not self.bt.apply_volume(volume, refresh=False):
                     return None
-                options = {"stream_volume": self._analog_volume(85)} if getattr(self.bt, "uses_analog", False) else {}
+                options = {"stream_volume": self._analog_volume(volume)} if getattr(self.bt, "uses_analog", False) else {}
                 self._live_input = LiveInput(mime, target, backend, **options)
                 return self._live_input
         except (OSError, ValueError, subprocess.SubprocessError) as exc:

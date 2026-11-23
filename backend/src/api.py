@@ -418,11 +418,14 @@ def get_audio_output(camera_id: str, current: Current):
 
 
 @router.put('/cameras/{camera_id}/audio-output')
-def put_audio_output(camera_id: str, payload: m.AudioOutput, current: Current):
+def put_audio_output(camera_id: str, payload: m.AudioOutputSettings, current: Current):
+    patch = {'audio_output': payload.mode}
+    if payload.volume is not None:
+        patch['audio_volume'] = payload.volume
     with db.connect() as conn:
         conn.execute('BEGIN IMMEDIATE')
         camera = camera_access(conn, camera_id, current['id'], 'audio')
-        svc.revision(conn, camera_id, {'audio_output': payload.mode})
+        svc.revision(conn, camera_id, patch)
         db.audit(conn, camera['home_id'], current['id'], 'camera.audio_output', camera_id)
     return get_audio_output(camera_id, current)
 

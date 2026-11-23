@@ -418,9 +418,12 @@ def get_audio_output(camera_id: str, current: Current):
 
 
 @router.put('/cameras/{camera_id}/audio-output')
-def put_audio_output(camera_id: str, payload: m.AudioOutput, current: Current):
+def put_audio_output(camera_id: str, payload: m.AudioOutputSettings, current: Current):
+    patch = {'audio_output': payload.mode}
+    if payload.volume is not None:
+        patch['audio_volume'] = payload.volume
     camera = camera_access(camera_id, current['id'], 'audio')
-    if svc.compile_config(camera['home_id'], camera_id, {'audio_output': payload.mode}) is None:
+    if svc.compile_config(camera['home_id'], camera_id, patch) is None:
         raise HTTPException(404, 'Không tìm thấy camera.')
     with db.connect('app', camera['home_id'], current['id']) as conn:
         db.audit(conn, camera['home_id'], current['id'], 'camera.audio_output', camera_id)

@@ -183,8 +183,10 @@ def compile_config(home,camera,extra_patch=None):
         previous=conn.execute('SELECT * FROM annha.camera_configurations WHERE camera_id=%s ORDER BY version DESC LIMIT 1',(camera,)).fetchone()
         prev_modes=current_config_payload(previous['payload'] if previous else {})['smart_modes']
         body=jsonable_encoder({'camera_id':camera,'environment':settings,'reminders':reminders,'smart_modes':prev_modes})
-        if previous and 'audio_output' in previous['payload']:
-            body['audio_output'] = previous['payload']['audio_output']
+        if previous:
+            for key in ('audio_output', 'audio_volume'):
+                if key in previous['payload']:
+                    body[key] = previous['payload'][key]
         if extra_patch:
             patch = jsonable_encoder(extra_patch)
             body["smart_modes"].update(patch.pop("smart_modes", {}))

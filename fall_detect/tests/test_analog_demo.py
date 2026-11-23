@@ -63,6 +63,25 @@ class AnalogDemoTests(unittest.TestCase):
                 live.assert_called_once_with("audio/webm", "123", "wpctl", stream_volume=0.2125)
                 player.finish_live_stream(live.return_value)
 
+    def test_camera_volume_scales_normal_playback_on_both_outputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bt = BluetoothSpeakerManager(force_mock=True, output_mode="analog")
+            player = AudioPlayer(bt, directory)
+            self.addCleanup(player.stop)
+            player.set_output_volume(40)
+            with patch.object(bt, "apply_volume", wraps=bt.apply_volume) as apply:
+                for mode in ("analog", "bluetooth"):
+                    with self.subTest(mode=mode):
+                        self.assertTrue(player.select_output(mode))
+                        result = player.play_file(player.chime_path, volume=80)
+                        self.assertTrue(result[0], result)
+                        apply.assert_called_with(32, refresh=False)
+                player.set_output_volume(0)
+                self.assertTrue(player.play_file(player.chime_path, volume=80)[0])
+                apply.assert_called_with(0, refresh=False)
+                self.assertTrue(player.play_file(player.siren_path, volume=100, priority=2)[0])
+                apply.assert_called_with(100, refresh=False)
+
     def test_hot_switch_waits_for_live_and_emergency_and_restores_from_cache(self):
         from fall_detect.edge.client.device_client import ConfigDeferred, DeviceClient
 

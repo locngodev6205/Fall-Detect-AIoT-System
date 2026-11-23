@@ -13,6 +13,7 @@ def audio_output_state(payload, capabilities, desired_version, applied_version, 
     desired_version, applied_version = desired_version or 0, applied_version or 0
     return {
         'mode': desired,
+        'volume': payload.get('audio_volume', 100),
         'actual_mode': actual.get('mode'),
         'online': online,
         'ready': bool(online and actual.get('ready')),

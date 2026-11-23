@@ -45,7 +45,11 @@ export function Events({initialStatus=''}) {
     </div>
     {filters.active_only ? <p className="muted" role="status">Đang xem cảnh báo Đang mở và Đã tiếp nhận của camera đã chọn.</p>
       : !filters.camera_id && <p className="muted">Chọn một camera để xem cảnh báo đang chặn OTA.</p>}
-    <ResourceState resource={resource}>{rows.map(e=><article className="panel event-live-row" key={e.id}><span className={'event-kind-icon '+(e.severity==='critical'?'critical-icon':'')}>{React.createElement(eventIcons[e.kind]||WarningCircle,{size:26})}</span><div className="event-row-copy"><a href={'#/event/'+e.id}><h2>{eventNames[e.kind]}</h2></a><p>{e.room_name||rooms.find(r=>r.id===cameras.find(c=>c.id===e.camera_id)?.room_id)?.name||'Trong nhà'} · {e.camera_name||cameras.find(c=>c.id===e.camera_id)?.name||'Camera'} · {dateTime(e.observed_at)}</p><small>{e.payload.reason}</small></div><Badge tone={['RESOLVED','FALSE_ALARM'].includes(e.status)?'teal':e.severity==='critical'?'red':'amber'}>{e.is_read?'Đã đọc · ':''}{statusNames[e.status]}</Badge>{!e.is_read&&<Button kind="secondary-btn" disabled={busy} onClick={()=>markRead(e)}>Đánh dấu đã đọc</Button>}</article>)}{!rows.length&&<Empty icon={WarningCircle} title="Chưa có sự kiện phù hợp" text={filters.active_only ? "Camera này không còn sự kiện đang mở hoặc đã tiếp nhận." : "Thử thay đổi bộ lọc hoặc khoảng thời gian."}/>}<Pagination page={page} pageSize={10} total={total} onChange={setPage} label="sự kiện"/></ResourceState></>;
+    <ResourceState resource={resource}>{rows.map(e=><article className="panel event-live-row" key={e.id}><span className={'event-kind-icon '+(e.severity==='critical'?'critical-icon':'')}>{React.createElement(eventIcons[e.kind]||WarningCircle,{size:26})}</span><div className="event-row-copy"><a href={'#/event/'+e.id}><h2>{eventNames[e.kind]}</h2></a><p>{e.room_name||rooms.find(r=>r.id===cameras.find(c=>c.id===e.camera_id)?.room_id)?.name||'Trong nhà'} · {e.camera_name||cameras.find(c=>c.id===e.camera_id)?.name||'Camera'} · {dateTime(e.observed_at)}</p><small>{e.payload.reason}</small>
+      {can(cameras.find(c=>c.id===e.camera_id),'events') && <EventClosingControls
+        event={e} notify={notify} disabled={busy}
+        onSaved={() => { resource.reload(); reloadAlerts(); reload(); }}/>}
+      </div><Badge tone={['RESOLVED','FALSE_ALARM'].includes(e.status)?'teal':e.severity==='critical'?'red':'amber'}>{e.is_read?'Đã đọc · ':''}{statusNames[e.status]}</Badge>{!e.is_read&&<Button kind="secondary-btn" disabled={busy} onClick={()=>markRead(e)}>Đánh dấu đã đọc</Button>}</article>)}{!rows.length&&<Empty icon={WarningCircle} title="Chưa có sự kiện phù hợp" text={filters.active_only ? "Camera này không còn sự kiện đang mở hoặc đã tiếp nhận." : "Thử thay đổi bộ lọc hoặc khoảng thời gian."}/>}<Pagination page={page} pageSize={10} total={total} onChange={setPage} label="sự kiện"/></ResourceState></>;
 }
 
 function EvidenceImage({asset}) {
@@ -61,6 +65,64 @@ const observationLabels = {
 const severityLabels = { info: 'Thông tin', warning: 'Trung bình', critical: 'Nghiêm trọng' };
 const closingLabels = { safe: 'Xác nhận đã an toàn', false_alarm: 'Xác nhận báo động giả' };
 
+function EventClosingControls({ event, notify, onSaved, disabled = false }) {
+  const [busy, setBusy] = useState(false);
+  const [action, setAction] = useState('');
+  const [note, setNote] = useState('');
+  const [confirmed, setConfirmed] = useState(false);
+  const [error, setError] = useState('');
+  const active = ['OPEN', 'ACKNOWLEDGED'].includes(event.status);
+  const needsConfirm = ['abnormal', 'suspected'].includes(event.observation);
+
+  function choose(next) {
+    setAction(next);
+    setNote('');
+    setConfirmed(false);
+    setError('');
+  }
+
+  async function closeEvent(submitEvent) {
+    submitEvent.preventDefault();
+    if (!active || !action || busy || disabled) return;
+    if (needsConfirm && (!confirmed || !note.trim())) {
+      setError('Hãy xác nhận đã kiểm tra tình trạng và nhập ghi chú xử lý.');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      const result = await api('/events/' + event.id + '/actions', {
+        method: 'POST', body: { action, note: note.trim(), confirm_abnormal: needsConfirm && confirmed },
+      });
+      onSaved(result);
+      choose('');
+      notify(action === 'safe' ? 'Đã kết thúc sự kiện.' : 'Đã ghi nhận báo động giả.');
+    } catch (error) { setError(error.message); }
+    finally { setBusy(false); }
+  }
+
+  if (!active) return null;
+  return <div className="event-close-controls">
+    {!action && <div className="actions">
+        {Object.entries(closingLabels).map(([value, label]) =>
+          <Button key={value} kind="secondary-btn" disabled={busy || disabled} onClick={() => choose(value)}>{label}</Button>)}
+    </div>}
+      {action && <form onSubmit={closeEvent}>
+        <h3>{closingLabels[action]}</h3>
+        <Field label={needsConfirm ? 'Ghi chú xử lý (bắt buộc)' : 'Ghi chú xử lý'}>
+          <textarea value={note} onChange={e => setNote(e.target.value)} maxLength={2000} required={needsConfirm} disabled={busy}/>
+        </Field>
+        {needsConfirm && <label><input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} required disabled={busy}/>
+          Tôi đã kiểm tra tình trạng và xác nhận có thể kết thúc cảnh báo.</label>}
+        <div className="actions">
+          <Button type="submit" disabled={busy}>{busy ? 'Đang lưu…' : 'Xác nhận kết thúc'}</Button>
+          <Button kind="secondary-btn" disabled={busy} onClick={() => choose('')}>Hủy</Button>
+        </div>
+      </form>}
+    {error && <p className="notice error" role="alert">{error}</p>}
+  </div>;
+}
+
 export function EventDetail({ id }) {
   const { alertTick, cameras, can, notify, reloadAlerts, reload } = useApp();
   const resource = useResource('/events/' + id, alertTick);
@@ -73,20 +135,10 @@ export function EventDetail({ id }) {
 function EventRecord({ record, updates, camera, can, notify, refresh }) {
   const [saved, setSaved] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [action, setAction] = useState('');
-  const [note, setNote] = useState('');
-  const [confirmed, setConfirmed] = useState(false);
   const [error, setError] = useState('');
   const event = saved?.base === record ? saved.event : record;
   const active = ['OPEN', 'ACKNOWLEDGED'].includes(event.status);
   const canHandle = can(camera, 'events');
-  const needsConfirm = ['abnormal', 'suspected'].includes(event.observation);
-
-  function choose(next) {
-    setAction(next);
-    setConfirmed(false);
-    setError('');
-  }
 
   async function markRead() {
     setBusy(true);
@@ -95,28 +147,6 @@ function EventRecord({ record, updates, camera, can, notify, refresh }) {
       await api('/events/' + event.id + '/read', { method: 'POST', body: {} });
       setSaved({ base: record, event: { ...event, is_read: true } });
       notify('Đã đánh dấu sự kiện đã đọc.');
-      refresh();
-    } catch (error) { setError(error.message); }
-    finally { setBusy(false); }
-  }
-
-  async function closeEvent(submitEvent) {
-    submitEvent.preventDefault();
-    if (!active || !canHandle || !action || busy) return;
-    if (needsConfirm && (!confirmed || !note.trim())) {
-      setError('Hãy xác nhận đã kiểm tra tình trạng và nhập ghi chú xử lý.');
-      return;
-    }
-    setBusy(true);
-    setError('');
-    try {
-      const result = await api('/events/' + event.id + '/actions', {
-        method: 'POST', body: { action, note: note.trim(), confirm_abnormal: needsConfirm && confirmed },
-      });
-      setSaved({ base: record, event: { ...result, is_read: event.is_read } });
-      choose('');
-      setNote('');
-      notify(action === 'safe' ? 'Đã kết thúc sự kiện.' : 'Đã ghi nhận báo động giả.');
       refresh();
     } catch (error) { setError(error.message); }
     finally { setBusy(false); }
@@ -152,21 +182,12 @@ function EventRecord({ record, updates, camera, can, notify, refresh }) {
       {active && <p>Cảnh báo đang hoạt động cho tới khi được kết thúc.</p>}
       <div className="actions">
         {!event.is_read && <Button kind="secondary-btn" disabled={busy} onClick={markRead}>Đánh dấu đã đọc</Button>}
-        {active && canHandle && !action && Object.entries(closingLabels).map(([value, label]) =>
-          <Button key={value} kind="secondary-btn" disabled={busy} onClick={() => choose(value)}>{label}</Button>)}
       </div>
-      {active && canHandle && action && <form onSubmit={closeEvent}>
-        <h3>{closingLabels[action]}</h3>
-        <Field label={needsConfirm ? 'Ghi chú xử lý (bắt buộc)' : 'Ghi chú xử lý'}>
-          <textarea value={note} onChange={e => setNote(e.target.value)} maxLength={2000} required={needsConfirm} disabled={busy}/>
-        </Field>
-        {needsConfirm && <label><input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} required disabled={busy}/>
-          Tôi đã kiểm tra tình trạng và xác nhận có thể kết thúc cảnh báo.</label>}
-        <div className="actions">
-          <Button type="submit" disabled={busy}>{busy ? 'Đang lưu…' : 'Xác nhận kết thúc'}</Button>
-          <Button kind="secondary-btn" disabled={busy} onClick={() => choose('')}>Hủy</Button>
-        </div>
-      </form>}
+      {canHandle && <EventClosingControls event={event} notify={notify} disabled={busy}
+        onSaved={result => {
+          setSaved({ base: record, event: { ...result, is_read: event.is_read } });
+          refresh();
+        }}/>}
       {error && <p className="notice error" role="alert">{error}</p>}
       {!!event.actions?.length && <ul>
         {event.actions.map(entry => <li key={entry.id}>

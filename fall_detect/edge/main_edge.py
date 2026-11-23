@@ -310,6 +310,8 @@ class AnNhaEdgeRuntime:
         mode = cfg.get("audio_output")
         if mode is not None and not self.audio.select_output(mode):
             raise ConfigDeferred()
+        if "audio_volume" in cfg:
+            self.audio.set_output_volume(cfg["audio_volume"])
         modes = cfg.get("smart_modes")
         settings = None
         if isinstance(modes, dict) and (

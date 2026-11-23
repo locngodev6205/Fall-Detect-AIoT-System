@@ -185,6 +185,9 @@ class SmartModes(Model):
 class AudioOutput(Model):
     mode: Literal['bluetooth', 'analog']
 
+class AudioOutputSettings(AudioOutput):
+    volume: int | None = Field(default=None, strict=True, ge=0, le=100)
+
 class AudioOutputReport(AudioOutput):
     ready: bool
     version: int = Field(ge=0)
