@@ -533,8 +533,12 @@ class AnNhaEdgeRuntime:
         settings = self._desired_immobility
         if settings is not self._active_immobility:
             enabled, seconds = settings
-            logger.info("[Immobility] config_changed enabled=%s timeout_s=%s previous=%s",
-                        enabled, seconds, self._active_immobility)
+            logger.info(
+                "[Immobility] %s -> UNKNOWN reason=config_changed previous_duration_s=%.1f "
+                "enabled=%s timeout_s=%s previous_config=%s",
+                self.immobility_reading.state.value, self.immobility_reading.duration_s,
+                enabled, seconds, self._active_immobility,
+            )
             if self.immobility is not None:
                 self.immobility.update(stamp, None)
                 self.immobility.duration_s = seconds
@@ -555,7 +559,7 @@ class AnNhaEdgeRuntime:
             points = image_points(landmarks)
         except (AttributeError, IndexError, TypeError):
             points = None
-        previous_state = self.immobility_reading.state
+        previous = self.immobility_reading
         self.immobility_reading = self.immobility.update(
             stamp, points, camera_moving=tracking_moved or servo_moving or position_changed,
         )
@@ -570,14 +574,31 @@ class AnNhaEdgeRuntime:
                 reading.window_span_s, reading.matched_samples, tracking_moved, servo_moving, position_changed,
                 torso_diagnostics(landmarks) if reading.reason in ("invalid_pose", "no_pose") else None,
             )
-        if (reading.state is State.STILL and reading.state != previous_state
-                and stamp >= self._immobility_next_log.get("STILL", -math.inf)):
+        if reading.state is not previous.state:
+            reason = reading.reason or {
+                State.ACTIVE: "motion_above_threshold",
+                State.STILL: "motion_below_threshold",
+                State.INACTIVE: "inactivity_timeout",
+                State.RECOVERED: "sustained_motion",
+            }.get(reading.state, "unknown")
+            logger.info(
+                "[Immobility] %s, duration_s=%.1f previous=%s previous_duration_s=%.1f "
+                "reason=%s motion_score=%s motion_threshold=%.4f body=%s torso=%s gap_s=%s window_s=%s "
+                "tracking_moved=%s servo_moving=%s position_changed=%s",
+                reading.state.value, reading.duration_s, previous.state.value, previous.duration_s,
+                reason, reading.motion_score, self.immobility.motion_threshold, reading.valid_body,
+                reading.valid_torso, reading.sample_gap_s, reading.window_span_s,
+                tracking_moved, servo_moving, position_changed,
+            )
+            if reading.state is State.STILL:
+                self._immobility_next_log["STILL"] = stamp + 5.0
+        elif (reading.state is State.STILL
+              and stamp >= self._immobility_next_log.get("STILL", -math.inf)):
             self._immobility_next_log["STILL"] = stamp + 5.0
-            logger.info("[Immobility] STILL, duration_s=%.1f", reading.duration_s)
+            logger.info("[Immobility] STILL progress duration_s=%.1f motion_score=%s motion_threshold=%.4f",
+                        reading.duration_s, reading.motion_score, self.immobility.motion_threshold)
         if self.immobility_reading.transition:
             self.immobility_events.submit(self.immobility_reading)
-            logger.info("[Immobility] %s, duration_s=%.1f", self.immobility_reading.state.value,
-                        self.immobility_reading.duration_s)
 
     def _camera_unavailable(self) -> None:
         """Invalidate old camera images and report a real device failure."""

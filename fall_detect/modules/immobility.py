@@ -1,6 +1,6 @@
 """Detect sustained stillness using timestamped image-space MediaPipe landmarks."""
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 import math
 
@@ -69,6 +69,7 @@ class Reading:
     sample_gap_s: float | None = None
     window_span_s: float | None = None
     matched_samples: int | None = None
+    motion_score: float | None = None
 
 
 class ImmobilityDetector:
@@ -126,8 +127,8 @@ class ImmobilityDetector:
             return self._unknown("invalid_pose", valid_body=body_count,
                                  valid_torso=torso_count, sample_gap_s=sample_gap)
         if self.last_sample is not None and stamp-self.last_sample < self.sample_s-1e-8:
-            return self.reading if self.reading.transition is None else Reading(
-                self.reading.state, self.reading.duration_s)
+            return self.reading if self.reading.transition is None else replace(
+                self.reading, transition=None)
         self.last_sample = stamp
         while self.frames and stamp-self.frames[0][0] > self.window_s+self.max_gap_s:
             self.frames.popleft()
@@ -149,16 +150,19 @@ class ImmobilityDetector:
             return self._unknown("insufficient_overlap", valid_body=body_count,
                                  valid_torso=torso_count, sample_gap_s=sample_gap,
                                  window_span_s=span, matched_samples=len(deltas))
-        if np.quantile(deltas, .8) >= self.motion_threshold:
+        motion_score = float(np.quantile(deltas, .8))
+        details = dict(valid_body=body_count, valid_torso=torso_count, sample_gap_s=sample_gap,
+                       window_span_s=span, matched_samples=len(deltas), motion_score=motion_score)
+        if motion_score >= self.motion_threshold:
             self.still_since = None
             if self.moving_since is None:
                 self.moving_since = stamp
             if self.latched_duration is not None and stamp-self.moving_since >= self.recovery_s-1e-8:
-                self.reading = Reading(State.RECOVERED, self.latched_duration, State.RECOVERED)
+                self.reading = Reading(State.RECOVERED, self.latched_duration, State.RECOVERED, **details)
                 self.latched_duration = None
                 self.frames.clear()
             else:
-                self.reading = Reading(State.ACTIVE)
+                self.reading = Reading(State.ACTIVE, **details)
             return self.reading
 
         self.moving_since = None
@@ -167,10 +171,10 @@ class ImmobilityDetector:
         elapsed = stamp-self.still_since
         if self.latched_duration is None and elapsed >= self.duration_s-1e-8:
             self.latched_duration = min(604800., elapsed)
-            self.reading = Reading(State.INACTIVE, self.latched_duration, State.INACTIVE)
+            self.reading = Reading(State.INACTIVE, self.latched_duration, State.INACTIVE, **details)
         elif self.latched_duration is not None:
             self.latched_duration = min(604800., max(self.latched_duration, elapsed))
-            self.reading = Reading(State.INACTIVE, self.latched_duration)
+            self.reading = Reading(State.INACTIVE, self.latched_duration, **details)
         else:
-            self.reading = Reading(State.STILL, elapsed)
+            self.reading = Reading(State.STILL, elapsed, **details)
         return self.reading

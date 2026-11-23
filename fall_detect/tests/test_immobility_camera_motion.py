@@ -139,3 +139,37 @@ def test_vision_uses_immobility_pose_validation_when_presence_gate_flickers(runt
     assert caplog.text.count("UNKNOWN reason=no_pose") == 1
     assert runtime.immobility_reading.state is State.UNKNOWN
     runtime.immobility_events.submit.assert_not_called()
+
+
+def test_still_progress_and_motion_reset_are_distinguishable_in_logs(runtime, caplog):
+    import logging
+    import re
+
+    with caplog.at_level(logging.INFO):
+        for frame in range(225):
+            reading = observe(runtime, frame / 10, x_shift=.001 * (frame % 3))
+        assert reading.state is State.STILL
+        assert reading.duration_s >= 20
+        assert reading.motion_score < runtime.immobility.motion_threshold
+
+        reading = observe(runtime, 22.6, x_shift=.08)
+        assert reading.state is State.ACTIVE
+        assert reading.motion_score >= runtime.immobility.motion_threshold
+        active_log = next(record.message for record in caplog.records
+                          if "[Immobility] ACTIVE," in record.message)
+        assert "previous=STILL" in active_log
+        assert float(re.search(r"previous_duration_s=([0-9.]+)", active_log)[1]) >= 20
+        assert "reason=motion_above_threshold" in active_log
+        assert "motion_threshold=0.0180" in active_log
+
+        for frame in range(227, 261):
+            reading = observe(runtime, frame / 10, x_shift=.08)
+        assert reading.state is State.STILL
+        assert any("[Immobility] STILL," in record.message and "previous=ACTIVE" in record.message
+                   for record in caplog.records)
+        runtime._observe_immobility(26.1)
+        assert runtime.immobility_reading.state is State.UNKNOWN
+        assert any("[Immobility] UNKNOWN," in record.message and "previous=STILL" in record.message
+                   and "reason=no_pose" in record.message for record in caplog.records)
+    assert 3 <= caplog.text.count("STILL progress") <= 4
+    runtime.immobility_events.submit.assert_not_called()
