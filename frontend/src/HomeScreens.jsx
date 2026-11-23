@@ -87,7 +87,7 @@ export function Cameras() {
   </>;
 }
 
-const IMMOBILITY_TIMEOUT_SECONDS = [30, 120, 300, 600, 900];
+const MAX_IMMOBILITY_MINUTES = 7 * 24 * 60;
 
 function makeCommandKey(prefix = 'cmd') {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -172,8 +172,8 @@ export function CameraDetail({ id }) {
   }
 
   const timeoutMinutes = Number(minutesDraft);
-  const timeoutSeconds = timeoutMinutes * 60;
-  const validTimeout = minutesDraft.trim() !== '' && Number.isFinite(timeoutMinutes) && IMMOBILITY_TIMEOUT_SECONDS.includes(timeoutSeconds);
+  const timeoutSeconds = Math.round(timeoutMinutes * 60);
+  const validTimeout = Number.isFinite(timeoutMinutes) && timeoutSeconds >= 1 && timeoutMinutes <= MAX_IMMOBILITY_MINUTES;
 
   return <><Heading title={camera.name} text={`Kết nối cuối: ${dateTime(camera.last_seen)}`}/>
     {can(camera, 'audio') && <section className="panel camera-live-audio-panel"><LiveAudio cameraId={id} disabled={!camera.online}/></section>}
@@ -231,6 +231,23 @@ export function CameraDetail({ id }) {
             <input type="checkbox" checked={modesDraft.immobility_detection !== false} disabled={!canEditModes || modesBusy || !modesResource.data}
               onChange={e => toggleMode('immobility_detection', e.target.checked, 'phát hiện bất động kéo dài')}/>
           </label>
+          {modesDraft.immobility_detection !== false && <form className="immobility-minutes-form" onSubmit={e => {
+            e.preventDefault();
+            if (validTimeout) saveSmartModes({ ...modesDraft, immobility_timeout_seconds: timeoutSeconds }, 'Đã cập nhật thời gian bất động.');
+          }}>
+            <label htmlFor="immobility-minutes">Thời gian bất động trước khi cảnh báo</label>
+            <div className="immobility-minutes-row">
+              <div className="immobility-minutes-control">
+                <input id="immobility-minutes" type="number" min="0" max={MAX_IMMOBILITY_MINUTES} step="any" inputMode="decimal"
+                  value={minutesDraft} onChange={e => setMinutesDraft(e.target.value)}
+                  disabled={!canEditModes || modesBusy || !modesResource.data} required aria-describedby="immobility-minutes-hint"/>
+                <span>phút</span>
+              </div>
+              {canEditModes && <Button kind="secondary-btn" type="submit"
+                disabled={modesBusy || !modesResource.data || !validTimeout || timeoutSeconds === (modesDraft.immobility_timeout_seconds ?? 600)}>Lưu thời gian</Button>}
+            </div>
+            <small id="immobility-minutes-hint">Có thể nhập số lẻ, ví dụ 3,5 phút. Hệ thống làm tròn đến giây gần nhất (từ 1 giây đến 7 ngày).</small>
+          </form>}
           <label className="smart-mode-item">
             <span className="smart-mode-info">
               <strong><Eye/>Tự động xoay Servo bám người</strong>
@@ -256,23 +273,6 @@ export function CameraDetail({ id }) {
               onChange={e => toggleMode('night_mode_enabled', e.target.checked, 'Chế độ ban đêm yên tĩnh')}/>
           </label>
         </div>
-        {modesDraft.immobility_detection !== false && <form className="immobility-minutes-form" onSubmit={e => {
-          e.preventDefault();
-          if (validTimeout) saveSmartModes({ ...modesDraft, immobility_timeout_seconds: timeoutSeconds }, 'Đã cập nhật thời gian bất động.');
-        }}>
-          <label htmlFor="immobility-minutes">Thời gian bất động trước khi cảnh báo</label>
-          <div className="immobility-minutes-row">
-            <div className="immobility-minutes-control">
-              <input id="immobility-minutes" type="number" min="0.5" max="15" step="any" inputMode="decimal"
-                value={minutesDraft} onChange={e => setMinutesDraft(e.target.value)}
-                disabled={!canEditModes || modesBusy || !modesResource.data} required aria-describedby="immobility-minutes-hint"/>
-              <span>phút</span>
-            </div>
-            {canEditModes && <Button kind="secondary-btn" type="submit"
-              disabled={modesBusy || !modesResource.data || !validTimeout || timeoutSeconds === (modesDraft.immobility_timeout_seconds ?? 600)}>Lưu thời gian</Button>}
-          </div>
-          <small id="immobility-minutes-hint">Hiện hỗ trợ 0,5; 2; 5; 10 hoặc 15 phút.</small>
-        </form>}
         {modesDraft.night_mode_enabled && <form className="night-window-form" onSubmit={e => { e.preventDefault(); saveSmartModes(modesDraft, 'Đã cập nhật khung giờ ban đêm.'); }}>
           <Field label="Giờ bắt đầu đêm"><input type="time" value={modesDraft.night_start || '22:00'} disabled={!canEditModes || modesBusy} onChange={e => setModesDraft({ ...modesDraft, night_start: e.target.value })} required/></Field>
           <Field label="Giờ kết thúc đêm"><input type="time" value={modesDraft.night_end || '06:00'} disabled={!canEditModes || modesBusy} onChange={e => setModesDraft({ ...modesDraft, night_end: e.target.value })} required/></Field>

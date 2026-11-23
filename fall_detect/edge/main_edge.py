@@ -317,7 +317,7 @@ class AnNhaEdgeRuntime:
         ):
             enabled = modes.get("immobility_detection", True)
             seconds = modes.get("immobility_timeout_seconds", 600)
-            if type(enabled) is not bool or type(seconds) is not int or seconds not in (30, 120, 300, 600, 900):
+            if type(enabled) is not bool or type(seconds) is not int or not 1 <= seconds <= 604800:
                 raise ValueError("Cấu hình phát hiện bất động không hợp lệ")
             settings = (enabled, seconds)
         self.tracker.update_smart_modes(modes)

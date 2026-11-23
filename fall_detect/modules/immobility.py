@@ -166,8 +166,8 @@ class ImmobilityDetector:
             self.still_since = stamp
         elapsed = stamp-self.still_since
         if self.latched_duration is None and elapsed >= self.duration_s-1e-8:
-            self.latched_duration = elapsed
-            self.reading = Reading(State.INACTIVE, elapsed, State.INACTIVE)
+            self.latched_duration = min(604800., elapsed)
+            self.reading = Reading(State.INACTIVE, self.latched_duration, State.INACTIVE)
         elif self.latched_duration is not None:
             self.latched_duration = min(604800., max(self.latched_duration, elapsed))
             self.reading = Reading(State.INACTIVE, self.latched_duration)

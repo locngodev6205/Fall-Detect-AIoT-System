@@ -22,7 +22,8 @@ def test_smart_modes_sync_and_immobility_event_recovery(tmp_path, monkeypatch):
         path = f'/api/cameras/{camera["id"]}/smart-modes'
         _, _, other, _ = fixture.home_camera(owner)
         other_path = f'/api/cameras/{other["id"]}/smart-modes'
-        assert owner.put(path, json={"immobility_timeout_seconds": 31}).status_code == 422
+        for invalid in (0, -1, 604801, 31.5, True):
+            assert owner.put(path, json={"immobility_timeout_seconds": invalid}).status_code == 422
 
         def request(method, endpoint, *, json_body=None):
             return device.request(method, endpoint, json=json_body)
@@ -38,7 +39,10 @@ def test_smart_modes_sync_and_immobility_event_recovery(tmp_path, monkeypatch):
             assert runtime.client.applied_version == desired
             assert owner.get(path).json()["applied_version"] == desired
 
-        sync(immobility_detection=False, immobility_timeout_seconds=120, fall_detection=False)
+        sync(immobility_detection=True, immobility_timeout_seconds=210, fall_detection=False)
+        runtime._observe_immobility(0)
+        assert runtime.immobility.duration_s == 210
+        sync(immobility_detection=False, immobility_timeout_seconds=120)
         assert owner.get(other_path).json()["smart_modes"]["immobility_timeout_seconds"] == 600
 
         def frame(i, x):
@@ -48,7 +52,8 @@ def test_smart_modes_sync_and_immobility_event_recovery(tmp_path, monkeypatch):
         with owner.websocket_connect(f'/ws/alerts?home_id={home["id"]}') as alerts:
             for i in range(175):
                 frame(i, .4)
-            assert runtime.immobility is None
+            assert runtime.immobility_reading.state.value == "UNKNOWN"
+            assert runtime.immobility.duration_s == 120
             sync(immobility_detection=True, immobility_timeout_seconds=30)
             for i in range(175, 315):
                 frame(i, .4)

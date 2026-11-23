@@ -52,7 +52,7 @@ def exercise_edge_021_contract(self):
         self.assertEqual(owner.get(path + '/smart-modes').json()['applied_version'], 2)
         refreshed = owner.put(path + '/smart-modes', json={'show_landmarks': False})
         self.assertEqual(refreshed.json()['smart_modes']['immobility_timeout_seconds'], 30)
-        self.assertEqual(owner.put(path + '/smart-modes', json={'immobility_timeout_seconds': 31}).status_code, 422)
+        self.assertEqual(owner.put(path + '/smart-modes', json={'immobility_timeout_seconds': 0}).status_code, 422)
 
         pending = owner.post(path + '/commands', json={
             'kind': 'ptz_move', 'direction': 'RIGHT', 'degrees': 5,

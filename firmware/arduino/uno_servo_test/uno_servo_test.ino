@@ -1,11 +1,11 @@
 #include <Servo.h>
 
 // Match AnNhà wiring. Use a separate 5 V servo supply and share GND with Uno.
-constexpr byte PAN_PIN = 9;
-constexpr byte TILT_PIN = 10;
+constexpr byte PAN_PIN =7;
+constexpr byte TILT_PIN = 8;
 constexpr int CENTER = 90;
-constexpr int TEST_MIN = 85;
-constexpr int TEST_MAX = 95;
+constexpr int TEST_MIN = 50;
+constexpr int TEST_MAX = 130;
 constexpr unsigned long STEP_MS = 20;
 constexpr unsigned long HOLD_MS = 650;
 
