@@ -10,6 +10,7 @@ from pathlib import Path
 import sqlite3
 import ssl
 import uuid
+from zoneinfo import ZoneInfo
 from dotenv import dotenv_values
 import psycopg
 from psycopg.types.json import Jsonb as J
@@ -19,11 +20,11 @@ def run(source,env):
     old=sqlite3.connect('file:'+str(Path(source).resolve())+'?mode=ro',uri=True);old.row_factory=sqlite3.Row
     rows=lambda name:[dict(r) for r in old.execute('SELECT * FROM '+name)]
     # This migration supports the current snapshot; refuse a newer unsupported state.
-    for table in ('executions','commands','deliveries','invitations'):
+    for table in ('deliveries','invitations'):
         if rows(table): raise SystemExit('Import needs review for non-empty '+table+'; source is untouched.')
     settings=dotenv_values(env);url=settings.get('DATABASE_URL_UNPOOLED') or settings.get('DATABASE_URL')
     key=hashlib.sha256(Path(source).read_bytes()).hexdigest();now=datetime.now(timezone.utc)
-    homes={r['id']:r for r in rows('homes')};cameras={r['id']:r for r in rows('cameras') if r['claimed']}
+    homes={r['id']:r for r in rows('homes')};cameras={r['id']:r for r in rows('cameras') if r['home_id'] and r['room_id']}
     owners={r['home_id']:r['user_id'] for r in rows('memberships') if r['role']=='owner'}
     if set(homes)!=set(owners): raise SystemExit('Every home must have exactly one owner before import.')
     with psycopg.connect(url,sslmode='verify-full',sslrootcert=ssl.get_default_verify_paths().cafile) as conn:
@@ -44,8 +45,8 @@ def run(source,env):
         for r in rows('cameras'):
             device=str(uuid.uuid5(uuid.NAMESPACE_URL,'annha/import/device/'+r['id']))
             conn.execute('INSERT INTO annha_private.device_registry(id,model) VALUES(%s,%s)',(device,'Imported SQLite device'))
-            if r['claimed']:
-                conn.execute('INSERT INTO annha.cameras(id,home_id,room_id,device_id,name,capabilities,observation,last_seen_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)',(r['id'],r['home_id'],r['room_id'],device,r['name'],J(json.loads(r['capabilities'])),r['observation'],r['last_seen']))
+            if r['id'] in cameras:
+                conn.execute('INSERT INTO annha.cameras(id,home_id,room_id,device_id,name,capabilities,observation,last_seen_at,retired_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)',(r['id'],r['home_id'],r['room_id'],device,r['name'],J(json.loads(r['capabilities'])),r['observation'],r['last_seen'],None if r['claimed'] else now))
             conn.execute('INSERT INTO annha_private.device_credentials(device_id,camera_id,token_hash) VALUES(%s,%s,%s)',(device,r['id'] if r['claimed'] else None,bytes.fromhex(r['token_hash'])))
             if not r['claimed'] and r['pair_hash'] and r['pair_expires']>now.timestamp():
                 conn.execute('INSERT INTO annha_private.pairing_codes(code_hash,device_id,created_at,expires_at) VALUES(%s,%s,%s,%s)',(bytes.fromhex(r['pair_hash']),device,now,datetime.fromtimestamp(r['pair_expires'],timezone.utc)))
@@ -58,12 +59,24 @@ def run(source,env):
             conn.execute('INSERT INTO annha.camera_configurations(home_id,camera_id,version,payload,created_at) VALUES(%s,%s,%s,%s,%s)',(cam['home_id'],cam['id'],r['version'],J(body),r['created_at']))
         for r in cameras.values():
             if r['desired_version']: conn.execute('INSERT INTO annha.camera_config_state(home_id,camera_id,desired_version,applied_version,error) VALUES(%s,%s,%s,%s,%s)',(r['home_id'],r['id'],r['desired_version'],r['applied_version'] or None,r['config_error']))
-        for r in rows('events'):
+        events = {r['id']: r for r in rows('events')}
+        updates = rows('event_updates')
+        updates_by_sequence = {(r['event_id'], r['sequence']): r for r in updates}
+        for r in events.values():
             p=json.loads(r['payload'])
             conn.execute('INSERT INTO annha.events(id,home_id,camera_id,source_id,latest_sequence,kind,severity,observation,status,first_observed_at,last_observed_at,received_at,reason,duration_s,model_score,config_version) VALUES('+','.join(['%s']*16)+')',(r['id'],r['home_id'],r['camera_id'],r['source_id'],r['sequence'],r['kind'],r['severity'],r['observation'],r['status'],r['observed_at'],r['observed_at'],r['received_at'],p.get('reason',''),p.get('duration_s'),p.get('confidence'),p.get('config_version') or None))
-            conn.execute('INSERT INTO annha.event_updates(home_id,camera_id,event_id,sequence,observed_at,observation,severity,payload) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)',(r['home_id'],r['camera_id'],r['id'],r['sequence'],r['observed_at'],r['observation'],r['severity'],J(p)))
+            if (r['id'], r['sequence']) not in updates_by_sequence:
+                updates.append({**r, 'event_id': r['id'], 'observed_at': p.get('observed_at', r['observed_at'])})
+        for r in updates:
+            event = events[r['event_id']]
+            conn.execute('INSERT INTO annha.event_updates(home_id,camera_id,event_id,sequence,observed_at,received_at,observation,severity,payload) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)',
+                         (event['home_id'],event['camera_id'],r['event_id'],r['sequence'],r['observed_at'],r['received_at'],r['observation'],r['severity'],J(json.loads(r['payload']))))
+        for r in rows('event_reads'):
+            event = events[r['event_id']]
+            conn.execute('INSERT INTO annha.event_reads(home_id,camera_id,event_id,user_id) VALUES(%s,%s,%s,%s)',
+                         (event['home_id'],event['camera_id'],r['event_id'],r['user_id']))
         for r in rows('actions'):
-            event=next(e for e in rows('events') if e['id']==r['event_id'])
+            event=events[r['event_id']]
             conn.execute('INSERT INTO annha.event_actions(id,home_id,camera_id,event_id,user_id,action,note,confirmed_abnormal,silence_until,request_id,created_at) VALUES(%s,%s,%s,%s,%s,%s,%s,true,%s,%s,%s)',(r['id'],event['home_id'],event['camera_id'],r['event_id'],r['user_id'],r['action'],r['note'],now if r['action']=='silence' else None,r['id'],r['created_at']))
         for r in rows('assets'):
             kind='event_clip' if r['event_id'] and r['mime'].startswith('video/') else 'event_image' if r['event_id'] else 'audio' if r['mime'].startswith('audio/') else 'snapshot'
@@ -73,6 +86,35 @@ def run(source,env):
         for r in rows('reminders'):
             conn.execute('INSERT INTO annha.reminders(id,home_id,camera_id,name,enabled,current_version,created_by,created_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)',(r['id'],r['home_id'],r['camera_id'],r['name'],bool(r['enabled']),r['version'],owners[r['home_id']],r['created_at']))
             conn.execute('INSERT INTO annha.reminder_revisions(home_id,camera_id,reminder_id,version,local_time,timezone,weekdays,once_date,source,text_content,asset_id,volume,late_seconds) VALUES('+','.join(['%s']*13)+')',(r['home_id'],r['camera_id'],r['id'],r['version'],r['time'],r['timezone'],[] if r['once_date'] else json.loads(r['weekdays']),r['once_date'],r['source'],r['text'] or None,r['asset_id'],r['volume'],r['late_seconds']))
+        # Terminal command history is preserved. Pending commands must never replay at cutover.
+        for r in rows('commands'):
+            payload = json.loads(r['payload'])
+            status = 'expired' if r['status'] in ('pending', 'accepted', 'executing') else r['status']
+            conn.execute(
+                """INSERT INTO annha.commands(id,home_id,camera_id,requested_by,idempotency_key,kind,asset_id,
+                   payload,status,created_at,expires_at,result) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (r['id'],r['home_id'],r['camera_id'],r['user_id'],r['idempotency_key'],r['kind'],
+                 payload.get('asset_id'),J(payload),status,r['created_at'],
+                 datetime.fromtimestamp(r['expires'],timezone.utc),
+                 J({'detail':r['result']}) if r['result'] is not None else None),
+            )
+        reminders = {r['id']: r for r in rows('reminders')}
+        for r in rows('executions'):
+            reminder = reminders[r['reminder_id']]
+            occurred, separator, revision = r['occurrence'].rpartition(':v')
+            if not separator or not revision.isdecimal() or int(revision) != reminder['version']:
+                conn.execute(
+                    'INSERT INTO annha_private.sqlite_execution_archive(id,source_record) VALUES (%s,%s)',
+                    (r['id'], J(r)),
+                )
+                continue
+            scheduled = datetime.fromisoformat(occurred).replace(tzinfo=ZoneInfo(reminder['timezone']))
+            conn.execute(
+                """INSERT INTO annha.reminder_executions(id,home_id,camera_id,reminder_id,reminder_version,
+                   occurrence_key,scheduled_at,received_at,status,detail) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (r['id'],cameras[r['camera_id']]['home_id'],r['camera_id'],r['reminder_id'],int(revision),
+                 r['occurrence'],scheduled,r['created_at'],r['status'],r['detail'] or ''),
+            )
         for r in rows('telemetry'):
             home=cameras[r['camera_id']]['home_id'];p=json.loads(r['payload'])
             batch=conn.execute('INSERT INTO annha.telemetry_batches(home_id,camera_id,message_id,observed_at,received_at) VALUES(%s,%s,%s,%s,%s) RETURNING id',(home,r['camera_id'],r['message_id'],r['observed_at'],r['received_at'])).fetchone()[0]
