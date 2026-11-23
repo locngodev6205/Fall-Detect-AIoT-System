@@ -725,6 +725,10 @@ class PostgresTests(unittest.TestCase):
         # Re-read persisted data from PostgreSQL.
         self.assertEqual(len(owner.get(f"/api/homes/{home['id']}/events").json()),1)
 
+    def test_edge_021_syncs_immobility_using_audio_heartbeat(self):
+        from backend.tests.edge_021_contract_cases import exercise_edge_021_contract
+        exercise_edge_021_contract(self)
+
     def test_camera_audio_output_config_and_actual_state(self):
         from backend.tests.audio_output_cases import exercise_audio_output
         exercise_audio_output(self)

@@ -167,6 +167,8 @@ class Command(Model):
         return self
 
 class SmartModes(Model):
+    immobility_detection: bool = True
+    immobility_timeout_seconds: Literal[30, 120, 300, 600, 900] = 600
     fall_detection: bool = True
     servo_tracking: bool = True
     show_landmarks: bool = True

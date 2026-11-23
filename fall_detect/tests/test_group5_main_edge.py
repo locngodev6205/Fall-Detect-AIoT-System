@@ -141,7 +141,7 @@ print(json.dumps({"home_id": hid, "room_id": rid, "session": sess, "csrf": csrf,
                 self.assertEqual(snap.status_code, 200)
                 self.assertTrue(snap.content.startswith(b"\xff\xd8\xff"))
 
-                # Mô phỏng phát hiện té ngã -> Hú còi tại chỗ 100% + Gửi sự kiện & ảnh bằng chứng lên Backend
+                # Sự kiện mock vẫn được gửi; ảnh HUD không được dùng làm bằng chứng.
                 evidence_jpg = runtime.streamer.get_latest_jpeg()
                 runtime.handle_fall_detected(
                     confidence=0.95,
@@ -152,7 +152,7 @@ print(json.dumps({"home_id": hid, "room_id": rid, "session": sess, "csrf": csrf,
                 events = web.get(f"{base_url}/api/homes/{meta['home_id']}/events", timeout=5).json()
                 fall_events = [e for e in events if e["kind"] == "fall"]
                 self.assertGreaterEqual(len(fall_events), 1)
-                self.assertGreaterEqual(len(fall_events[0]["evidence"]), 1)
+                self.assertEqual(fall_events[0]["evidence"], [])
                 self.assertTrue(any(h.get("label") == "emergency_fall" for h in runtime.audio.history))
             finally:
                 runtime.stop()

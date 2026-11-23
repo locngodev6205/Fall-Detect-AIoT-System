@@ -67,6 +67,9 @@ from edge.audio.worker import AudioWorker
 from edge.audio.scheduler import ReminderScheduler  # noqa: E402
 from edge.client.device_client import ConfigDeferred, DeviceClient  # noqa: E402
 from edge.client.live_streamer import LiveStreamer  # noqa: E402
+from edge.immobility_events import ImmobilityEvents
+from modules.immobility import ImmobilityDetector, Reading, image_points, torso_diagnostics
+from edge.update_status import UpdateStatusServer, maintenance_guard
 from edge.camera_discovery import normalize_camera_id, open_working_camera  # noqa: E402
 from edge.pairing import pair_device  # noqa: E402
 from edge.sensors.arduino_bridge import ArduinoBridge  # noqa: E402
@@ -288,6 +291,16 @@ class AnNhaEdgeRuntime:
         self.show_landmarks = True
         self.update_status = UpdateStatusServer(self, FALL_DETECT_DIR)
         self._stop_event = threading.Event()
+        self.immobility_events = ImmobilityEvents()
+        self.immobility = None
+        import config as fd_cfg
+        self._local_immobility = (fd_cfg.ENABLE_IMMOBILITY_DETECTION, fd_cfg.IMMOBILITY_TIMEOUT_SECONDS)
+        self._immobility_motion_threshold = fd_cfg.IMMOBILITY_MOTION_THRESHOLD
+        self._desired_immobility = self._local_immobility
+        self._active_immobility = None
+        self.immobility_reading = Reading()
+        self._immobility_servo = None
+        self._immobility_next_log = 0.0
         self._workers: list[threading.Thread] = []
 
         self.client.on_config_updated(self._on_config_updated)
@@ -298,12 +311,25 @@ class AnNhaEdgeRuntime:
         if mode is not None and not self.audio.select_output(mode):
             raise ConfigDeferred()
         modes = cfg.get("smart_modes")
+        settings = None
+        if isinstance(modes, dict) and (
+            "immobility_detection" in modes or "immobility_timeout_seconds" in modes
+        ):
+            enabled = modes.get("immobility_detection", True)
+            seconds = modes.get("immobility_timeout_seconds", 600)
+            if type(enabled) is not bool or type(seconds) is not int or seconds not in (30, 120, 300, 600, 900):
+                raise ValueError("Cấu hình phát hiện bất động không hợp lệ")
+            settings = (enabled, seconds)
         self.tracker.update_smart_modes(modes)
         self.show_landmarks = modes.get("show_landmarks", True) is not False if isinstance(modes, dict) else True
         self.scheduler.apply_config(cfg)
         env = cfg.get("environment")
         if isinstance(env, dict):
             self._env_thresholds.update(env)
+        settings = settings or self._local_immobility
+        if settings != self._desired_immobility:
+            # Publish a new snapshot even if a later config restores the previous values.
+            self._desired_immobility = (*settings,)
 
     @maintenance_guard
     def _on_web_command(self, cmd: dict[str, Any]) -> tuple[bool, str] | Future:
@@ -475,6 +501,9 @@ class AnNhaEdgeRuntime:
                     self.client.poll_and_execute_commands()
                     next_cmd = now + self.command_poll_interval_s
 
+                if self.device_token:
+                    self.immobility_events.flush(self.client, now)
+
                 # 4. Cập nhật ảnh Snapshot đại diện phòng định kỳ
                 if self.device_token and now >= next_snap:
                     frame_jpg = self.streamer.get_latest_jpeg()
@@ -498,8 +527,51 @@ class AnNhaEdgeRuntime:
                 logger.exception("[EdgeRuntime] Lỗi kiểm tra lịch nhắc.")
             self._stop_event.wait(5.0)
 
+    def _observe_immobility(self, stamp, landmarks=None, servo=None, *, moved=False):
+        settings = self._desired_immobility
+        if settings is not self._active_immobility:
+            enabled, seconds = settings
+            if self.immobility is not None:
+                self.immobility.update(stamp, None)
+                self.immobility.duration_s = seconds
+            elif enabled:
+                self.immobility = ImmobilityDetector(seconds, self._immobility_motion_threshold)
+            self.immobility_reading = Reading()
+            self._active_immobility = settings
+        if not settings[0]:
+            return
+        tracking_moved = moved
+        servo_moving = position_changed = False
+        if servo is not None:
+            position = (servo.get("pan"), servo.get("tilt"))
+            servo_moving = bool(servo.get("moving"))
+            position_changed = self._immobility_servo is not None and self._immobility_servo != position
+            self._immobility_servo = position
+        try:
+            points = image_points(landmarks)
+        except (AttributeError, IndexError, TypeError):
+            points = None
+        self.immobility_reading = self.immobility.update(
+            stamp, points, camera_moving=tracking_moved or servo_moving or position_changed,
+        )
+        reading = self.immobility_reading
+        if landmarks is not None and reading.reason and stamp >= self._immobility_next_log:
+            self._immobility_next_log = stamp + 5.0
+            logger.info(
+                "[Immobility] UNKNOWN reason=%s body=%s torso=%s gap_s=%s window_s=%s matched=%s "
+                "tracking_moved=%s servo_moving=%s position_changed=%s torso_detail=%s",
+                reading.reason, reading.valid_body, reading.valid_torso, reading.sample_gap_s,
+                reading.window_span_s, reading.matched_samples, tracking_moved, servo_moving, position_changed,
+                torso_diagnostics(landmarks) if reading.reason in ("invalid_pose", "no_pose") else None,
+            )
+        if self.immobility_reading.transition:
+            self.immobility_events.submit(self.immobility_reading)
+            logger.info("[Immobility] %s, duration_s=%.1f", self.immobility_reading.state.value,
+                        self.immobility_reading.duration_s)
+
     def _camera_unavailable(self) -> None:
         """Invalidate old camera images and report a real device failure."""
+        self._observe_immobility(time.monotonic())
         self._camera_ok = False
         self._observation = "camera_error"
         self.model_inference_ok = False
@@ -607,7 +679,7 @@ class AnNhaEdgeRuntime:
             if candidate.exists():
                 model_path = str(candidate)
 
-        def _on_fall(confidence: float = 0.92, **_kw: Any) -> None:
+        def _on_fall(confidence: float, _confidence_pct_str: str) -> None:
             captured, jpeg = self._last_evidence_frame
             self.handle_fall_detected(
                 confidence=float(confidence),
@@ -624,6 +696,7 @@ class AnNhaEdgeRuntime:
                     num_features=NUM_FEATURES,
                     confidence_threshold=fd_cfg.FALL_CONFIDENCE_THRESHOLD,
                     event_cooldown=fd_cfg.FALL_EVENT_COOLDOWN,
+                    enable_immobility=False,
                     on_fall_alert=_on_fall,
                 )
                 # Probe inference without triggering event callbacks or requiring a person.
@@ -704,10 +777,17 @@ class AnNhaEdgeRuntime:
                         )
 
                     # Luôn gọi update_from_pose kể cả khi không có người để ngắt xung PWM khi tắt Tracking / giờ đêm
+                    tracking = None
                     try:
-                        self.tracker.update_from_pose(pose_res if present else None)
+                        tracking = self.tracker.update_from_pose(pose_res if present else None)
                     except Exception as exc:
                         logger.warning("[Vision] Lỗi tracking: %s", exc)
+
+                    # Observation and delivery are independent of Fall health and AI enable.
+                    self._observe_immobility(
+                        self.last_camera_frame, pose_res.pose_landmarks if present else None, servo_st,
+                        moved=bool(tracking and tracking.get("moved")),
+                    )
 
                     if detector is not None and self.tracker.is_fall_detection_enabled():
                         try:

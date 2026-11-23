@@ -469,6 +469,7 @@ class DeviceClient:
         duration_s: float | None = None,
         confidence: float | None = None,
         observed_at: str | None = None,
+        queue_on_failure: bool = True,
     ) -> dict[str, Any] | None:
         if not self._valid_event_jpeg(jpeg_evidence):
             jpeg_evidence = None
@@ -496,12 +497,14 @@ class DeviceClient:
                     self._send_event_image(jpeg_evidence, str(event["id"]), f"{kind}_event.jpg")
                 return event
             logger.warning("[DeviceClient] Gửi sự kiện HTTP %d: %s", resp.status_code, resp.text[:240])
-            if resp.status_code >= 500 or resp.status_code == 429:
+            if queue_on_failure and (resp.status_code >= 500 or resp.status_code == 429):
                 with self._lock:
                     body["_evidence_jpeg"] = jpeg_evidence
                     self._outbox_events.append(body)
             return None
         except Exception as exc:
+            if not queue_on_failure:
+                return None
             logger.warning("[DeviceClient] Đứt mạng khi gửi sự kiện '%s' -> Xếp vào Outbox (%s).", kind, exc)
             with self._lock:
                 body["_evidence_jpeg"] = jpeg_evidence

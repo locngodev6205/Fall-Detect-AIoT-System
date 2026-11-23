@@ -187,7 +187,8 @@ class LocalReadinessTests(unittest.TestCase):
             (root / 'requirements.txt').write_text('runtime')
             runtime = SimpleNamespace(force_mock_hardware=False, last_camera_frame=0, last_safety_check=time.monotonic(),
                 model_inference_ok=True, local_danger=False, unreported_alert=False,
-                maintenance_until=0, update_lock=threading.RLock(), audio=SimpleNamespace(is_busy=lambda: False))
+                maintenance_until=0, update_lock=threading.RLock(), audio=SimpleNamespace(is_busy=lambda: False),
+                audio_worker=SimpleNamespace(is_busy=lambda: False))
             status = UpdateStatusServer(runtime, root)
             self.assertFalse(status.status()['healthy'])
             runtime.last_camera_frame = time.monotonic()

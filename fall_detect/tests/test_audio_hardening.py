@@ -164,7 +164,7 @@ class AudioHardeningTests(unittest.TestCase):
 
                 runtime = SimpleNamespace(
                     _stop_event=stop_io, device_token="fixture", bridge=Mock(),
-                    client=Mock(), bt=Mock(), streamer=Mock(), _observation="clear",
+                    client=Mock(), immobility_events=Mock(), bt=Mock(), streamer=Mock(), _observation="clear",
                     _camera_ok=True, force_mock_hardware=True, telemetry_interval_s=15,
                     _last_evidence_frame=(0.0, None),
                     heartbeat_interval_s=15, command_poll_interval_s=5, snapshot_interval_s=15,

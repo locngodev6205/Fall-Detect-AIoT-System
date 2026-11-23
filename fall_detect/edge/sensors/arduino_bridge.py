@@ -303,30 +303,15 @@ class ArduinoBridge:
                 conn.port = candidate
                 conn.open()
 
-                # Chờ READY tự nhiên sau DTR reset (~1.5s) trước khi gửi PING tránh chạm bootloader optiboot
-                deadline = time.monotonic() + 3.8
-                next_ping = time.monotonic() + 1.8
-                buf = bytearray()
-                ready = False
-                while time.monotonic() < deadline:
-                    chunk = conn.read(1)
-                    if chunk:
-                        if chunk == b"\n":
-                            line = bytes(buf).rstrip(b"\r").decode("utf-8", errors="ignore").strip()
-                            buf.clear()
-                            parsed = parse_sensor_line(line)
-                            if parsed is not None:
-                                self._record_sensor_data(parsed)
-                                ready = True
-                                break
-                            if line in ("READY", "PONG") or line.startswith("STATUS "):
-                                ready = True
-                                break
-                        elif len(buf) < 256:
-                            buf.extend(chunk)
-                    if time.monotonic() >= next_ping:
-                        conn.write(b"PING\n")
-                        next_ping = time.monotonic() + 0.6
+                ready = self._wait_for_handshake(conn)
+                if not ready and self._is_uno_at_115200(candidate):
+                    # Force CDC SET_LINE_CODING before resetting the Uno.
+                    conn.baudrate = 57600
+                    conn.baudrate = self.baudrate
+                    time.sleep(0.25)
+                    conn.reset_input_buffer()
+                    conn.dtr = True
+                    ready = self._wait_for_handshake(conn)
 
                 if ready:
                     with self._state_lock:
@@ -342,6 +327,36 @@ class ArduinoBridge:
                     except Exception:
                         pass
                 logger.debug("[ArduinoBridge] Bỏ qua cổng %s: %s", candidate, exc)
+        return False
+
+    def _is_uno_at_115200(self, candidate: str) -> bool:
+        return self.baudrate == 115200 and any(
+            info.vid == 0x2341 and info.pid == 0x0043
+            and os.path.realpath(info.device) == os.path.realpath(candidate)
+            for info in serial.tools.list_ports.comports()
+        )
+
+    def _wait_for_handshake(self, conn) -> bool:
+        # Give the bootloader time to start the sketch before sending PING.
+        deadline = time.monotonic() + 3.8
+        next_ping = time.monotonic() + 1.8
+        buf = bytearray()
+        while time.monotonic() < deadline:
+            chunk = conn.read(1)
+            if chunk == b"\n":
+                line = bytes(buf).decode("ascii", errors="replace").strip()
+                buf.clear()
+                parsed = parse_sensor_line(line)
+                if parsed is not None:
+                    self._record_sensor_data(parsed)
+                    return True
+                if line in ("READY", "PONG") or line.startswith("STATUS "):
+                    return True
+            elif chunk and len(buf) < 256:
+                buf.extend(chunk)
+            if time.monotonic() >= next_ping:
+                conn.write(b"PING\n")
+                next_ping = time.monotonic() + 0.6
         return False
 
     def _close_serial(self) -> None:
