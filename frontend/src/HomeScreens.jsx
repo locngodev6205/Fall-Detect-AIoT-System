@@ -87,6 +87,8 @@ export function Cameras() {
   </>;
 }
 
+const IMMOBILITY_TIMEOUT_SECONDS = [30, 120, 300, 600, 900];
+
 function makeCommandKey(prefix = 'cmd') {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -109,10 +111,12 @@ export function CameraDetail({ id }) {
     night_end: '06:00',
   });
   const [modesBusy, setModesBusy] = useState(false);
+  const [minutesDraft, setMinutesDraft] = useState('10');
 
   useEffect(() => {
     if (modesResource.data?.smart_modes) {
       setModesDraft(modesResource.data.smart_modes);
+      setMinutesDraft(String((modesResource.data.smart_modes.immobility_timeout_seconds ?? 600) / 60));
     }
   }, [modesResource.data]);
 
@@ -167,7 +171,13 @@ export function CameraDetail({ id }) {
     saveSmartModes(next, `${checked ? 'Đã bật' : 'Đã tắt'} ${label}.`);
   }
 
-  return <><Heading title={camera.name} text={`Kết nối cuối: ${dateTime(camera.last_seen)}`}/><CameraImage camera={camera} roomName={rooms.find(room => room.id === camera.room_id)?.name}/>
+  const timeoutMinutes = Number(minutesDraft);
+  const timeoutSeconds = timeoutMinutes * 60;
+  const validTimeout = minutesDraft.trim() !== '' && Number.isFinite(timeoutMinutes) && IMMOBILITY_TIMEOUT_SECONDS.includes(timeoutSeconds);
+
+  return <><Heading title={camera.name} text={`Kết nối cuối: ${dateTime(camera.last_seen)}`}/>
+    {can(camera, 'audio') && <section className="panel camera-live-audio-panel"><LiveAudio cameraId={id} disabled={!camera.online}/></section>}
+    <CameraImage camera={camera} roomName={rooms.find(room => room.id === camera.room_id)?.name}/>
     <div className="notice">Luồng hình chỉ hiển thị trực tiếp khi đang nhận frame mới từ thiết bị. Khi luồng gián đoạn, giao diện chuyển sang ảnh gần nhất và giữ thời điểm nhận để tránh nhầm với tình hình hiện tại.</div>
     <div className="two-grid">
       <section className="panel ptz-panel">
@@ -221,17 +231,6 @@ export function CameraDetail({ id }) {
             <input type="checkbox" checked={modesDraft.immobility_detection !== false} disabled={!canEditModes || modesBusy || !modesResource.data}
               onChange={e => toggleMode('immobility_detection', e.target.checked, 'phát hiện bất động kéo dài')}/>
           </label>
-          <Field label="Thời gian bất động trước khi cảnh báo">
-            <select value={modesDraft.immobility_timeout_seconds ?? 600}
-              disabled={!canEditModes || modesBusy || !modesResource.data || modesDraft.immobility_detection === false}
-              onChange={e => saveSmartModes({ ...modesDraft, immobility_timeout_seconds: Number(e.target.value) })}>
-              <option value={30}>30 giây</option>
-              <option value={120}>2 phút</option>
-              <option value={300}>5 phút</option>
-              <option value={600}>10 phút</option>
-              <option value={900}>15 phút</option>
-            </select>
-          </Field>
           <label className="smart-mode-item">
             <span className="smart-mode-info">
               <strong><Eye/>Tự động xoay Servo bám người</strong>
@@ -257,6 +256,23 @@ export function CameraDetail({ id }) {
               onChange={e => toggleMode('night_mode_enabled', e.target.checked, 'Chế độ ban đêm yên tĩnh')}/>
           </label>
         </div>
+        {modesDraft.immobility_detection !== false && <form className="immobility-minutes-form" onSubmit={e => {
+          e.preventDefault();
+          if (validTimeout) saveSmartModes({ ...modesDraft, immobility_timeout_seconds: timeoutSeconds }, 'Đã cập nhật thời gian bất động.');
+        }}>
+          <label htmlFor="immobility-minutes">Thời gian bất động trước khi cảnh báo</label>
+          <div className="immobility-minutes-row">
+            <div className="immobility-minutes-control">
+              <input id="immobility-minutes" type="number" min="0.5" max="15" step="any" inputMode="decimal"
+                value={minutesDraft} onChange={e => setMinutesDraft(e.target.value)}
+                disabled={!canEditModes || modesBusy || !modesResource.data} required aria-describedby="immobility-minutes-hint"/>
+              <span>phút</span>
+            </div>
+            {canEditModes && <Button kind="secondary-btn" type="submit"
+              disabled={modesBusy || !modesResource.data || !validTimeout || timeoutSeconds === (modesDraft.immobility_timeout_seconds ?? 600)}>Lưu thời gian</Button>}
+          </div>
+          <small id="immobility-minutes-hint">Hiện hỗ trợ 0,5; 2; 5; 10 hoặc 15 phút.</small>
+        </form>}
         {modesDraft.night_mode_enabled && <form className="night-window-form" onSubmit={e => { e.preventDefault(); saveSmartModes(modesDraft, 'Đã cập nhật khung giờ ban đêm.'); }}>
           <Field label="Giờ bắt đầu đêm"><input type="time" value={modesDraft.night_start || '22:00'} disabled={!canEditModes || modesBusy} onChange={e => setModesDraft({ ...modesDraft, night_start: e.target.value })} required/></Field>
           <Field label="Giờ kết thúc đêm"><input type="time" value={modesDraft.night_end || '06:00'} disabled={!canEditModes || modesBusy} onChange={e => setModesDraft({ ...modesDraft, night_end: e.target.value })} required/></Field>
@@ -267,7 +283,7 @@ export function CameraDetail({ id }) {
 
     {can(camera, 'manage') && <DeviceUpdates cameraId={id}/>}
 
-    <div className="two-grid spaced"><section className="panel"><h2>Tình trạng giám sát</h2><p>Quan sát: {camera.online ? observationNames[camera.observation] || 'Chưa có quan sát' : 'Chưa nhận quan sát mới'}</p><p>Cấu hình: {camera.applied_version}/{camera.desired_version} · {statusNames[camera.sync_status]}</p>{camera.config_error && <p role="alert">{camera.config_error}</p>}</section><section className="panel"><h2>Kết nối với người thân &amp; Loa Bluetooth</h2><p>Quét, ghép đôi loa Bluetooth tại phòng và gửi lời nhắn hoặc đàm thoại trực tiếp.</p><BluetoothSpeakerCard cameraId={id} canControl={canControlPtz}/><div className="actions">{can(camera, 'audio') && <Button onClick={() => go('/reminders/send?camera=' + id)}><SpeakerHigh/>Gửi âm thanh</Button>}<a className="button secondary-btn" href="#/environment">Xem môi trường</a></div>{can(camera, 'audio') && <LiveAudio cameraId={id} disabled={!camera.online}/>}</section></div>
+    <div className="two-grid spaced"><section className="panel"><h2>Tình trạng giám sát</h2><p>Quan sát: {camera.online ? observationNames[camera.observation] || 'Chưa có quan sát' : 'Chưa nhận quan sát mới'}</p><p>Cấu hình: {camera.applied_version}/{camera.desired_version} · {statusNames[camera.sync_status]}</p>{camera.config_error && <p role="alert">{camera.config_error}</p>}</section><section className="panel"><h2>Kết nối với người thân &amp; Loa Bluetooth</h2><p>Quét, ghép đôi loa Bluetooth tại phòng và gửi lời nhắn hoặc đàm thoại trực tiếp.</p><BluetoothSpeakerCard cameraId={id} canControl={canControlPtz}/><div className="actions">{can(camera, 'audio') && <Button onClick={() => go('/reminders/send?camera=' + id)}><SpeakerHigh/>Gửi âm thanh</Button>}<a className="button secondary-btn" href="#/environment">Xem môi trường</a></div></section></div>
   </>;
 }
 
