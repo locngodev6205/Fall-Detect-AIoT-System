@@ -8,6 +8,7 @@ Mô tả:
   thuật toán phát hiện té ngã và cơ chế giám sát nằm bất động kéo dài.
 """
 
+import math
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ class DetectionResult:
     is_alert_active: bool     # True nếu đang trong thời gian hiển thị cảnh báo ngã
     immobile_duration: float  # Số giây đối tượng đang nằm bất động liên tục
     person_present: bool = False  # True nếu phát hiện có người trong khung hình
+    inference_valid: bool = False
 
 
 class FallDetector:
@@ -139,6 +141,7 @@ class FallDetector:
         # 3. Phán đoán mô hình khi bộ đệm đủ 30 frames
         label = "no_fall"
         raw_fall_prob = 0.0
+        inference_valid = False
         confidence = 0.0
         is_fall = False
         status_text = "Collecting data..."
@@ -152,6 +155,7 @@ class FallDetector:
                 self.interpreter.invoke()
                 output_tensor = self.interpreter.get_tensor(self.output_details[0]['index'])
                 raw_fall_prob = float(output_tensor[0][0])
+                inference_valid = math.isfinite(raw_fall_prob) and 0.0 <= raw_fall_prob <= 1.0
 
                 if raw_fall_prob >= self.confidence_threshold:
                     label = "fall"
@@ -190,5 +194,6 @@ class FallDetector:
             is_fall=is_fall,
             is_alert_active=is_alert_active,
             immobile_duration=immobile_duration,
-            person_present=True
+            person_present=True,
+            inference_valid=inference_valid,
         )

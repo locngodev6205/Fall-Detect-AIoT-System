@@ -754,6 +754,8 @@ class AnNhaEdgeRuntime:
         current_fps = 0.0
         last_log_ts = time.monotonic()
         failed_reads = 0
+        last_fall_log = float("-inf")
+        was_above_threshold = False
 
         try:
             with mp_pose.Pose(
@@ -767,6 +769,7 @@ class AnNhaEdgeRuntime:
                     ok, frame = cap.read()
                     if not ok or frame is None or getattr(frame, "size", 0) == 0:
                         self._camera_unavailable()
+                        was_above_threshold = False
                         failed_reads += 1
                         if failed_reads >= 5:
                             logger.warning("[Vision] Camera stopped delivering frames; rediscovering.")
@@ -829,13 +832,39 @@ class AnNhaEdgeRuntime:
                         moved=bool(tracking and tracking.get("moved")), frame=frame,
                     )
 
-                    if detector is not None and self.tracker.is_fall_detection_enabled():
+                    fall_result = None
+                    feats = None
+                    fall_enabled = self.tracker.is_fall_detection_enabled()
+                    if detector is not None and fall_enabled:
                         try:
                             feats = extract_and_normalize_features(pose_res.pose_landmarks) if present else None
-                            detector.update(feats, person_present=present)
+                            fall_result = detector.update(feats, person_present=present)
                         except Exception as exc:
                             self.model_inference_ok = False
                             logger.warning("[Vision] Lỗi FallDetector: %s", exc)
+
+                    fall_prob = (
+                        fall_result.raw_fall_prob if fall_result is not None and fall_result.inference_valid else None
+                    )
+                    above_threshold = fall_prob is not None and fall_result.is_fall
+                    crossed_threshold = above_threshold and not was_above_threshold
+                    fall_percent = "N/A" if fall_prob is None else f"{fall_prob:.1%}"
+                    if crossed_threshold or now_m - last_fall_log >= 1.0:
+                        buffered = len(detector.sequence_buffer) if detector is not None else 0
+                        cooldown = detector.event_cooldown if detector is not None else fd_cfg.FALL_EVENT_COOLDOWN
+                        last_alert = detector.last_fall_event_time if detector is not None else 0.0
+                        remaining = min(cooldown, max(0.0, last_alert + cooldown - time.time())) if last_alert else 0.0
+                        state = "N/A" if fall_prob is None else ("FALL" if above_threshold else "NORMAL")
+                        logger.info(
+                            "[FallDetection] raw_prob=%s threshold=%.6f state=%s pose_valid=%s buffer=%d/%d "
+                            "cooldown_remaining_s=%.2f cooldown_s=%s enabled=%s threshold_crossed=%s",
+                            "N/A" if fall_prob is None else f"{fall_prob:.6f}",
+                            detector.confidence_threshold if detector is not None else fd_cfg.FALL_CONFIDENCE_THRESHOLD,
+                            state, present, buffered, fd_cfg.INPUT_TIMESTEPS,
+                            remaining, cooldown, fall_enabled, crossed_threshold,
+                        )
+                        last_fall_log = now_m
+                    was_above_threshold = above_threshold
 
                     # 1. Vẽ khung xương MediaPipe lên khung hình khi phát hiện người
                     if self.show_landmarks and present and pose_res.pose_landmarks and mp_drawing and mp_styles:
@@ -850,9 +879,15 @@ class AnNhaEdgeRuntime:
                             pass
 
                     # 2. Vẽ OSD hiển thị FPS, trạng thái và góc Servo góc dưới bên phải (vùng tối)
-                    osd_text = f"FPS: {current_fps:4.1f} | Pan: {pan_val}d | Tilt: {tilt_val}d"
+                    osd_text = (
+                        f"FPS: {current_fps:4.1f} | Pan: {pan_val}d | Tilt: {tilt_val}d | P(Fall): {fall_percent}"
+                    )
                     h_f, w_f = frame.shape[:2]
-                    box_w, box_h = 320, 32
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    font_scale = 0.55
+                    text_w = cv2.getTextSize(osd_text, font, font_scale, 1)[0][0]
+                    box_w, box_h = min(text_w + 24, w_f - 25), 32
+                    font_scale *= min(1.0, (box_w - 24) / text_w)
                     bx1, by1 = max(10, w_f - box_w - 15), max(10, h_f - box_h - 15)
                     cv2.rectangle(frame, (bx1, by1), (bx1 + box_w, by1 + box_h), (18, 28, 36), -1)
                     cv2.rectangle(frame, (bx1, by1), (bx1 + box_w, by1 + box_h), (0, 230, 150), 1)
@@ -860,8 +895,8 @@ class AnNhaEdgeRuntime:
                         frame,
                         osd_text,
                         (bx1 + 12, by1 + 22),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.55,
+                        font,
+                        font_scale,
                         (0, 255, 180),
                         1,
                         cv2.LINE_AA,
