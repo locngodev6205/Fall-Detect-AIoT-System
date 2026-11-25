@@ -288,6 +288,9 @@ class AnNhaEdgeRuntime:
         self.local_danger = False
         self.unreported_alert = False
         self.model_inference_ok = False
+        self._temporal_fall = None
+        self._fall_model = os.getenv("ANNHA_FALL_MODEL", "legacy_tflite")
+        self._fall_model_attempted = False
         self.show_landmarks = True
         self.update_status = UpdateStatusServer(self, FALL_DETECT_DIR)
         self._stop_event = threading.Event()
@@ -727,7 +730,22 @@ class AnNhaEdgeRuntime:
             )
 
         detector = None
-        if os.path.exists(model_path):
+        if self._fall_model != "legacy_tflite":
+            from modules.temporal_fall import MODELS, TemporalFall
+
+            if not self._fall_model_attempted:
+                self._fall_model_attempted = True
+                try:
+                    self._temporal_fall = TemporalFall(self._fall_model, os.environ["ANNHA_FALL_ONNX"])
+                    logger.info("[Vision] Fall model active: %s", self._fall_model)
+                except Exception:
+                    logger.exception("[Vision] Fall model unavailable: %s", self._fall_model)
+            if self._temporal_fall is not None:
+                self._temporal_fall.reset()
+            pose_complexity = MODELS.get(self._fall_model, (0, None))[0]
+        else:
+            pose_complexity = 0
+        if self._fall_model == "legacy_tflite" and os.path.exists(model_path):
             try:
                 detector = FallDetector(
                     model_path=model_path,
@@ -758,7 +776,7 @@ class AnNhaEdgeRuntime:
         try:
             with mp_pose.Pose(
                 static_image_mode=False,
-                model_complexity=0,
+                model_complexity=pose_complexity,
                 smooth_landmarks=True,
                 min_detection_confidence=0.5,
                 min_tracking_confidence=0.5,
@@ -767,6 +785,8 @@ class AnNhaEdgeRuntime:
                     ok, frame = cap.read()
                     if not ok or frame is None or getattr(frame, "size", 0) == 0:
                         self._camera_unavailable()
+                        if self._temporal_fall is not None:
+                            self._temporal_fall.reset()
                         failed_reads += 1
                         if failed_reads >= 5:
                             logger.warning("[Vision] Camera stopped delivering frames; rediscovering.")
@@ -829,7 +849,24 @@ class AnNhaEdgeRuntime:
                         moved=bool(tracking and tracking.get("moved")), frame=frame,
                     )
 
-                    if detector is not None and self.tracker.is_fall_detection_enabled():
+                    fall_enabled = self.tracker.is_fall_detection_enabled()
+                    if self._temporal_fall is not None:
+                        try:
+                            if not self.model_inference_ok:
+                                self._temporal_fall.probe()
+                                self.model_inference_ok = True
+                            if fall_enabled:
+                                if self._temporal_fall.update(
+                                    self.last_camera_frame, pose_res.pose_landmarks, _on_fall,
+                                ):
+                                    self.model_inference_ok = True
+                            elif self._temporal_fall.stream.last_stamp is not None:
+                                self._temporal_fall.reset()
+                        except Exception:
+                            self.model_inference_ok = False
+                            logger.exception("[Vision] Temporal Fall frame failed")
+
+                    if detector is not None and fall_enabled:
                         try:
                             feats = extract_and_normalize_features(pose_res.pose_landmarks) if present else None
                             detector.update(feats, person_present=present)
