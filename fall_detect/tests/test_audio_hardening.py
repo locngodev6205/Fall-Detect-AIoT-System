@@ -164,7 +164,7 @@ class AudioHardeningTests(unittest.TestCase):
 
                 runtime = SimpleNamespace(
                     _stop_event=stop_io, device_token="fixture", bridge=Mock(),
-                    client=Mock(), immobility_events=Mock(), bt=Mock(), streamer=Mock(), _observation="clear",
+                    client=Mock(device_token="fixture"), immobility_events=Mock(), bt=Mock(), streamer=Mock(), _observation="clear",
                     _camera_ok=True, force_mock_hardware=True, telemetry_interval_s=15,
                     _last_evidence_frame=(0.0, None),
                     heartbeat_interval_s=15, command_poll_interval_s=5, snapshot_interval_s=15,
@@ -179,7 +179,10 @@ class AudioHardeningTests(unittest.TestCase):
                 runtime.bt.get_status.return_value = {"mode": "bluetooth", "ready": True}
                 clock = Mock()
                 clock.monotonic.side_effect = [0, 10] + [10] * 30
-                io = threading.Thread(target=main_edge.AnNhaEdgeRuntime._background_io_loop, args=(runtime,))
+                io = threading.Thread(
+                    target=main_edge.AnNhaEdgeRuntime._background_io_loop,
+                    args=(runtime, runtime.client, runtime.streamer, runtime.immobility_events),
+                )
                 with patch.object(main_edge, "time", clock):
                     io.start()
                     try:
@@ -190,7 +193,7 @@ class AudioHardeningTests(unittest.TestCase):
                             scheduler=SimpleNamespace(evaluate_due=lambda: results.extend(
                                 scheduler.evaluate_due(start + timedelta(seconds=elapsed)))),
                         )
-                        main_edge.AnNhaEdgeRuntime._reminder_loop(reminder_runtime)
+                        main_edge.AnNhaEdgeRuntime._reminder_loop(reminder_runtime, reminder_runtime.scheduler)
                         self.assertEqual([result["status"] for result in results], ["played"])
                         self.assertTrue(io.is_alive())
                     finally:

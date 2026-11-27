@@ -156,6 +156,8 @@ class DeviceClient:
         self._prefetch = ThreadPoolExecutor(max_workers=1, thread_name_prefix="annha-assets")
         self._asset_job: Future | None = None
         self._asset_index = 0
+        self.on_event_accepted: Callable[[str], None] = lambda _event_id: None
+        self._cached_config_deferred = False
         self._config_ack: tuple[int, str] | None = None
         self._stopping = threading.Event()
         self._lock = threading.Lock()
@@ -220,6 +222,7 @@ class DeviceClient:
             try:
                 callback(self.current_config)
             except Exception as exc:
+                self._cached_config_deferred = True
                 logger.warning("[DeviceClient] Lỗi áp dụng config cache ban đầu: %s", exc)
 
     def set_command_handler(self, handler: Callable[[dict[str, Any]], tuple[bool, str] | Future]) -> None:
@@ -262,6 +265,9 @@ class DeviceClient:
 
     def _config_cache_file(self) -> Path:
         return self.cache_dir / "device_config.json"
+
+    def config_cached_at(self) -> int:
+        return self._config_cache_file().stat().st_mtime_ns
 
     def _load_cached_config(self) -> dict[str, Any]:
         cfg_file = self._config_cache_file()
@@ -315,7 +321,7 @@ class DeviceClient:
                 return None
             result = resp.json()
             desired = int(result.get("desired_version") or 0)
-            if desired > self.applied_version or (desired >= 1 and not self.current_config):
+            if self._cached_config_deferred or desired > self.applied_version or (desired >= 1 and not self.current_config):
                 self.sync_config()
             else:
                 self._sync_asset_readiness()
@@ -344,6 +350,13 @@ class DeviceClient:
             cfg = resp.json()
             version = int(cfg.get("version") or 0)
 
+            cached_version = int(self.current_config.get("version") or 0)
+            if version < cached_version:
+                return self.current_config
+            if self.current_config and version == cached_version and not self._cached_config_deferred:
+                self._sync_asset_readiness()
+                return self.current_config
+
             errors: list[str] = []
             for listener in self._config_listeners:
                 try:
@@ -366,6 +379,7 @@ class DeviceClient:
 
             self._save_cached_config(cfg)
             self.current_config = cfg
+            self._cached_config_deferred = False
             self._sync_asset_readiness()
             return cfg
         except Exception as exc:
@@ -471,6 +485,7 @@ class DeviceClient:
         observed_at: str | None = None,
         queue_on_failure: bool = True,
         detection: dict[str, Any] | None = None,
+        defer: bool = False,
     ) -> dict[str, Any] | None:
         if not self._valid_event_jpeg(jpeg_evidence):
             jpeg_evidence = None
@@ -493,10 +508,17 @@ class DeviceClient:
         if detection is not None:
             body["detection"] = detection
 
+        if defer:
+            with self._lock:
+                self._outbox_events.append({**body, "_evidence_jpeg": jpeg_evidence})
+            return None
+
         try:
             resp = self._request("POST", "/api/device/events", json_body=body)
             if resp.status_code in (200, 201):
                 event = resp.json()
+                if event.get("id"):
+                    self.on_event_accepted(src_id)
                 if jpeg_evidence and event.get("id"):
                     self._send_event_image(jpeg_evidence, str(event["id"]), f"{kind}_event.jpg")
                 return event
@@ -553,6 +575,10 @@ class DeviceClient:
             if path.is_file() and not path.is_symlink() and path.stat().st_size > 0:
                 return path
         return None
+
+    def cached_audio_asset(self, asset_id: str) -> Path | None:
+        """Resolve from this backend's cache without network IO on the audio worker."""
+        return self._cached_asset(asset_id)
 
     def ensure_asset_cached(self, asset_id: str) -> Path | None:
         """Tải file âm thanh từ backend vào bộ nhớ đệm cục bộ."""
@@ -781,10 +807,12 @@ class DeviceClient:
             jpeg = item.pop("_evidence_jpeg", None)
             try:
                 r = self._request("POST", "/api/device/events", json_body=item)
-                if r.status_code in (200, 201) and jpeg:
+                if r.status_code in (200, 201):
                     event = r.json()
                     if event.get("id"):
-                        self._send_event_image(jpeg, str(event["id"]), f'{item["kind"]}_event.jpg')
+                        self.on_event_accepted(item["event_id"])
+                        if jpeg:
+                            self._send_event_image(jpeg, str(event["id"]), f'{item["kind"]}_event.jpg')
                 if r.status_code >= 500 or r.status_code == 429:
                     item["_evidence_jpeg"] = jpeg
                     with self._lock:

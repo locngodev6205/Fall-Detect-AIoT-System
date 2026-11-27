@@ -100,13 +100,94 @@ class Updater:
         self.config = json.loads((self.shared / 'updater.json').read_text())
         self.base = validate_backend_url(self.config['backend_url'])
         self.token = self.config['device_token']
+        self.primary = self.base, self.token
+        self._cycle = 0
+        self._multiple = False
+        self._origin_unavailable = False
         self.journal = self.shared / 'update-journal.json'
         self.previous_file = self.shared / 'previous.json'
         self.socket = str(self.shared / 'update.sock')
         self.lock = (self.shared / 'updater.lock').open('a')
         fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
+    def _backend_2(self):
+        env_file = self.shared / 'app.env'
+        if not env_file.exists():
+            return None
+        values = {}
+        for line in env_file.read_text().splitlines():
+            key, sep, value = line.strip().partition('=')
+            if sep and key.startswith('ANNHA_BACKEND_2_'):
+                values[key.strip()] = value.strip().strip('"').strip("'")
+        if values.get('ANNHA_BACKEND_2_ENABLED', '').lower() != 'true':
+            return None
+        base = validate_backend_url(values.get('ANNHA_BACKEND_2_BASE_URL', ''))
+        token = values.get('ANNHA_BACKEND_2_DEVICE_TOKEN', '')
+        pairing = self.shared / '.env.edge.pairing-backend-2-app.env.json'
+        if not token and pairing.exists():
+            state = json.loads(pairing.read_text())
+            if state['base_url'] != base:
+                raise ValueError('Ghép nối OTA thứ hai thuộc backend khác')
+            if state.get('paired'):
+                token = state['token']
+        if not token:
+            return None
+        if base.lower() == self.primary[0].lower() or token == self.primary[1]:
+            raise ValueError('OTA yêu cầu địa chỉ và token riêng cho hai backend')
+        return base, token
+
+    @staticmethod
+    def _origin(backend):
+        base, token = backend
+        return hashlib.sha256((base + '\0' + token).encode()).hexdigest()
+
+    def run_cycle(self):
+        """Keep the OTA lock and journal global, but route each job to its owning backend."""
+        try:
+            secondary = self._backend_2()
+        except (OSError, ValueError, KeyError) as exc:
+            LOG.warning('Backend OTA thứ hai chưa sẵn sàng (%s)', type(exc).__name__)
+            secondary = None
+        backends = (self.primary, secondary) if secondary else (self.primary,)
+        self._multiple = secondary is not None
+        if self.journal.exists():
+            origin = json.loads(self.journal.read_text()).get('origin')
+            owner = next((backend for backend in backends if origin == self._origin(backend)), None)
+            if origin and owner is None:
+                # Local recovery still runs, and the result remains pending for the original backend.
+                self.base, self.token = self.primary
+                self._origin_unavailable = True
+                try:
+                    self.recover()
+                finally:
+                    self._origin_unavailable = False
+                return
+            self.base, self.token = owner or self.primary
+            self.recover()
+        if self._cycle % 2:
+            backends = backends[::-1]
+        self._cycle += 1
+        idle = True
+        for self.base, self.token in backends:
+            try:
+                installed = self.tick(cleanup=len(backends) == 1)
+                idle = idle and installed is False
+                if installed:
+                    # One installation per cycle. The other backend is first on the next turn.
+                    return
+            except Exception as exc:
+                idle = False
+                LOG.warning('Update cycle failed (%s)', type(exc).__name__)
+                if self.journal.exists():
+                    return
+        if self._multiple and idle:
+            self.cleanup()
+
     def request(self, path, body=None):
+        if getattr(self, '_origin_unavailable', False):
+            raise TemporaryNetworkError('Backend nguồn của phiên OTA chưa sẵn sàng')
+        if getattr(self, '_multiple', False) and path in ('job', 'heartbeat'):
+            return self.request_once(path, body, timeout=3)
         for attempt in range(3):
             try:
                 return self.request_once(path, body)
@@ -143,6 +224,8 @@ class Updater:
 
     def report_phase(self, job, status, message=''):
         # Status hints must not delay local health checks or recovery.
+        if getattr(self, '_origin_unavailable', False):
+            return
         try:
             self.request_once(job['id'] + '/progress',
                               {'status': status, 'message': message}, timeout=1)
@@ -329,6 +412,8 @@ class Updater:
         if old == 'unmanaged':
             raise ValueError('Cần cài nền cập nhật trước khi dùng OTA')
         journal = {'job': job, 'old': old, 'phase': 'claim_pending'}
+        if hasattr(self, 'base') and hasattr(self, 'token'):
+            journal['origin'] = self._origin((self.base, self.token))
         atomic_json(self.journal, journal)
         try:
             self.report(job, 'installing')
@@ -370,14 +455,15 @@ class Updater:
             else:
                 path.unlink(missing_ok=True)
 
-    def tick(self):
+    def tick(self, *, cleanup=True):
         self.recover()
         local = self.heartbeat()
         offer = self.request('job')
         job = offer.get('job')
         if not job:
-            self.cleanup()
-            return
+            if cleanup:
+                self.cleanup()
+            return False
         if job['status'] in ('installing', 'health_check', 'rolling_back'):
             raise RuntimeError('Job đang cài nhưng thiếu journal. Cần kiểm tra thiết bị.')
         if job['status'] in ('pending', 'downloading'):
@@ -399,6 +485,9 @@ class Updater:
         if offer['blocked'] or not local.get('ready'):
             self.report(job, 'deferred', 'Còn cảnh báo đang xử lý' if offer['blocked'] else local.get('reason', 'Thiết bị đang bận'))
             return
+        if getattr(self, '_multiple', False) and job['status'] in ('ready', 'deferred'):
+            # A version may have been staged by the other backend. Verify against this job's manifest again.
+            self.prepare(job, local)
         prepared = self.local('prepare')
         if not prepared.get('prepared'):
             self.report(job, 'deferred', prepared.get('reason', 'Thiết bị đang bận'))
@@ -411,11 +500,12 @@ class Updater:
                 self.local('resume')
             except OSError:
                 pass
+        return True
 
     def run(self):
         while True:
             try:
-                self.tick()
+                self.run_cycle()
             except Exception as exc:
                 LOG.warning('Update cycle failed (%s)', type(exc).__name__)
             time.sleep(10)

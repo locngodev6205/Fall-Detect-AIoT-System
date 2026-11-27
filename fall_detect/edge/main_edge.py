@@ -34,6 +34,7 @@ import signal
 import sys
 import threading
 import time
+import uuid
 from typing import Any
 import warnings
 
@@ -71,7 +72,7 @@ from edge.immobility_events import ImmobilityEvents
 from modules.immobility import ImmobilityDetector, Reading, State, image_points, torso_diagnostics
 from edge.update_status import UpdateStatusServer, maintenance_guard
 from edge.camera_discovery import normalize_camera_id, open_working_camera  # noqa: E402
-from edge.pairing import pair_device  # noqa: E402
+from edge.pairing import pair_device, secondary_pairing_path, secondary_credentials  # noqa: E402
 from edge.sensors.arduino_bridge import ArduinoBridge  # noqa: E402
 from edge.tracking.pan_tilt_tracker import PanTiltTracker  # noqa: E402
 
@@ -209,6 +210,7 @@ class AnNhaEdgeRuntime:
         tb_port: int = 1883,
         tb_token: str = "",
         cache_dir: Path | None = None,
+        backend_2: tuple[str, str] | None = None,
         force_mock_hardware: bool = False,
     ) -> None:
         self.base_url = base_url.rstrip("/")
@@ -261,7 +263,7 @@ class AnNhaEdgeRuntime:
         self.scheduler = ReminderScheduler(
             self.audio,
             cache_dir=self.cache_dir,
-            asset_resolver=self.client.ensure_asset_cached,
+            asset_resolver=self.client.cached_audio_asset if backend_2 else self.client.ensure_asset_cached,
             execution_reporter=self.client.report_execution,
             execution_started=self.client.begin_execution,
             submit_audio=self.audio_worker.submit,
@@ -307,10 +309,68 @@ class AnNhaEdgeRuntime:
         self._immobility_next_log: dict[str, float] = {}
         self._workers: list[threading.Thread] = []
 
-        self.client.on_config_updated(self._on_config_updated)
-        self.client.set_command_handler(self._on_web_command)
+        self._pending_falls: set[tuple[DeviceClient, str]] = set()
+        self._alert_lock = threading.Lock()
+        self._backends = [(self.client, self.scheduler, self.streamer, self.immobility_events)]
+        if backend_2:
+            url, token = backend_2
+            identity = hashlib.sha256(f"{url.rstrip('/')}/{token}".encode()).hexdigest()[:24]
+            isolated_cache = self.cache_dir / "backends" / identity
+            client = DeviceClient(url, token, cache_dir=isolated_cache)
+            scheduler = ReminderScheduler(
+                self.audio, cache_dir=isolated_cache,
+                asset_resolver=client.cached_audio_asset,
+                execution_reporter=client.report_execution,
+                execution_started=client.begin_execution,
+                submit_audio=self.audio_worker.submit,
+            )
+            streamer = LiveStreamer(url, token, fps_limit=live_fps, start_ptt=self._start_ptt,
+                                    finish_ptt=self.audio.finish_live_stream)
+            self._backends.append((client, scheduler, streamer, ImmobilityEvents()))
+        def cached_at(lane):
+            try:
+                return lane[0].config_cached_at()
+            except OSError:
+                return 0
 
-    def _on_config_updated(self, cfg: dict[str, Any]) -> None:
+        # Apply cached hardware settings in the order in which Edge saved them.
+        for client, scheduler, _, _ in sorted(self._backends, key=cached_at):
+            client.on_event_accepted = lambda event_id, origin=client: self._event_accepted(origin, event_id)
+            client.on_config_updated(lambda cfg, own=scheduler: self._apply_backend_config(cfg, own))
+            client.set_command_handler(lambda cmd, origin=client: self._dispatch_backend_command(cmd, origin))
+
+    def _event_accepted(self, client: DeviceClient, event_id: str) -> None:
+        with self._alert_lock:
+            key = (client, event_id)
+            if key in self._pending_falls:
+                self._pending_falls.remove(key)
+                self.unreported_alert = bool(self._pending_falls)
+
+    def _send_backend_event(self, **event: Any) -> dict[str, Any] | None:
+        if len(self._backends) == 1:
+            return self.client.send_event(**event) if self.device_token else None
+        event_id = event["event_id"] = f'{event["kind"]}-{uuid.uuid4().hex}'
+        clients = [client for client, _, _, _ in self._backends if client.device_token]
+        if event["kind"] == "fall":
+            with self._alert_lock:
+                self._pending_falls.update((client, event_id) for client in clients)
+                self.unreported_alert = True
+        for client in clients:
+            client.send_event(**event, defer=True)
+        return None
+
+    def _publish_frame(self, jpeg: bytes | None) -> None:
+        for _, _, streamer, _ in self._backends:
+            if jpeg is None:
+                streamer.clear_frame()
+            else:
+                streamer.update_frame_jpeg(jpeg)
+
+    def _apply_backend_config(self, cfg: dict[str, Any], scheduler: ReminderScheduler) -> None:
+        with self.update_lock:
+            self._on_config_updated(cfg, scheduler)
+
+    def _on_config_updated(self, cfg: dict[str, Any], scheduler: ReminderScheduler | None = None) -> None:
         modes = cfg.get("smart_modes")
         threshold = modes.get("fall_confidence_threshold", self._default_fall_threshold) if isinstance(modes, dict) else self._default_fall_threshold
         if type(threshold) not in (int, float) or not 0 <= threshold <= 1:
@@ -331,7 +391,7 @@ class AnNhaEdgeRuntime:
             settings = (enabled, seconds)
         self.tracker.update_smart_modes(modes)
         self.show_landmarks = modes.get("show_landmarks", True) is not False if isinstance(modes, dict) else True
-        self.scheduler.apply_config(cfg)
+        (scheduler or self.scheduler).apply_config(cfg)
         env = cfg.get("environment")
         if isinstance(env, dict):
             self._env_thresholds.update(env)
@@ -344,13 +404,26 @@ class AnNhaEdgeRuntime:
             if self._fall_detector is not None:
                 self._fall_detector.confidence_threshold = self._fall_threshold
 
+    def _dispatch_backend_command(self, cmd: dict[str, Any], client: DeviceClient):
+        if len(self._backends) > 1 and cmd.get("kind") == "play_audio":
+            asset_id = str((cmd.get("payload") or {}).get("asset_id") or "").strip()
+            if asset_id:
+                # Resolve on the origin's IO worker, outside the shared hardware lock.
+                client.ensure_asset_cached(asset_id)
+        result = self._on_web_command(cmd, client)
+        if cmd.get("kind") in ("bt_scan", "bt_connect", "bt_disconnect") and len(result) == 3:
+            ok, detail, report = result
+            client.send_bluetooth_state(report)
+            return ok, detail
+        return result
+
     @maintenance_guard
-    def _on_web_command(self, cmd: dict[str, Any]) -> tuple[bool, str] | Future:
+    def _on_web_command(self, cmd: dict[str, Any], client: DeviceClient | None = None) -> tuple[bool, str] | tuple[bool, str, dict] | Future:
         kind = str(cmd.get("kind") or "")
         if kind in ("ptz_move", "ptz_center"):
             return self.tracker.execute_ptz_command(cmd)
         if kind in ("play_audio", "test_speaker"):
-            future = self.audio_worker.submit(self._play_audio_command, cmd)
+            future = self.audio_worker.submit(self._play_audio_command, cmd, client)
             return future if future is not None else (False, "Hàng đợi âm thanh đã đầy.")
         if kind == "silence":
             return self.audio.execute_audio_command(cmd)
@@ -360,14 +433,13 @@ class AnNhaEdgeRuntime:
             return self._execute_bluetooth_command(cmd)
         return False, f"Không hỗ trợ loại lệnh: {kind!r}"
 
-    def _execute_bluetooth_command(self, cmd: dict[str, Any]) -> tuple[bool, str]:
+    def _execute_bluetooth_command(self, cmd: dict[str, Any]) -> tuple[bool, str] | tuple[bool, str, dict]:
         kind = str(cmd.get("kind") or "")
         payload = cmd.get("payload") or {}
         if kind == "bt_scan":
             devices = self.bt.scan_devices(duration_s=4.5)
             report = self.bt.get_bluetooth_report(devices_override=devices)
-            self.client.send_bluetooth_state(report)
-            return True, f"Đã quét tìm thấy {len(devices)} thiết bị Bluetooth"
+            return True, f"Đã quét tìm thấy {len(devices)} thiết bị Bluetooth", report
         if kind == "bt_connect":
             addr = str(payload.get("bt_address") or "").strip()
             name = str(payload.get("bt_name") or "").strip()
@@ -375,20 +447,18 @@ class AnNhaEdgeRuntime:
                 return False, "Thiếu địa chỉ MAC của thiết bị Bluetooth"
             res = self.bt.connect_device(addr, name)
             report = self.bt.get_bluetooth_report()
-            self.client.send_bluetooth_state(report)
             if res.get("connected"):
                 dev_label = res.get("deviceName") or name or addr
-                return True, f"Đã kết nối loa Bluetooth: {dev_label} ({addr})"
-            return False, str(res.get("error") or f"Không thể kết nối tới {name or addr}")
+                return True, f"Đã kết nối loa Bluetooth: {dev_label} ({addr})", report
+            return False, str(res.get("error") or f"Không thể kết nối tới {name or addr}"), report
         if kind == "bt_disconnect":
             addr = str(payload.get("bt_address") or "").strip()
             self.bt.disconnect_device(addr)
             report = self.bt.get_bluetooth_report()
-            self.client.send_bluetooth_state(report)
-            return True, "Đã ngắt kết nối loa Bluetooth"
+            return True, "Đã ngắt kết nối loa Bluetooth", report
         return False, f"Lệnh Bluetooth không hợp lệ: {kind!r}"
 
-    def _play_audio_command(self, cmd: dict[str, Any]) -> tuple[bool, str]:
+    def _play_audio_command(self, cmd: dict[str, Any], client: DeviceClient | None = None) -> tuple[bool, str]:
         expires = float(cmd.get("expires") or 0)
 
         def can_start():
@@ -398,9 +468,9 @@ class AnNhaEdgeRuntime:
 
         if not can_start():
             return False, "Lệnh đã hết hạn."
-        return self.audio.execute_audio_command(
-            cmd, self.client.ensure_asset_cached, start_guard=can_start,
-        )
+        origin = client or self.client
+        resolver = origin.cached_audio_asset if len(self._backends) > 1 else origin.ensure_asset_cached
+        return self.audio.execute_audio_command(cmd, resolver, start_guard=can_start)
 
     def _start_ptt(self, mime):
         with self.update_lock:
@@ -423,12 +493,12 @@ class AnNhaEdgeRuntime:
                     "gas",
                     "Cảnh báo khẩn cấp! Phát hiện nồng độ khí gas vượt ngưỡng an toàn!",
                 )
-                if siren_ok and self.device_token:
+                if siren_ok:
                     now_m = time.monotonic()
                     last_ev = getattr(self, "_last_gas_event_ts", -1e9)
                     if now_m - last_ev >= 60.0:
                         self._last_gas_event_ts = now_m
-                        self.client.send_event(
+                        self._send_backend_event(
                             kind="environment",
                             severity="critical",
                             observation="abnormal",
@@ -449,9 +519,7 @@ class AnNhaEdgeRuntime:
         self.audio.trigger_emergency_siren("fall", "Cảnh báo! Phát hiện người thân có dấu hiệu té ngã!")
 
         # 2. Đẩy sự kiện & ảnh bằng chứng lên Backend AnNhà (nếu có cấu hình token)
-        if not self.device_token:
-            return
-        ev = self.client.send_event(
+        ev = self._send_backend_event(
             kind="fall",
             severity="critical",
             observation="abnormal",
@@ -473,7 +541,7 @@ class AnNhaEdgeRuntime:
                 logger.debug("[EdgeRuntime] Lỗi chu kỳ an toàn khí gas: %s", exc)
             self._stop_event.wait(1.5)
 
-    def _background_io_loop(self) -> None:
+    def _background_io_loop(self, client, streamer, immobility_events) -> None:
         next_hb = 0.0
         next_tel = 0.0
         next_cmd = 0.0
@@ -484,22 +552,22 @@ class AnNhaEdgeRuntime:
             now = time.monotonic()
             try:
                 # 1. Gửi Telemetry môi trường định kỳ
-                if self.device_token and now >= next_tel:
+                if client.device_token and now >= next_tel:
                     readings = self.bridge.get_telemetry_readings()
                     captured, jpeg = self._last_evidence_frame
-                    self.client.send_telemetry(readings, jpeg_evidence=jpeg if now - captured <= 2.0 else None)
+                    client.send_telemetry(readings, jpeg_evidence=jpeg if now - captured <= 2.0 else None)
                     next_tel = now + self.telemetry_interval_s
 
-                if self.device_token and now >= next_evidence:
-                    self.client.flush_event_images()
+                if client.device_token and now >= next_evidence:
+                    client.flush_event_images()
                     next_evidence = time.monotonic() + 1.0
 
                 # 2. Heartbeat & đồng bộ cấu hình
-                if self.device_token and now >= next_hb:
+                if client.device_token and now >= next_hb:
                     sensors_ok = bool(self.bridge.is_hardware_connected or self.force_mock_hardware)
                     speaker_ready = self.bt.is_speaker_ready()
                     audio = self.bt.get_status()
-                    self.client.send_heartbeat(
+                    client.send_heartbeat(
                         observation=self._observation,
                         camera_ok=self._camera_ok,
                         speaker_ok=speaker_ready,
@@ -515,18 +583,18 @@ class AnNhaEdgeRuntime:
                     next_hb = now + self.heartbeat_interval_s
 
                 # 3. Nhận lệnh điều khiển PTZ / Âm thanh từ Web
-                if self.device_token and now >= next_cmd:
-                    self.client.poll_and_execute_commands()
+                if client.device_token and now >= next_cmd:
+                    client.poll_and_execute_commands()
                     next_cmd = now + self.command_poll_interval_s
 
-                if self.device_token:
-                    self.immobility_events.flush(self.client, now)
+                if client.device_token:
+                    immobility_events.flush(client, now)
 
                 # 4. Cập nhật ảnh Snapshot đại diện phòng định kỳ
-                if self.device_token and now >= next_snap:
-                    frame_jpg = self.streamer.get_latest_jpeg()
+                if client.device_token and now >= next_snap:
+                    frame_jpg = streamer.get_latest_jpeg()
                     if frame_jpg:
-                        self.client.upload_evidence(frame_jpg, filename="room_snapshot.jpg")
+                        client.upload_evidence(frame_jpg, filename="room_snapshot.jpg")
                         next_snap = now + self.snapshot_interval_s
                     else:
                         next_snap = now + 2.0
@@ -535,12 +603,12 @@ class AnNhaEdgeRuntime:
 
             self._stop_event.wait(0.25)
 
-    def _reminder_loop(self) -> None:
+    def _reminder_loop(self, scheduler) -> None:
         while not self._stop_event.is_set():
             try:
                 with self.update_lock:
                     if time.monotonic() >= self.maintenance_until:
-                        self.scheduler.evaluate_due()
+                        scheduler.evaluate_due()
             except Exception:
                 logger.exception("[EdgeRuntime] Lỗi kiểm tra lịch nhắc.")
             self._stop_event.wait(5.0)
@@ -622,7 +690,9 @@ class AnNhaEdgeRuntime:
                         jpeg = buffer.tobytes()
                 except cv2.error:
                     logger.warning("[Immobility] Không mã hóa được ảnh bằng chứng")
-            self.immobility_events.submit(reading, jpeg_evidence=jpeg, threshold_seconds=self.immobility.duration_s)
+            for client, _, _, events in self._backends:
+                if client.device_token:
+                    events.submit(reading, jpeg_evidence=jpeg, threshold_seconds=self.immobility.duration_s)
 
     def _camera_unavailable(self) -> None:
         """Invalidate old camera images and report a real device failure."""
@@ -631,7 +701,7 @@ class AnNhaEdgeRuntime:
         self._observation = "camera_error"
         self.model_inference_ok = False
         self._last_evidence_frame = (0.0, None)
-        self.streamer.clear_frame()
+        self._publish_frame(None)
 
     def _vision_loop(self) -> None:
         """Discover a live camera, and reopen it when USB is unplugged/reconnected."""
@@ -718,7 +788,7 @@ class AnNhaEdgeRuntime:
                 if ok_enc:
                     jpeg = buf.tobytes()
                     self._last_evidence_frame = (time.monotonic(), jpeg)
-                    self.streamer.update_frame_jpeg(jpeg)
+                    self._publish_frame(jpeg)
                 self._stop_event.wait(0.18)
         finally:
             cap.release()
@@ -934,7 +1004,7 @@ class AnNhaEdgeRuntime:
                     if ok_enc:
                         jpg_bytes = buf.tobytes()
                         self._last_evidence_frame = (time.monotonic(), jpg_bytes)
-                        self.streamer.update_frame_jpeg(jpg_bytes)
+                        self._publish_frame(jpg_bytes)
         finally:
             cap.release()
 
@@ -962,7 +1032,7 @@ class AnNhaEdgeRuntime:
                 tracking_status=self.tracker.tracking_status(),
             )
             if jpg:
-                self.streamer.update_frame_jpeg(jpg)
+                self._publish_frame(jpg)
             self._stop_event.wait(0.20)
 
     def start(self) -> "AnNhaEdgeRuntime":
@@ -973,19 +1043,22 @@ class AnNhaEdgeRuntime:
         self.bridge.start()
         self.bridge.center()
         self.bt.start()
-        self.client.start()
-        if self.device_token:
-            self.streamer.start()
-
-        t_safe = threading.Thread(target=self._safety_loop, name="annha-edge-safety", daemon=True)
-        t_io = threading.Thread(target=self._background_io_loop, name="annha-edge-io", daemon=True)
-        t_reminder = threading.Thread(target=self._reminder_loop, name="annha-edge-reminders", daemon=True)
-        t_vis = threading.Thread(target=self._vision_loop, name="annha-edge-vision", daemon=True)
-        t_safe.start()
-        t_io.start()
-        t_reminder.start()
-        t_vis.start()
-        self._workers = [t_safe, t_io, t_reminder, t_vis]
+        self._workers = [
+            threading.Thread(target=self._safety_loop, name="annha-edge-safety", daemon=True),
+            threading.Thread(target=self._vision_loop, name="annha-edge-vision", daemon=True),
+        ]
+        for index, (client, scheduler, streamer, events) in enumerate(self._backends, 1):
+            client.start()
+            if client.device_token:
+                streamer.start()
+            self._workers.extend((
+                threading.Thread(target=self._background_io_loop, args=(client, streamer, events),
+                                 name=f"annha-edge-io-{index}", daemon=True),
+                threading.Thread(target=self._reminder_loop, args=(scheduler,),
+                                 name=f"annha-edge-reminders-{index}", daemon=True),
+            ))
+        for worker in self._workers:
+            worker.start()
         return self
 
     def stop(self) -> None:
@@ -994,14 +1067,16 @@ class AnNhaEdgeRuntime:
         for t in self._workers:
             if t.is_alive():
                 t.join(timeout=2.0)
-        self.streamer.stop()
+        for _, _, streamer, _ in self._backends:
+            streamer.stop()
         self.audio_worker.stop()
         self.audio.stop()
         self.audio_worker.join()
         self.bridge.detach()
         self.bridge.stop()
         self.bt.stop()
-        self.client.stop()
+        for client, _, _, _ in self._backends:
+            client.stop()
         logger.info("[EdgeRuntime] Đã dừng toàn bộ các phân hệ an toàn.")
 
 
@@ -1024,7 +1099,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Ép chạy toàn bộ phần cứng ở chế độ giả lập (Mock) để kiểm thử nhanh trên PC",
     )
     parser.add_argument('--pair', action='store_true', help='Lấy mã ghép nối cho Pi chưa đăng ký')
+    parser.add_argument('--pair-backend-2', action='store_true', help='Ghép nối riêng backend thứ hai rồi thoát')
     args = parser.parse_args(argv)
+    if args.pair and args.pair_backend_2:
+        parser.error('Chọn một backend để ghép nối mỗi lần.')
 
     logging.basicConfig(
         level=logging.INFO,
@@ -1040,6 +1118,20 @@ def main(argv: list[str] | None = None) -> int:
     if env_path.name != '.env.edge':
         pairing_filename = f'.env.edge.pairing-{env_path.name}.json'
     pairing_path = env_path.with_name(pairing_filename)
+    try:
+        secondary = secondary_credentials(os.environ, env_path, primary_url=base_url)
+        if args.pair_backend_2:
+            if not secondary:
+                parser.error("Bật ANNHA_BACKEND_2_ENABLED và đặt ANNHA_BACKEND_2_BASE_URL.")
+            pair_device(secondary[0], secondary_pairing_path(env_path), start_pairing=True)
+            return 0
+    except KeyboardInterrupt:
+        return 130
+    except (OSError, ValueError, KeyError) as error:
+        if args.pair_backend_2:
+            parser.exit(1, f'Không thể cấu hình backend thứ hai: {error}\n')
+        logger.warning("Bỏ qua backend thứ hai do cấu hình không hợp lệ (%s).", type(error).__name__)
+        secondary = None
     if not token and (args.pair or pairing_path.exists()):
         if not base_url:
             parser.error('Đặt ANNHA_BASE_URL trước khi ghép nối.')
@@ -1055,7 +1147,15 @@ def main(argv: list[str] | None = None) -> int:
             args.env_file,
         )
 
+    if secondary and not secondary[1]:
+        logger.warning("Backend thứ hai chưa ghép nối. Chạy --pair-backend-2 để kết nối.")
+        secondary = None
+    if secondary and token and secondary[1] == token:
+        logger.warning("Bỏ qua backend thứ hai vì hai backend phải dùng device token riêng.")
+        secondary = None
+
     runtime = AnNhaEdgeRuntime(
+        backend_2=secondary,
         base_url=base_url or "http://localhost:8188",
         device_token=token,
         serial_port=os.getenv("ARDUINO_SERIAL_PORT", "auto"),

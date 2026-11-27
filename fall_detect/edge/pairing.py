@@ -102,3 +102,26 @@ def pair_device(base_url: str, state_path: Path, *, start_pairing: bool) -> str:
             except (requests.ConnectionError, requests.Timeout):
                 print('Chưa kết nối được backend. Đang thử lại.', flush=True)
             time.sleep(4)
+
+
+def secondary_pairing_path(env_path: Path) -> Path:
+    return env_path.with_name(f'.env.edge.pairing-backend-2-{env_path.name}.json')
+
+
+def secondary_credentials(env, env_path: Path, *, primary_url: str | None = None):
+    """Read completed enrollment without starting the interactive pairing loop."""
+    if env.get('ANNHA_BACKEND_2_ENABLED', '').strip().lower() != 'true':
+        return None
+    base = env.get('ANNHA_BACKEND_2_BASE_URL', '').strip().rstrip('/')
+    _check_url(base)
+    if primary_url and base.lower() == primary_url.strip().rstrip('/').lower():
+        raise ValueError('Hai backend phải dùng địa chỉ khác nhau.')
+    token = env.get('ANNHA_BACKEND_2_DEVICE_TOKEN', '').strip()
+    path = secondary_pairing_path(env_path)
+    if not token and path.exists():
+        state = json.loads(path.read_text(encoding='utf-8'))
+        if state['base_url'] != base:
+            raise ValueError('File ghép nối thứ hai thuộc backend khác.')
+        if state.get('paired'):
+            token = state['token']
+    return base, token

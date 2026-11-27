@@ -137,3 +137,40 @@ bash update/install.sh --public-key /path/to/test-release.pub
 ```
 
 Sau bootstrap, dùng web của backend thử nghiệm để cài hai bản đã ký. Xác nhận bản lành báo thành công sau camera/inference thật. Với bản thử đã chuẩn bị để fail health check, xác nhận phiên bản cũ hoạt động trở lại trong systemd và trên web. Lặp với ngắt mạng và restart updater ở các mốc đã nêu. Từ repo chạy `scripts/ota-pi-acceptance.sh evidence ~/ota-after`. Nếu service account thiếu quyền đọc journal, thu log bằng tài khoản được cấp quyền và giữ trong thư mục riêng.
+
+## Hai backend cho một Pi
+
+Trên Pi chạy bằng systemd, chỉnh ba biến dưới đây trong `/opt/annha/shared/app.env`. Giữ nguyên URL, token và file ghép nối của backend hiện tại. Với môi trường chạy thủ công, chỉnh file `.env.edge` tương ứng.
+
+```dotenv
+ANNHA_BACKEND_2_ENABLED=true
+ANNHA_BACKEND_2_BASE_URL=https://annha-aiot-demo-e1d59c6994d0.herokuapp.com
+ANNHA_BACKEND_2_DEVICE_TOKEN=
+```
+
+Để trống token thứ hai khi ghép nối qua web. Chạy với tài khoản vận hành Edge và dùng đúng Python trong `ExecStart` của service.
+
+```bash
+cd /opt/annha/current
+/path/to/current-venv/bin/python -m edge.main_edge \
+  --env-file /opt/annha/shared/app.env --pair-backend-2
+```
+
+Nhập mã trên Web Heroku. Lệnh ghép nối tự thoát sau khi hoàn tất. File ghép nối thứ hai là `/opt/annha/shared/.env.edge.pairing-backend-2-app.env.json`. Lệnh `--pair` tiếp tục dùng cho backend hiện tại.
+
+Sau khi cài Edge có hỗ trợ hai backend và ghép nối xong, restart `annha-edge.service`. Kiểm tra heartbeat, video, PTZ và ACK riêng trên từng Web. Hai Web dùng chung một camera, mô hình, servo, loa và ThingsBoard. Mỗi cấu hình mới được xét theo version của chính backend đó. Cấu hình camera dùng chung áp dụng theo thứ tự Edge nhận cập nhật. Lịch nhắc và tài nguyên âm thanh vẫn thuộc backend tạo chúng. Đặt `ANNHA_BACKEND_2_ENABLED=false` rồi restart Edge để tắt kết nối thứ hai và giữ lại thông tin ghép nối.
+
+### Nâng cấp updater chạy độc lập
+
+Việc cài gói Edge giữ nguyên script updater đang được service sử dụng. Sau khi cài và kiểm tra Edge mới qua backend hiện tại, xác minh không có job đang cài hay journal đang chờ. Khi đó bảo trì updater bằng cách sao lưu và cài script đã được xác minh trong release đang chạy. Chạy với tài khoản vận hành Edge.
+
+```bash
+sudo systemctl stop annha-updater.service
+cp -a /opt/annha/updater/updater.py "/opt/annha/updater/updater.py.bak.$(date +%s)"
+install -m 0644 /opt/annha/current/update/updater.py /opt/annha/updater/updater.py.new
+mv /opt/annha/updater/updater.py.new /opt/annha/updater/updater.py
+sudo systemctl start annha-updater.service
+systemctl is-active annha-updater.service
+```
+
+Hai backend cần dùng release được ký bởi khóa công khai Pi đang tin cậy. Một Pi chỉ chạy một phiên OTA và báo kết quả về đúng backend đã tạo job. Giữ cấu hình và token của backend nguồn cho đến khi job kết thúc. Khi rollback toàn bộ lần nâng cấp, dùng thao tác quay về release trước qua Web, tắt backend thứ hai trong `app.env` và phục hồi script updater từ bản sao lưu sau khi updater đã dừng.
