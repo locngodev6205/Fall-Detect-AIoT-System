@@ -432,11 +432,15 @@ class AnNhaEdgeRuntime:
                             kind="environment",
                             severity="critical",
                             observation="abnormal",
-                            reason=f"Nồng độ khí gas vượt ngưỡng nguy hiểm ({gas_val:.0f} >= {gas_high:.0f}).",
+                            reason=f"Tín hiệu gas vượt ngưỡng ({gas_val:.0f} >= {gas_high:.0f}).",
+                            detection={"metric": "gas", "measured_value": gas_val, "threshold_value": gas_high,
+                                       "unit": gas_info.get("unit"), "sensor": "MQ-2", "measurement_quality": "valid",
+                                       "local_alarm_confirmed": True},
                         )
 
     @maintenance_guard
-    def handle_fall_detected(self, confidence: float, reason: str, jpeg_evidence: bytes | None = None) -> None:
+    def handle_fall_detected(self, confidence: float, reason: str, jpeg_evidence: bytes | None = None,
+                             *, detection: dict[str, Any] | None = None) -> None:
         """Xử lý tức thời khi AI phát hiện té ngã: Hú còi tại phòng trước -> Gửi Event + Ảnh lên Backend."""
         if not self.tracker.is_fall_detection_enabled():
             return
@@ -453,6 +457,7 @@ class AnNhaEdgeRuntime:
             observation="abnormal",
             reason=reason,
             confidence=confidence,
+            **({"detection": detection} if detection is not None else {}),
             jpeg_evidence=None if self.force_mock_hardware else jpeg_evidence,
         )
         if ev and ev.get("id"):
@@ -617,7 +622,7 @@ class AnNhaEdgeRuntime:
                         jpeg = buffer.tobytes()
                 except cv2.error:
                     logger.warning("[Immobility] Không mã hóa được ảnh bằng chứng")
-            self.immobility_events.submit(reading, jpeg_evidence=jpeg)
+            self.immobility_events.submit(reading, jpeg_evidence=jpeg, threshold_seconds=self.immobility.duration_s)
 
     def _camera_unavailable(self) -> None:
         """Invalidate old camera images and report a real device failure."""
@@ -735,6 +740,8 @@ class AnNhaEdgeRuntime:
                 confidence=float(confidence),
                 reason="Mô hình AI phát hiện chuyển động té ngã trên camera.",
                 jpeg_evidence=jpeg if time.monotonic() - captured <= 2.0 else None,
+                detection={"fall_confidence_threshold": detector.confidence_threshold,
+                           "model_name": "Transformer TFLite", "edge_version": self.update_status.version},
             )
 
         detector = None

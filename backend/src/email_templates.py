@@ -164,17 +164,21 @@ def render_email(kind, *, public_url='http://localhost:8188', **values):
         note = 'Đăng nhập hoặc tạo tài khoản bằng đúng địa chỉ email nhận lời mời. Chỉ tài khoản này mới có thể chấp nhận.'
         subject = 'Lời mời tham gia AnNhà'
     elif kind == 'safety_alert':
-        title = 'AnNhà ghi nhận sự kiện cần bạn kiểm tra'
+        title = values.get('event_label') or 'AnNhà ghi nhận sự kiện cần bạn kiểm tra'
         preheader = f"{_text(values.get('home_name'), 'Ngôi nhà')} có thông tin mới cần lưu ý."
         link = _event_link(public_url, values.get('event_id', 'preview-event'))
-        paragraphs = ['Vui lòng mở AnNhà để xem thông tin và chủ động kiểm tra tình hình. Email này không xác nhận người thân đang an toàn hay cần trợ giúp y tế.']
+        paragraphs = [value for value in (values.get('reason'), values.get('guidance')) if value]
+        if not paragraphs: paragraphs = ['Vui lòng mở AnNhà và kiểm tra tình hình.']
         details = [('Mức độ', values.get('severity_label')), ('Sự kiện', values.get('event_label')),
                    ('Ngôi nhà', values.get('home_name')), ('Phòng', values.get('room_name')),
-                   ('Camera', values.get('camera_name')), ('Thời điểm ghi nhận', values.get('occurred_at'))]
+                   ('Camera', values.get('camera_name')), ('Thời điểm phát hiện', values.get('occurred_at')),
+                   ('Backend tiếp nhận', values.get('received_at')), ('Nguồn', values.get('detection_source')),
+                   ('Trạng thái', values.get('status_label')), *values.get('facts', [])]
         cta = 'Mở sự kiện trong AnNhà'
         expiry = None
         note = 'Ảnh sự kiện chỉ được đính kèm khi đã cho phép riêng cho Email và người nhận còn quyền xem camera.'
-        subject = 'AnNhà · Thông tin an toàn cần lưu ý'
+        room = re.sub(r'[\r\n]+', ' ', values.get('room_name') or '')
+        subject = '[AnNhà]' + ('[Khẩn cấp]' if values.get('critical') else '') + ' ' + title + (f' — {room}' if room else '')
     else:
         raise ValueError(f'Unknown email template: {kind}')
     html, text = _layout(title=title, preheader=preheader, greeting=name, paragraphs=paragraphs,

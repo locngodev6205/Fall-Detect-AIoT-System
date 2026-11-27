@@ -470,6 +470,7 @@ class DeviceClient:
         confidence: float | None = None,
         observed_at: str | None = None,
         queue_on_failure: bool = True,
+        detection: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         if not self._valid_event_jpeg(jpeg_evidence):
             jpeg_evidence = None
@@ -488,6 +489,9 @@ class DeviceClient:
             body["duration_s"] = round(max(0.0, float(duration_s)), 2)
         if confidence is not None:
             body["confidence"] = round(min(1.0, max(0.0, float(confidence))), 4)
+
+        if detection is not None:
+            body["detection"] = detection
 
         try:
             resp = self._request("POST", "/api/device/events", json_body=body)

@@ -586,11 +586,19 @@ def telemetry_source(camera_id,start,end,hours,default_hours=None):
     clauses=['b.camera_id=%s'];args=[camera_id]
     if a:clauses.append('b.observed_at>=%s');args.append(a)
     if b:clauses.append('b.observed_at<%s');args.append(b)
+    # Precompute occupied real slots once so RLS is not re-evaluated per simulated sample.
+    clauses.append("""(b.message_id NOT LIKE 'sim-env-v1:%%'
+        OR date_bin('15 minutes',b.observed_at,'2000-01-01 UTC'::timestamptz) NOT IN (
+            SELECT DISTINCT date_bin('15 minutes',real.observed_at,'2000-01-01 UTC'::timestamptz)
+            FROM annha.telemetry_batches real
+            WHERE real.camera_id=%s AND real.message_id NOT LIKE 'sim-env-v1:%%'
+        ))""")
+    args.append(camera_id)
     return ' FROM annha.telemetry_batches b WHERE '+' AND '.join(clauses),args,a,b
 
 
 def telemetry_public(row):
-    return {**{k:v for k,v in row.items() if k!='readings'},'payload':{'observed_at':row['observed_at'],'readings':row['readings']}}
+    return {**{k:v for k,v in row.items() if k!='readings'},'simulated':row['message_id'].startswith('sim-env-v1:'),'payload':{'observed_at':row['observed_at'],'readings':row['readings']}}
 
 
 TELEMETRY_COLUMNS="""b.*,COALESCE((SELECT jsonb_object_agg(r.metric,jsonb_build_object('value',r.value,'unit',r.unit,'quality',r.quality)) FROM annha.sensor_readings r WHERE r.batch_id=b.id),'{}'::jsonb) AS readings"""
@@ -614,7 +622,7 @@ def telemetry_summary(camera_id:str,current:Current,hours:int|None=None,start:st
     if not a or not b:raise HTTPException(422,'Chọn đủ ngày bắt đầu và kết thúc.')
     seconds=max(1,math.ceil((b-a).total_seconds()/buckets));n=math.ceil((b-a).total_seconds()/seconds)
     with db.connect('app',camera['home_id'],current['id']) as conn:
-        stats=conn.execute('SELECT count(*) AS sample_count,min(b.observed_at) AS first_observed_at,max(b.observed_at) AS last_observed_at'+source,args).fetchone()
+        stats=conn.execute("SELECT count(*) AS sample_count,count(*) FILTER (WHERE b.message_id LIKE 'sim-env-v1:%%') AS simulated_count,min(b.observed_at) AS first_observed_at,max(b.observed_at) AS last_observed_at"+source,args).fetchone()
         latest=conn.execute('SELECT '+TELEMETRY_COLUMNS+source+' ORDER BY b.observed_at DESC,b.received_at DESC,b.id DESC LIMIT 1',args).fetchone()
         occupied=conn.execute('SELECT floor(extract(epoch FROM (b.observed_at-%s::timestamptz))/%s)::int AS slot,count(*) AS n'+source+' GROUP BY slot',[a,seconds]+args).fetchall()
         grouped=conn.execute("""SELECT floor(extract(epoch FROM (b.observed_at-%s::timestamptz))/%s)::int AS slot,
@@ -1264,11 +1272,11 @@ def audit(home_id:str,current:Current,page:int|None=None,page_size:int=10):
     return page_result(items,total,page,page_size) if page is not None else items
 
 @router.get('/homes/{home_id}/delivery-status')
-def deliveries(home_id:str,current:Current,recipient_id:UUID|None=None,page:int|None=None,page_size:int=10,channel:str|None=None,status:str|None=None):
+def deliveries(home_id:str,current:Current,recipient_id:UUID|None=None,page:int|None=None,page_size:int=10,channel:str|None=None,status:str|None=None,event_id:UUID|None=None):
     membership(home_id,current['id'],True)
     if channel and channel not in ('email','telegram'):raise HTTPException(422,'Kênh không hợp lệ.')
     clauses=['d.home_id=%s'];args=[home_id]
-    for col,value in [('nc.recipient_user_id',recipient_id),('nc.kind',channel),('d.status',status)]:
+    for col,value in [('nc.recipient_user_id',recipient_id),('nc.kind',channel),('d.status',status),('d.event_id',event_id)]:
         if value:clauses.append(col+'=%s');args.append(value)
     source=""" FROM annha.notification_deliveries d JOIN annha.notification_channels nc ON nc.id=d.channel_id AND nc.home_id=d.home_id
       JOIN annha.events e ON e.id=d.event_id AND e.home_id=d.home_id JOIN annha.cameras c ON c.id=d.camera_id AND c.home_id=d.home_id

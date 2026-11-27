@@ -175,7 +175,7 @@ def ingest_event(camera, payload):
             return event_public(conn,old),False
         if payload.config_version and not conn.execute('SELECT 1 FROM configurations WHERE camera_id=? AND version=?',(camera['id'],payload.config_version)).fetchone():
             raise HTTPException(422,'Phiên bản cấu hình không thuộc camera.')
-        values=payload.model_dump()
+        values=payload.model_dump(mode="json")
         event_id=old['id'] if old else db.uid()
         received_at=db.now()
         if old:

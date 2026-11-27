@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { WarningCircle, PersonSimple, Leaf, VideoCamera, ImageSquare } from '@phosphor-icons/react';
 const eventIcons = { fall: WarningCircle, immobility: PersonSimple, environment: Leaf, device: VideoCamera };
+import { deliveryLabel } from './activityLabels';
 import { api, go, dateTime, eventNames, statusNames } from './api';
 import { Badge, Button, Empty, Field, Heading, Pagination } from './ui';
 import {useServerPage,ServerPager} from './serverPaging';
@@ -45,7 +46,10 @@ export function Events({initialStatus=''}) {
     </div>
     {filters.active_only ? <p className="muted" role="status">Đang xem cảnh báo Đang mở và Đã tiếp nhận của camera đã chọn.</p>
       : !filters.camera_id && <p className="muted">Chọn một camera để xem cảnh báo đang chặn OTA.</p>}
-    <ResourceState resource={resource}>{rows.map(e=><article className="panel event-live-row" key={e.id}><span className={'event-kind-icon '+(e.severity==='critical'?'critical-icon':'')}>{React.createElement(eventIcons[e.kind]||WarningCircle,{size:26})}</span><div className="event-row-copy"><a href={'#/event/'+e.id}><h2>{eventNames[e.kind]}</h2></a><p>{e.room_name||rooms.find(r=>r.id===cameras.find(c=>c.id===e.camera_id)?.room_id)?.name||'Trong nhà'} · {e.camera_name||cameras.find(c=>c.id===e.camera_id)?.name||'Camera'} · {dateTime(e.observed_at)}</p><small>{e.payload.reason}</small>
+    <ResourceState resource={resource}>{rows.map(e=><article className="panel event-live-row" key={e.id}><span className={'event-kind-icon '+(e.severity==='critical'?'critical-icon':'')}>{React.createElement(eventIcons[e.kind]||WarningCircle,{size:26})}</span><div className="event-row-copy"><a href={'#/event/'+e.id}><h2>{e.report?.title || eventNames[e.kind]}</h2></a><p>{e.room_name||rooms.find(r=>r.id===cameras.find(c=>c.id===e.camera_id)?.room_id)?.name||'Trong nhà'} · {e.camera_name||cameras.find(c=>c.id===e.camera_id)?.name||'Camera'} · {e.report?.observed || dateTime(e.observed_at)}</p>
+      {e.report?.severity && <small>{e.report.severity}</small>}
+      {e.report?.facts?.length > 0 && <p>{e.report.facts.slice(0, 2).map(([label, value]) => `${label} ${value}`).join(' · ')}</p>}
+      <small>{e.payload.reason}</small>
       {can(cameras.find(c=>c.id===e.camera_id),'events') && <EventClosingControls
         event={e} notify={notify} disabled={busy}
         onSaved={() => { resource.reload(); reloadAlerts(); reload(); }}/>}
@@ -132,7 +136,33 @@ export function EventDetail({ id }) {
     can={can} notify={notify} refresh={() => { resource.reload(); updates.reload(); reloadAlerts(); reload(); }}/>}</ResourceState>;
 }
 
+function EventDeliveryHistory({ eventId }) {
+  const { home, alertTick } = useApp();
+  const deliveries = useServerPage(`/homes/${home.id}/delivery-status?event_id=${encodeURIComponent(eventId)}`, alertTick);
+  const mediaLabels = {sent:'Kèm bằng chứng', text_fallback:'Đã gửi chữ thay ảnh', missing:'Chưa có ảnh',
+    unavailable:'Ảnh không khả dụng', consent_disabled:'Chưa có đồng ý gửi ảnh', not_requested:'Không kèm ảnh'};
+  return <section className="panel spaced">
+    <h2>Lịch sử thông báo</h2>
+    <ResourceState resource={deliveries}>
+      {deliveries.items.map(entry => {
+        const status = deliveryLabel(entry.status);
+        return <article className="notification-history-row" key={entry.id}>
+          <div>
+            <strong>{entry.channel_kind === 'email' ? 'Email' : 'Telegram'} · {entry.recipient_name}</strong>
+            <p>{[dateTime(entry.delivered_at || entry.last_dispatch_at || entry.created_at),
+              mediaLabels[entry.media_result], entry.last_error_code].filter(Boolean).join(' · ')}</p>
+          </div>
+          <Badge tone={status.tone}>{status.label}</Badge>
+        </article>;
+      })}
+      {!deliveries.items.length && <p>Chưa có lịch sử gửi cho sự kiện này.</p>}
+      <ServerPager resource={deliveries} label="thông báo"/>
+    </ResourceState>
+  </section>;
+}
+
 function EventRecord({ record, updates, camera, can, notify, refresh }) {
+  const { home } = useApp();
   const [saved, setSaved] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -153,7 +183,10 @@ function EventRecord({ record, updates, camera, can, notify, refresh }) {
   }
 
   return <>
-    <Heading title={eventNames[event.kind]} text={`${camera?.name || 'Camera'} · ${dateTime(event.observed_at)}`}
+    <Heading title={event.report?.title || eventNames[event.kind]} text={
+      [event.home_name, event.room_name, event.camera_name || camera?.name,
+        event.report?.observed || dateTime(event.observed_at)].filter(Boolean).join(' · ')
+    }
       action={<Button kind="secondary-btn" onClick={() => go('/events')}>← Quay lại sự kiện</Button>}/>
     <div className="two-grid">
       <section className="panel">
@@ -165,15 +198,24 @@ function EventRecord({ record, updates, camera, can, notify, refresh }) {
             : asset.mime.startsWith('image/') ? <EvidenceImage asset={asset}/>
             : asset.mime.startsWith('video/') ? <video className="evidence-image" src={'/api/assets/' + asset.id} controls/>
             : <a href={'/api/assets/' + asset.id}>{asset.name}</a>}
+          {asset.created_at && <small>Đã lưu bằng chứng lúc {dateTime(asset.created_at)}</small>}
         </div>) : <Empty icon={ImageSquare} title="Chưa có ảnh hoặc clip" text="Cảnh báo vẫn được lưu khi thiết bị chưa gửi bằng chứng."/>}
-        <p>Hệ thống nhận lúc {dateTime(event.received_at)}</p>
+        <p>Hệ thống nhận lúc {event.report?.received || dateTime(event.received_at)}</p>
       </section>
       <section className="panel">
         <h2>Thông tin sự kiện</h2>
         <Badge tone={!active ? 'teal' : event.severity === 'critical' ? 'red' : 'amber'}>{statusNames[event.status]}</Badge>
+        {event.report?.severity && <p>Mức độ · {event.report.severity}</p>}
+        {event.report?.source && <p>Nguồn phát hiện · {event.report.source}</p>}
         <p>Quan sát hiện tại · {observationLabels[event.observation]}</p>
         <p>{event.payload.reason || 'Thiết bị chưa cung cấp lý do chi tiết.'}</p>
-        {event.payload.duration_s != null && <p>Thời lượng quan sát · {event.payload.duration_s} giây</p>}
+        {event.report?.facts?.length > 0 && <dl>
+          {event.report.facts.map(([label, value]) => <div className="setting-row" key={label}>
+            <dt>{label}</dt><dd>{value}</dd>
+          </div>)}
+        </dl>}
+        {!event.report?.facts?.length && event.payload.duration_s != null && <p>Thời lượng quan sát · {event.payload.duration_s} giây</p>}
+        {event.report?.guidance && <><h3>Hướng xử lý</h3><p>{event.report.guidance}</p></>}
         <p>{event.is_read ? 'Bạn đã đọc sự kiện này.' : 'Sự kiện chưa được bạn đánh dấu đã đọc.'}</p>
       </section>
     </div>
@@ -197,6 +239,7 @@ function EventRecord({ record, updates, camera, can, notify, refresh }) {
         </li>)}
       </ul>}
     </section>
+    {home.role === "owner" && event.report && <EventDeliveryHistory eventId={event.id}/>}
     <section className="panel spaced">
       <h2>Diễn biến quan sát</h2>
       <ResourceState resource={updates}>

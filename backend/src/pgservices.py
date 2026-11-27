@@ -25,6 +25,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, StreamingResponse
 from starlette.background import BackgroundTask
 from . import pgdb as db, models, media_storage
+from .event_report import event_report
 from .audio_output import audio_output_state, heartbeat_capabilities
 from .email_templates import render_email
 from .demo_metadata import demo_camera
@@ -217,9 +218,17 @@ def events_public(conn,rows):
     ids=[str(row['id']) for row in rows]
     # Queue independent reads before fetching; the enclosing transaction pipelines them.
     updates_cursor=conn.execute("SELECT DISTINCT ON(event_id) event_id,payload FROM annha.event_updates WHERE event_id=ANY(%s::uuid[]) ORDER BY event_id,sequence DESC",(ids,))
+    first_cursor=conn.execute("""SELECT DISTINCT ON(event_id) event_id, payload, received_at
+        FROM annha.event_updates WHERE event_id=ANY(%s::uuid[]) ORDER BY event_id,sequence""",(ids,))
+    context_cursor=conn.execute("""SELECT e.id,c.name AS camera_name,r.name AS room_name,h.name AS home_name,h.timezone
+        FROM annha.events e JOIN annha.cameras c ON c.id=e.camera_id
+        JOIN annha.rooms r ON r.id=c.room_id JOIN annha.homes h ON h.id=e.home_id
+        WHERE e.id=ANY(%s::uuid[])""",(ids,))
     actions_cursor=conn.execute('SELECT * FROM annha.event_actions WHERE event_id=ANY(%s::uuid[]) ORDER BY created_at,id',(ids,))
     assets_cursor=conn.execute('SELECT id,home_id,camera_id,event_id,kind,name,status,created_at,mime_type,size_bytes,error_code,expires_at FROM annha.media_assets WHERE event_id=ANY(%s::uuid[]) ORDER BY created_at',(ids,))
     updates={str(row['event_id']):row['payload'] for row in updates_cursor.fetchall()}
+    first={str(row['event_id']):row for row in first_cursor.fetchall()}
+    context={str(row['id']):row for row in context_cursor.fetchall()}
     actions=actions_cursor.fetchall();assets=assets_cursor.fetchall()
     names={}
     if actions:
@@ -230,9 +239,18 @@ def events_public(conn,rows):
         action=dict(action);action['user_name']=names.get(str(action['user_id']),'Tài khoản đã ngừng sử dụng')
         grouped_actions.setdefault(str(action['event_id']),[]).append(action)
     for asset in assets: grouped_assets.setdefault(str(asset['event_id']),[]).append(asset_public(asset))
-    return jsonable_encoder([{**dict(row),'is_demo':demo_camera(row['camera_id']),'sequence':row['latest_sequence'],
-        'observed_at':row['first_observed_at'],'payload':updates.get(str(row['id']),{}),
-        'actions':grouped_actions.get(str(row['id']),[]),'evidence':grouped_assets.get(str(row['id']),[])} for row in rows])
+    reports=[]
+    for row in rows:
+        key=str(row['id'])
+        initial=first.get(key,{})
+        snapshot=initial.get('payload') or {}
+        event={**context.get(key,{}), **dict(row), 'is_demo':demo_camera(row['camera_id']), 'sequence':row['latest_sequence'],
+            'observed_at':row['first_observed_at'], 'payload':updates.get(key,{}), 'detection':snapshot.get('detection'), 'initial_confidence':snapshot.get('confidence'),
+            'first_received_at':initial.get('received_at'),
+            'actions':grouped_actions.get(key,[]), 'evidence':grouped_assets.get(key,[])}
+        event['report']=event_report(event,event.get('timezone'))
+        reports.append(event)
+    return jsonable_encoder(reports)
 
 def event_public(conn,row): return events_public(conn,[row])[0]
 
@@ -382,7 +400,7 @@ def ingest_event(camera,payload):
               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
                 (event,home,cam,payload.event_id,payload.sequence,payload.kind,payload.severity,payload.observation,stamp,stamp,payload.reason,payload.duration_s,payload.confidence,payload.config_version or None,db.now()+timedelta(days=365)))
         conn.execute('INSERT INTO annha.event_updates(home_id,camera_id,event_id,sequence,observed_at,observation,severity,payload) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)',
-            (home,cam,event,payload.sequence,stamp,payload.observation,payload.severity,db.J(payload.model_dump())))
+            (home,cam,event,payload.sequence,stamp,payload.observation,payload.severity,db.J(payload.model_dump(mode="json"))))
         if not old or reopened:
             for channel in conn.execute('''SELECT * FROM annha.notification_channels
                 WHERE home_id=%s AND enabled AND revoked_at IS NULL AND suppressed_at IS NULL
@@ -871,60 +889,38 @@ def _telegram_clean(value,limit=2000):
     text=''.join(ch for ch in str(value or '') if ch in '\n\t' or ord(ch)>=32).strip()
     return text[:limit]
 
-def format_telegram_event(home,event):
-    from zoneinfo import ZoneInfo
-    kind_names={'fall':'Nghi ngờ té ngã','immobility':'Bất động kéo dài','environment':'Môi trường bất thường','device':'Lỗi giám sát'}
-    severity_names={'critical':'Nghiêm trọng','warning':'Trung bình','info':'Thông tin'}
-    try: stamp=event['first_observed_at'].astimezone(ZoneInfo(home['timezone']))
-    except Exception: stamp=event['first_observed_at'].astimezone(timezone.utc)
-    location=' · '.join(value for value in (event.get('room_name'),event.get('camera_name')) if value)
-    reason=_telegram_clean(event.get('reason'),1500)
+def _telegram_event_text(home,event,limit):
+    report=event_report(event,home.get('timezone'))
     url=os.getenv('PUBLIC_URL','http://localhost:8188').rstrip('/')+'/#/event/'+str(event['id'])
-    body='\n'.join(part for part in (
-      '🚨 AnNhà · Cảnh báo trong gia đình',
-      'Nhà: '+_telegram_clean(home['name'],120),
-      'Vị trí: '+_telegram_clean(location or event.get('camera_name') or 'Camera',180),
-      'Sự kiện: '+kind_names.get(event['kind'],'Cảnh báo')+' · '+severity_names.get(event['severity'],'Chưa rõ mức độ'),
-      'Thời điểm: '+stamp.strftime('%d/%m/%Y %H:%M:%S'),
-      ('Chi tiết: '+reason) if reason else '',
-      'Mở sự kiện: '+url,
-      'Yêu cầu gửi đã được tiếp nhận; đây không xác nhận người nhận đã đọc.'
-    ) if part)
-    return body[:4096]
+    details=' · '.join(f'{name} {value}' for name,value in report['facts'][:3])
+    headline='AnNhà · '+report['title']
+    severity=report['severity'] or ''
+    place=' · '.join(_telegram_clean(value,80) for value in (home.get('name'),event.get('room_name'),event.get('camera_name')) if value)
+    parts=[headline,severity,place,report['observed'],details,report['guidance']]
+    body='\n'.join(part for part in parts if part)
+    reason=_telegram_clean(report['reason'],1000 if limit>1024 else 100)
+    available=max(0,limit-len(body.encode('utf-16-le'))//2-len(url.encode('utf-16-le'))//2-16)
+    reason=reason.encode('utf-16-le')[:available*2].decode('utf-16-le',errors='ignore')
+    if reason: body+='\n'+reason
+    return body+'\nXem sự kiện: '+url
+
+
+def format_telegram_event(home,event):
+    return _telegram_event_text(home,event,4096)
+
 
 def format_telegram_caption(home,event):
-    """Short photo caption that retains the event link within Telegram's limit."""
-    from zoneinfo import ZoneInfo
-    kind_names={'fall':'Nghi ngờ té ngã','immobility':'Bất động kéo dài','environment':'Môi trường bất thường','device':'Lỗi giám sát'}
-    severity_names={'critical':'Nghiêm trọng','warning':'Trung bình','info':'Thông tin'}
-    try: stamp=event['first_observed_at'].astimezone(ZoneInfo(home['timezone']))
-    except Exception: stamp=event['first_observed_at'].astimezone(timezone.utc)
-    location=' · '.join(value for value in (event.get('room_name'),event.get('camera_name')) if value)
-    url=os.getenv('PUBLIC_URL','http://localhost:8188').rstrip('/')+'/#/event/'+str(event['id'])
-    reason=_telegram_clean(event.get('reason'),180)
-    parts=['🚨 AnNhà · '+_telegram_clean(home['name'],100),
-      'Vị trí: '+_telegram_clean(location or event.get('camera_name') or 'Camera',120),
-      kind_names.get(event['kind'],'Cảnh báo')+' · '+severity_names.get(event['severity'],'Chưa rõ mức độ'),
-      stamp.strftime('%d/%m/%Y %H:%M:%S')]
-    if reason: parts.append(reason)
-    parts.append(url)
-    caption='\n'.join(parts)
-    if len(caption)>1024:
-        parts[-2:]=[url]
-        caption='\n'.join(parts)
-    return caption[:1024]
+    return _telegram_event_text(home,event,1024)
+
 
 def format_safety_email(event,recipient_name):
-    from zoneinfo import ZoneInfo
-    kind_names={'fall':'Nghi ngờ té ngã','immobility':'Bất động kéo dài','environment':'Môi trường bất thường','device':'Lỗi giám sát'}
-    severity_names={'critical':'Nghiêm trọng','warning':'Trung bình','info':'Thông tin'}
-    try: stamp=event['first_observed_at'].astimezone(ZoneInfo(event['timezone']))
-    except Exception: stamp=event['first_observed_at'].astimezone(timezone.utc)
+    report=event_report(event,event.get('timezone'))
     return render_email('safety_alert',public_url=os.getenv('PUBLIC_URL','http://localhost:8188'),
         recipient_name=recipient_name,home_name=event.get('home_name'),room_name=event.get('room_name'),
-        camera_name=event.get('camera_name'),severity_label=severity_names.get(event.get('severity'),'Chưa rõ mức độ'),
-        event_label=kind_names.get(event.get('kind'),'Cảnh báo'),occurred_at=stamp.strftime('%d/%m/%Y %H:%M:%S'),
-        event_id=event.get('id'))
+        camera_name=event.get('camera_name'),severity_label=report['severity'],critical=event['severity']=='critical',
+        event_label=report['title'],occurred_at=report['observed'],received_at=report['received'],
+        status_label=report['status'], detection_source=report['source'], facts=report['facts'],
+        reason=report['reason'],guidance=report['guidance'],event_id=event.get('id'))
 
 def _read_notification_image(row):
     if row.get('upload_key','').startswith('demo:') or demo_camera(row.get('camera_id')): return None,'missing'
@@ -999,10 +995,13 @@ def process_notifications(home_id=None,delivery_id=None):
             if not allowed:
                 conn.execute("UPDATE annha.notification_deliveries SET status='cancelled',last_error_code='NotEligible' WHERE id=%s",(job['id'],));continue
             channel=conn.execute('SELECT * FROM annha.notification_channels WHERE id=%s',(job['channel_id'],)).fetchone()
-            event=conn.execute('''SELECT e.*,c.name AS camera_name,r.name AS room_name,h.name AS home_name,h.timezone
+            event=conn.execute('''SELECT e.*,c.name AS camera_name,r.name AS room_name,h.name AS home_name,h.timezone,
+                (SELECT u.payload FROM annha.event_updates u WHERE u.event_id=e.id ORDER BY u.sequence LIMIT 1) AS initial_payload
               FROM annha.events e JOIN annha.cameras c ON c.id=e.camera_id AND c.home_id=e.home_id
               LEFT JOIN annha.rooms r ON r.id=c.room_id AND r.home_id=e.home_id
               JOIN annha.homes h ON h.id=e.home_id WHERE e.id=%s AND e.home_id=%s''',(job['event_id'],home)).fetchone()
+            snapshot=event.get('initial_payload') or {}
+            event.update(detection=snapshot.get('detection'), initial_confidence=snapshot.get('confidence'))
             destination=conn.execute('SELECT destination_ciphertext FROM annha_private.notification_secrets WHERE home_id=%s AND channel_id=%s',(home,channel['id'])).fetchone() if channel['kind']=='telegram' else None
             media_allowed=(channel['allow_media'] and not demo_camera(job['camera_id'])
                 and not event.get('source_id','').casefold().startswith(('test:', 'test-', 'fixture:', 'fixture-', 'demo:', 'demo-'))
@@ -1126,7 +1125,9 @@ def evaluate_environment(camera,telemetry):
                     since=since or stamp
                     if not active and (stamp-since).total_seconds()>=settings['environment_hold_seconds']:
                         active=True;source=telemetry_event_sources(telemetry.message_id)[key]
-                        emissions.append(models.EventInput(event_id=source,kind='environment',severity='critical' if metric=='gas' else 'warning',observation='abnormal',observed_at=stamp.isoformat(),reason=f'{metric}: {reading.value} {unit}; ngưỡng {settings[key]}',duration_s=(stamp-since).total_seconds()))
+                        emissions.append(models.EventInput(event_id=source,kind='environment',severity='critical' if metric=='gas' else 'warning',observation='abnormal',observed_at=stamp.isoformat(),reason=f'{metric}: {reading.value} {unit}; ngưỡng {settings[key]}',duration_s=(stamp-since).total_seconds(),
+                            detection={'metric':metric,'measured_value':reading.value,'threshold_value':settings[key],
+                                       'unit':unit,'measurement_quality':reading.quality}))
                 elif not active: since=None
             conn.execute('''INSERT INTO annha.monitor_states(home_id,camera_id,monitor_key,active,since_at,state) VALUES(%s,%s,%s,%s,%s,%s)
               ON CONFLICT(camera_id,monitor_key) DO UPDATE SET active=excluded.active,since_at=excluded.since_at,state=excluded.state,updated_at=now()''',(camera['home_id'],camera['id'],key,active,since,db.J({'source_id':source,'last_observed':stamp.isoformat()})))
@@ -1155,7 +1156,8 @@ def maintenance():
                 if offline==active: continue
                 source=old['state']['source_id'] if active else 'offline:'+db.uid()
                 conn.execute("INSERT INTO annha.monitor_states(home_id,camera_id,monitor_key,active,state) VALUES(%s,%s,'offline',%s,%s) ON CONFLICT(camera_id,monitor_key) DO UPDATE SET active=excluded.active,state=excluded.state,updated_at=now()",(home,camera['id'],offline,db.J({'source_id':source})))
-                emissions.append((camera,models.EventInput(event_id=source,sequence=1 if offline else 2,kind='device',severity='warning',observation='abnormal' if offline else 'recovered',observed_at=db.now().isoformat(),reason='Quá hạn heartbeat; chưa rõ mất mạng hay mất nguồn' if offline else 'Đã nhận heartbeat trở lại')))
+                emissions.append((camera,models.EventInput(event_id=source,sequence=1 if offline else 2,kind='device',severity='warning',observation='abnormal' if offline else 'recovered',observed_at=db.now().isoformat(),reason='Quá hạn heartbeat; chưa rõ mất mạng hay mất nguồn' if offline else 'Đã nhận heartbeat trở lại',
+                    detection={'last_heartbeat_at':camera['last_seen_at']})))
             for asset in conn.execute("""SELECT * FROM annha.media_assets a WHERE a.status='ready'
                 AND a.expires_at IS NOT NULL AND a.expires_at<now()
                 AND NOT EXISTS (SELECT 1 FROM annha.reminder_revisions v JOIN annha.reminders r

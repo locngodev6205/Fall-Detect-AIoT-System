@@ -1,5 +1,5 @@
 import re
-from datetime import date
+from datetime import date, datetime
 from typing import Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -205,6 +205,20 @@ class ConfigAck(Model):
     success: bool
     error: str = Field(default='',max_length=500)
 
+class DetectionFacts(Model):
+    fall_confidence_threshold: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    model_name: str | None = Field(default=None, max_length=60)
+    edge_version: str | None = Field(default=None, max_length=40)
+    metric: Literal['gas','temperature','humidity'] | None = None
+    measured_value: float | None = Field(default=None, allow_inf_nan=False)
+    threshold_value: float | None = Field(default=None, allow_inf_nan=False)
+    unit: Literal['C','%','ADC','ppm'] | None = None
+    measurement_quality: Literal['valid','error','warming_up'] | None = None
+    sensor: str | None = Field(default=None, max_length=40)
+    last_heartbeat_at: datetime | None = None
+    local_alarm_confirmed: bool | None = None
+
+
 class EventInput(Model):
     event_id: str = Field(min_length=1,max_length=128)
     sequence: int = Field(default=1,ge=1)
@@ -216,6 +230,7 @@ class EventInput(Model):
     duration_s: float | None = Field(default=None,ge=0,le=604800)
     config_version: int = Field(default=0,ge=0)
     confidence: float | None = Field(default=None,ge=0,le=1)
+    detection: DetectionFacts | None = None
     @field_validator('observed_at')
     @classmethod
     def timestamp(cls,value):
@@ -243,6 +258,8 @@ class Telemetry(Model):
 
     @model_validator(mode='after')
     def metric_units(self):
+        if self.message_id.startswith('sim-env-v1:'):
+            raise ValueError('Mã mẫu mô phỏng dành riêng cho công cụ lịch sử')
         units={'temperature':{'C'},'humidity':{'%'},'gas':{'ADC','ppm'},'light':{'lux'}}
         if any(reading.unit not in units[metric] for metric,reading in self.readings.items()):
             raise ValueError('Đơn vị đo không khớp loại cảm biến')

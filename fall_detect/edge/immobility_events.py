@@ -13,7 +13,7 @@ class ImmobilityEvents:
         self.pending = None
         self.retry_at = 0.
 
-    def submit(self, reading, *, jpeg_evidence=None):
+    def submit(self, reading, *, jpeg_evidence=None, threshold_seconds=None):
         if reading.transition == State.INACTIVE:
             self.event_id = f"immobility-{uuid4().hex}"
             severity, observation, sequence = "warning", "abnormal", 1
@@ -26,7 +26,9 @@ class ImmobilityEvents:
         self.queue.put(dict(kind="immobility", event_id=self.event_id, sequence=sequence,
                             duration_s=reading.duration_s, severity=severity,
                             observation=observation, reason=reason, observed_at=iso_now_local(),
-                            jpeg_evidence=jpeg_evidence if sequence == 1 else None))
+                            jpeg_evidence=jpeg_evidence if sequence == 1 else None,
+                            **({"detection": {"threshold_value": threshold_seconds, "measured_value": reading.duration_s}}
+                               if sequence == 1 and threshold_seconds is not None else {})))
         if sequence == 2:
             self.event_id = None
 
