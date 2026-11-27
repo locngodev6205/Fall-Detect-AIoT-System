@@ -112,11 +112,6 @@ export function CameraDetail({ id }) {
   });
   const [modesBusy, setModesBusy] = useState(false);
   const [minutesDraft, setMinutesDraft] = useState('10');
-  const savedFallPercent = Math.round((modesResource.data?.smart_modes?.fall_confidence_threshold ?? 0.85) * 100);
-  const [fallPercent, setFallPercent] = useState(savedFallPercent);
-  useEffect(() => setFallPercent(savedFallPercent), [id, savedFallPercent]);
-
-
   useEffect(() => {
     if (modesResource.data?.smart_modes) {
       setModesDraft(modesResource.data.smart_modes);
@@ -227,34 +222,6 @@ export function CameraDetail({ id }) {
             <input type="checkbox" checked={!!modesDraft.fall_detection} disabled={!canEditModes || modesBusy}
               onChange={e => toggleMode('fall_detection', e.target.checked, 'Phát hiện té ngã AI')}/>
           </label>
-          <form className="immobility-minutes-form" onSubmit={e => {
-            e.preventDefault();
-            if (modesResource.data && fallPercent !== savedFallPercent) {
-              saveSmartModes({ fall_confidence_threshold: fallPercent / 100 }, 'Đã lưu ngưỡng té ngã.');
-            }
-          }}>
-            <label htmlFor="fall-threshold">Ngưỡng phát hiện té ngã · {fallPercent}%</label>
-            <input id="fall-threshold" type="range" min="0" max="100" step="1"
-              value={fallPercent} onChange={e => setFallPercent(Number(e.target.value))}
-              disabled={!canEditModes || modesBusy || !modesResource.data} aria-describedby="fall-threshold-hint"/>
-            <small id="fall-threshold-hint">Ngưỡng thấp giúp tăng độ nhạy và có thể làm tăng cảnh báo nhầm.</small>
-            {fallPercent < 50 && <small role="alert">Ngưỡng rất thấp. Cảnh báo nhầm có thể tăng.</small>}
-            {fallPercent > 95 && <small role="alert">Ngưỡng rất cao. Thiết bị có thể bỏ sót trường hợp té ngã.</small>}
-            {canEditModes && <div className="actions">
-              <Button kind="secondary-btn" type="button" disabled={modesBusy || !modesResource.data || fallPercent === 85}
-                onClick={() => setFallPercent(85)}>Khôi phục 85%</Button>
-              <Button kind="secondary-btn" type="submit"
-                disabled={modesBusy || !modesResource.data || fallPercent === savedFallPercent}>Lưu ngưỡng</Button>
-            </div>}
-            {modesResource.data && <small role="status">
-              {modesBusy ? 'Đang lưu…' : fallPercent !== savedFallPercent ? 'Chưa lưu'
-                : !camera.online ? 'Thiết bị offline · Chưa xác nhận đồng bộ'
-                : camera.config_error ? 'Thiết bị báo lỗi đồng bộ cấu hình'
-                : modesResource.data.applied_version === modesResource.data.desired_version
-                  && modesResource.data.desired_version > 0 ? 'Đã áp dụng trên thiết bị'
-                  : 'Chờ thiết bị đồng bộ'}
-            </small>}
-          </form>
           <label className="smart-mode-item">
             <span className="smart-mode-info">
               <strong><PersonSimple/>Phát hiện bất động kéo dài</strong>

@@ -65,6 +65,86 @@ export function Invitation({ token }) {
   return <ResourceState resource={resource}>{resource.data && <section className="panel"><Heading title={'Lời mời tham gia ' + resource.data.home_name}/><p>Vai trò: {roleNames[resource.data.role]}</p><p>Hết hạn: {dateTime(resource.data.expires * 1000)}</p><p>Chỉ tài khoản email người nhận mới chấp nhận được lời mời này.</p><Button disabled={resource.data.status !== 'pending' || Date.now() > resource.data.expires * 1000} onClick={accept}>Chấp nhận lời mời</Button><Button kind="ghost" disabled={resource.data.status !== 'pending'} onClick={async () => { try { await api('/invitations/' + token + '/decline', { method: 'POST', body: {} });notify('Đã từ chối lời mời.');go('/homes'); } catch (e) { notify(e.message); } }}>Từ chối</Button></section>}</ResourceState>;
 }
 
+const DEFAULT_FALL_PERCENT = 85;
+
+function FallThresholdForm({ camera }) {
+  const { can, notify, reload, tick } = useApp();
+  const path = `/cameras/${camera.id}/smart-modes`;
+  const resource = useResource(path, tick);
+  const [draft, setDraft] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const savedPercent = Math.round(
+    (resource.data?.smart_modes?.fall_confidence_threshold ?? DEFAULT_FALL_PERCENT / 100) * 100
+  );
+  useEffect(() => {
+    if (draft === savedPercent) setDraft(null);
+  }, [draft, savedPercent]);
+  const percent = draft ?? savedPercent;
+  const canEdit = can(camera, 'schedules');
+  const disabled = !canEdit || busy || !resource.data;
+  const changed = percent !== savedPercent;
+  const applied = resource.data?.desired_version > 0
+    && resource.data.applied_version === resource.data.desired_version;
+
+  async function save(event) {
+    event.preventDefault();
+    if (disabled || !changed) return;
+    setBusy(true);
+    try {
+      await api(path, { method: 'PUT', body: { fall_confidence_threshold: percent / 100 } });
+      resource.reload();
+      reload();
+      notify('Đã lưu ngưỡng té ngã.');
+    } catch (error) {
+      notify(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <ResourceState resource={resource}>
+    <form className="immobility-minutes-form" onSubmit={save}>
+      <label htmlFor="fall-threshold">Ngưỡng phát hiện té ngã · {percent}%</label>
+      <input id="fall-threshold" type="range" min="0" max="100" step="1" value={percent}
+        onChange={e => setDraft(Number(e.target.value))}
+        disabled={disabled} aria-describedby="fall-threshold-hint"/>
+      <small id="fall-threshold-hint">Ngưỡng thấp giúp tăng độ nhạy và có thể làm tăng cảnh báo nhầm.</small>
+      {percent < 50 && <small role="alert">Ngưỡng rất thấp. Cảnh báo nhầm có thể tăng.</small>}
+      {percent > 95 && <small role="alert">Ngưỡng rất cao. Thiết bị có thể bỏ sót trường hợp té ngã.</small>}
+      {canEdit && <div className="actions">
+        <Button kind="secondary-btn" disabled={disabled || percent === DEFAULT_FALL_PERCENT}
+          onClick={() => setDraft(DEFAULT_FALL_PERCENT)}>Khôi phục 85%</Button>
+        <Button kind="secondary-btn" type="submit" disabled={disabled || !changed}>Lưu ngưỡng</Button>
+      </div>}
+      {resource.data && <small role="status">
+        {busy ? 'Đang lưu…' : changed ? 'Chưa lưu'
+          : !camera.online ? 'Thiết bị offline · Chưa xác nhận đồng bộ'
+          : camera.config_error ? 'Thiết bị báo lỗi đồng bộ cấu hình'
+          : applied ? 'Đã áp dụng trên thiết bị'
+          : 'Chờ thiết bị đồng bộ'}
+      </small>}
+    </form>
+  </ResourceState>;
+}
+
+function AiSettings() {
+  const { cameras } = useApp();
+  const [cameraId, setCameraId] = useState('');
+  const camera = cameras.find(item => item.id === cameraId) ?? cameras[0];
+
+  return <section className="panel spaced" aria-labelledby="ai-settings-title">
+    <h2 id="ai-settings-title">Cài đặt AI</h2>
+    {camera ? <>
+      <Field label="Camera">
+        <select value={camera.id} onChange={event => setCameraId(event.target.value)}>
+          {cameras.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+        </select>
+      </Field>
+      <FallThresholdForm key={camera.id} camera={camera}/>
+    </> : <p>Nhà này chưa có camera.</p>}
+  </section>;
+}
+
 export function Settings() {
   const { home, rooms, notify, reload, reloadHomes, tick } = useApp();
   const resource = useResource(home.role === 'owner' ? '/homes/' + home.id + '/settings' : null);
@@ -81,6 +161,7 @@ export function Settings() {
   if (home.role !== 'owner') return <Empty title="Chỉ chủ nhà được chỉnh cài đặt"/>;
   async function save(event) { event.preventDefault();setBusy(true);try { await api('/homes/' + home.id + '/settings', { method: 'PUT', body: form });reload();notify('Đã lưu chính sách, đang chờ thiết bị áp dụng.'); } catch (e) { notify(e.message); } finally { setBusy(false); } }
   return <><Heading title="Cài đặt nhà" text="Quản lý không gian, chính sách, thông báo và lưu trữ."/><div className="two-grid"><section className="panel"><h2>Thông tin nhà</h2><form onSubmit={async e => { e.preventDefault();try { await api('/homes/' + home.id, { method: 'PATCH', body: Object.fromEntries(new FormData(e.currentTarget)) });await reloadHomes();notify('Đã cập nhật nhà.'); } catch (error) { notify(error.message); } }}><Field label="Tên nhà" name="name" defaultValue={home.name} key={home.id} required/><Field label="Múi giờ" name="timezone" defaultValue={home.timezone} required/><Button type="submit">Lưu thông tin nhà</Button></form><div className="settings-room-section"><h3>Các phòng</h3>{rooms.map(r => <div className="setting-row room-settings-row" key={r.id}><span>{r.name}</span><Button kind="ghost" onClick={() => setRoomEdit(r)}>Đổi tên</Button></div>)}<Button kind="secondary-btn add-room-button" onClick={() => setRoomEdit({})}>Thêm phòng</Button></div></section><ResourceState resource={resource}>{form && <form className="panel" onSubmit={save}><h2>Ngưỡng cảnh báo môi trường</h2>{[['temperature_low','Nhiệt độ thấp'],['temperature_high','Nhiệt độ cao'],['humidity_high','Độ ẩm cao'],['gas_high','Ngưỡng tín hiệu gas'],['environment_hold_seconds','Thời gian duy trì (giây)'],['hysteresis','Khoảng hysteresis']].map(([id,label]) => <Field key={id} label={label} type="number" step="any" value={form[id]} onChange={e => setForm({ ...form, [id]: Number(e.target.value) })}/>)}<Field label="Đơn vị gas đã được thiết bị xác minh"><select value={form.gas_unit} onChange={e => setForm({ ...form, gas_unit: e.target.value })}><option value="ADC">ADC — tín hiệu cảm biến</option><option value="ppm">PPM — chỉ dùng khi đã hiệu chuẩn</option></select></Field><h2>Lưu trữ</h2><Field label="Số ngày lưu ảnh, video và số đo" type="number" min="1" max="90" value={form.retention_days} onChange={e => setForm({ ...form, retention_days: Number(e.target.value) })}/><Button type="submit" disabled={busy}>Lưu chính sách</Button></form>}</ResourceState></div>
+    <AiSettings/>
     <NotificationSettings onRecipients={setDeliveryRecipients}/>
     <ResourceState resource={storage}>{storage.data&&<section className="panel spaced storage-panel"><div className="section-heading"><div><h2>Dung lượng lưu trữ</h2><p>{formatStorage(storage.data.used_bytes)} đã dùng · {formatStorage(storage.data.reserved_bytes)} đang xử lý · {formatStorage(storage.data.available_bytes)} còn lại</p></div><Badge tone={storage.data.warning_level==='critical'?'red':storage.data.warning_level==='near'?'amber':'teal'}>{storage.data.warning_level==='critical'?'Sắp đầy':storage.data.warning_level==='near'?'Đã dùng nhiều':'Đang ổn định'}</Badge></div><div className="storage-meter" role="progressbar" aria-label="Dung lượng lưu trữ đã dùng" aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.min(100,storage.data.used_percent)}><span style={{width:Math.min(100,storage.data.used_percent)+'%'}}/></div><p className="storage-total">{storage.data.used_percent}% / {formatStorage(storage.data.quota_bytes)}</p><p>Ảnh camera và ảnh sự kiện được lưu tối đa {storage.data.retention_days} ngày. Âm thanh đang dùng trong lời nhắc được giữ lại; thông tin sự kiện vẫn còn nếu ảnh hết hạn.</p>{storage.data.reconciliation?<div className="storage-reconcile"><strong>Đối soát gần nhất: {dateTime(storage.data.reconciliation.checked_at)}</strong><span>{storage.data.reconciliation.report.cloud_inventory_status==='complete'?`${storage.data.reconciliation.report.cloud_assets_missing||0} tệp thiếu · ${storage.data.reconciliation.report.cloudinary_orphans||0} tệp chưa liên kết`:'Chưa thể kiểm tra kho media'}</span></div>:<p>Đang chờ lượt đối soát đầu tiên.</p>}</section>}</ResourceState>
     <details className="panel spaced settings-history" open={deliveryOpen} onToggle={event=>setDeliveryOpen(event.currentTarget.open)}>
