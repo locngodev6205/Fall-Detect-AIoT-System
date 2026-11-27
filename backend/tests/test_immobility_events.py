@@ -40,6 +40,25 @@ def test_smart_modes_sync_and_immobility_event_recovery(tmp_path, monkeypatch):
             assert owner.get(path).json()["applied_version"] == desired
 
         sync(immobility_detection=True, immobility_timeout_seconds=210, fall_detection=False)
+        assert owner.get(path).json()["smart_modes"]["fall_confidence_threshold"] == 0.85
+        for invalid in (-0.01, 1.01, True, "NaN", "Infinity", None):
+            assert owner.put(path, json={"fall_confidence_threshold": invalid}).status_code == 422
+        runtime._fall_detector = SimpleNamespace(confidence_threshold=0.85, sequence_buffer=[object()])
+        buffer = runtime._fall_detector.sequence_buffer
+        sync(fall_confidence_threshold=0.70)
+        assert runtime._fall_detector.confidence_threshold == 0.70
+        assert runtime._fall_detector.sequence_buffer is buffer and len(buffer) == 1
+        assert runtime.client.current_config["smart_modes"]["immobility_timeout_seconds"] == 210
+        assert not runtime.client.current_config["smart_modes"]["fall_detection"]
+        assert owner.get(other_path).json()["smart_modes"]["fall_confidence_threshold"] == 0.85
+        restarted = AnNhaEdgeRuntime(base_url="http://127.0.0.1:1", device_token="test", cache_dir=tmp_path,
+                                     force_mock_hardware=True)
+        try:
+            assert restarted._fall_threshold == 0.70
+        finally:
+            restarted.client.stop()
+        sync(fall_confidence_threshold=0.85)
+        assert runtime._fall_detector.confidence_threshold == 0.85
         runtime._observe_immobility(0)
         assert runtime.immobility.duration_s == 210
         sync(immobility_detection=False, immobility_timeout_seconds=120)

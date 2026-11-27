@@ -112,6 +112,10 @@ export function CameraDetail({ id }) {
   });
   const [modesBusy, setModesBusy] = useState(false);
   const [minutesDraft, setMinutesDraft] = useState('10');
+  const savedFallPercent = Math.round((modesResource.data?.smart_modes?.fall_confidence_threshold ?? 0.85) * 100);
+  const [fallPercent, setFallPercent] = useState(savedFallPercent);
+  useEffect(() => setFallPercent(savedFallPercent), [id, savedFallPercent]);
+
 
   useEffect(() => {
     if (modesResource.data?.smart_modes) {
@@ -151,7 +155,7 @@ export function CameraDetail({ id }) {
 
   async function saveSmartModes(nextModes, message = 'Đã lưu chế độ thông minh. Đang đồng bộ xuống thiết bị.') {
     if (!canEditModes) return;
-    setModesDraft(nextModes);
+    setModesDraft(previous => ({ ...previous, ...nextModes }));
     setModesBusy(true);
     try {
       await api(`/cameras/${id}/smart-modes`, { method: 'PUT', body: nextModes });
@@ -167,7 +171,7 @@ export function CameraDetail({ id }) {
   }
 
   function toggleMode(key, checked, label) {
-    const next = { ...modesDraft, [key]: checked };
+    const next = { [key]: checked };
     saveSmartModes(next, `${checked ? 'Đã bật' : 'Đã tắt'} ${label}.`);
   }
 
@@ -223,6 +227,34 @@ export function CameraDetail({ id }) {
             <input type="checkbox" checked={!!modesDraft.fall_detection} disabled={!canEditModes || modesBusy}
               onChange={e => toggleMode('fall_detection', e.target.checked, 'Phát hiện té ngã AI')}/>
           </label>
+          <form className="immobility-minutes-form" onSubmit={e => {
+            e.preventDefault();
+            if (modesResource.data && fallPercent !== savedFallPercent) {
+              saveSmartModes({ fall_confidence_threshold: fallPercent / 100 }, 'Đã lưu ngưỡng té ngã.');
+            }
+          }}>
+            <label htmlFor="fall-threshold">Ngưỡng phát hiện té ngã · {fallPercent}%</label>
+            <input id="fall-threshold" type="range" min="0" max="100" step="1"
+              value={fallPercent} onChange={e => setFallPercent(Number(e.target.value))}
+              disabled={!canEditModes || modesBusy || !modesResource.data} aria-describedby="fall-threshold-hint"/>
+            <small id="fall-threshold-hint">Ngưỡng thấp giúp tăng độ nhạy và có thể làm tăng cảnh báo nhầm.</small>
+            {fallPercent < 50 && <small role="alert">Ngưỡng rất thấp. Cảnh báo nhầm có thể tăng.</small>}
+            {fallPercent > 95 && <small role="alert">Ngưỡng rất cao. Thiết bị có thể bỏ sót trường hợp té ngã.</small>}
+            {canEditModes && <div className="actions">
+              <Button kind="secondary-btn" type="button" disabled={modesBusy || !modesResource.data || fallPercent === 85}
+                onClick={() => setFallPercent(85)}>Khôi phục 85%</Button>
+              <Button kind="secondary-btn" type="submit"
+                disabled={modesBusy || !modesResource.data || fallPercent === savedFallPercent}>Lưu ngưỡng</Button>
+            </div>}
+            {modesResource.data && <small role="status">
+              {modesBusy ? 'Đang lưu…' : fallPercent !== savedFallPercent ? 'Chưa lưu'
+                : !camera.online ? 'Thiết bị offline · Chưa xác nhận đồng bộ'
+                : camera.config_error ? 'Thiết bị báo lỗi đồng bộ cấu hình'
+                : modesResource.data.applied_version === modesResource.data.desired_version
+                  && modesResource.data.desired_version > 0 ? 'Đã áp dụng trên thiết bị'
+                  : 'Chờ thiết bị đồng bộ'}
+            </small>}
+          </form>
           <label className="smart-mode-item">
             <span className="smart-mode-info">
               <strong><PersonSimple/>Phát hiện bất động kéo dài</strong>
@@ -233,7 +265,7 @@ export function CameraDetail({ id }) {
           </label>
           {modesDraft.immobility_detection !== false && <form className="immobility-minutes-form" onSubmit={e => {
             e.preventDefault();
-            if (validTimeout) saveSmartModes({ ...modesDraft, immobility_timeout_seconds: timeoutSeconds }, 'Đã cập nhật thời gian bất động.');
+            if (validTimeout) saveSmartModes({ immobility_timeout_seconds: timeoutSeconds }, 'Đã cập nhật thời gian bất động.');
           }}>
             <label htmlFor="immobility-minutes">Thời gian bất động trước khi cảnh báo</label>
             <div className="immobility-minutes-row">
@@ -273,7 +305,7 @@ export function CameraDetail({ id }) {
               onChange={e => toggleMode('night_mode_enabled', e.target.checked, 'Chế độ ban đêm yên tĩnh')}/>
           </label>
         </div>
-        {modesDraft.night_mode_enabled && <form className="night-window-form" onSubmit={e => { e.preventDefault(); saveSmartModes(modesDraft, 'Đã cập nhật khung giờ ban đêm.'); }}>
+        {modesDraft.night_mode_enabled && <form className="night-window-form" onSubmit={e => { e.preventDefault(); saveSmartModes({ night_start: modesDraft.night_start, night_end: modesDraft.night_end }, 'Đã cập nhật khung giờ ban đêm.'); }}>
           <Field label="Giờ bắt đầu đêm"><input type="time" value={modesDraft.night_start || '22:00'} disabled={!canEditModes || modesBusy} onChange={e => setModesDraft({ ...modesDraft, night_start: e.target.value })} required/></Field>
           <Field label="Giờ kết thúc đêm"><input type="time" value={modesDraft.night_end || '06:00'} disabled={!canEditModes || modesBusy} onChange={e => setModesDraft({ ...modesDraft, night_end: e.target.value })} required/></Field>
           {canEditModes && <Button kind="secondary-btn" type="submit" disabled={modesBusy}>Lưu giờ đêm</Button>}

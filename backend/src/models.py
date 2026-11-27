@@ -170,6 +170,7 @@ class SmartModes(Model):
     immobility_detection: bool = True
     immobility_timeout_seconds: int = Field(default=600, ge=1, le=604800, strict=True)
     fall_detection: bool = True
+    fall_confidence_threshold: float = Field(default=0.85, ge=0, le=1, allow_inf_nan=False, strict=True)
     servo_tracking: bool = True
     show_landmarks: bool = True
     night_mode_enabled: bool = True

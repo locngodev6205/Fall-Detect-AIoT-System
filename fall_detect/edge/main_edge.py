@@ -294,6 +294,10 @@ class AnNhaEdgeRuntime:
         self.immobility_events = ImmobilityEvents()
         self.immobility = None
         import config as fd_cfg
+        self._default_fall_threshold = fd_cfg.FALL_CONFIDENCE_THRESHOLD
+        self._fall_threshold = self._default_fall_threshold
+        self._fall_threshold_lock = threading.Lock()
+        self._fall_detector = None
         self._local_immobility = (fd_cfg.ENABLE_IMMOBILITY_DETECTION, fd_cfg.IMMOBILITY_TIMEOUT_SECONDS)
         self._immobility_motion_threshold = fd_cfg.IMMOBILITY_MOTION_THRESHOLD
         self._desired_immobility = self._local_immobility
@@ -307,12 +311,15 @@ class AnNhaEdgeRuntime:
         self.client.set_command_handler(self._on_web_command)
 
     def _on_config_updated(self, cfg: dict[str, Any]) -> None:
+        modes = cfg.get("smart_modes")
+        threshold = modes.get("fall_confidence_threshold", self._default_fall_threshold) if isinstance(modes, dict) else self._default_fall_threshold
+        if type(threshold) not in (int, float) or not 0 <= threshold <= 1:
+            raise ValueError("Ngưỡng phát hiện té ngã không hợp lệ")
         mode = cfg.get("audio_output")
         if mode is not None and not self.audio.select_output(mode):
             raise ConfigDeferred()
         if "audio_volume" in cfg:
             self.audio.set_output_volume(cfg["audio_volume"])
-        modes = cfg.get("smart_modes")
         settings = None
         if isinstance(modes, dict) and (
             "immobility_detection" in modes or "immobility_timeout_seconds" in modes
@@ -332,6 +339,10 @@ class AnNhaEdgeRuntime:
         if settings != self._desired_immobility:
             # Publish a new snapshot even if a later config restores the previous values.
             self._desired_immobility = (*settings,)
+        with self._fall_threshold_lock:
+            self._fall_threshold = float(threshold)
+            if self._fall_detector is not None:
+                self._fall_detector.confidence_threshold = self._fall_threshold
 
     @maintenance_guard
     def _on_web_command(self, cmd: dict[str, Any]) -> tuple[bool, str] | Future:
@@ -746,6 +757,11 @@ class AnNhaEdgeRuntime:
             except Exception as exc:
                 logger.warning("[Vision] Không khởi tạo được TFLite FallDetector (%s) -> chỉ chạy Pose Tracking.", exc)
 
+        with self._fall_threshold_lock:
+            self._fall_detector = detector
+            if detector is not None:
+                detector.confidence_threshold = self._fall_threshold
+
         mp_pose = mp.solutions.pose
         mp_drawing = getattr(mp, "solutions", None) and getattr(mp.solutions, "drawing_utils", None)
         mp_styles = getattr(mp, "solutions", None) and getattr(mp.solutions, "drawing_styles", None)
@@ -835,10 +851,14 @@ class AnNhaEdgeRuntime:
                     fall_result = None
                     feats = None
                     fall_enabled = self.tracker.is_fall_detection_enabled()
+                    with self._fall_threshold_lock:
+                        fall_threshold = self._fall_threshold
                     if detector is not None and fall_enabled:
                         try:
                             feats = extract_and_normalize_features(pose_res.pose_landmarks) if present else None
-                            fall_result = detector.update(feats, person_present=present)
+                            with self._fall_threshold_lock:
+                                fall_threshold = detector.confidence_threshold
+                                fall_result = detector.update(feats, person_present=present)
                         except Exception as exc:
                             self.model_inference_ok = False
                             logger.warning("[Vision] Lỗi FallDetector: %s", exc)
@@ -859,7 +879,7 @@ class AnNhaEdgeRuntime:
                             "[FallDetection] raw_prob=%s threshold=%.6f state=%s pose_valid=%s buffer=%d/%d "
                             "cooldown_remaining_s=%.2f cooldown_s=%s enabled=%s threshold_crossed=%s",
                             "N/A" if fall_prob is None else f"{fall_prob:.6f}",
-                            detector.confidence_threshold if detector is not None else fd_cfg.FALL_CONFIDENCE_THRESHOLD,
+                            fall_threshold,
                             state, present, buffered, fd_cfg.INPUT_TIMESTEPS,
                             remaining, cooldown, fall_enabled, crossed_threshold,
                         )
