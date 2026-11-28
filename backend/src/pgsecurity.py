@@ -23,7 +23,7 @@ def public_user(row): return {**{key:row[key] for key in ('id','name','email')},
 def session_user(token):
     if not token: raise HTTPException(401,'Vui lòng đăng nhập.')
     with db.connect('auth') as conn:
-        row=conn.execute('''SELECT u.id,u.name,u.email,u.email_verified_at,u.email_version,u.auth_version,s.token_hash,s.csrf_hash FROM annha_private.sessions s JOIN annha_private.users u ON u.id=s.user_id
+        row=conn.execute('''SELECT u.id,u.name,u.email,u.email_verified_at,u.email_version,u.auth_version,s.token_hash,s.csrf_hash,s.expires_at AS session_expires_at FROM annha_private.sessions s JOIN annha_private.users u ON u.id=s.user_id
           WHERE s.token_hash=%s AND s.expires_at>now() AND s.revoked_at IS NULL AND s.auth_version=u.auth_version
           AND u.disabled_at IS NULL AND u.deleted_at IS NULL''',(digest(token),)).fetchone()
     if not row: raise HTTPException(401,'Phiên đăng nhập đã hết hạn.')
@@ -84,7 +84,7 @@ def camera_access(camera_id,user_id,action='view',historical=False):
 def device_identity(token):
     if not token: raise HTTPException(401,'Thông tin xác thực thiết bị không hợp lệ.')
     with db.connect('auth') as conn:
-        row=conn.execute('''SELECT c.* FROM annha_private.device_credentials t JOIN annha.cameras c ON c.id=t.camera_id AND c.device_id=t.device_id
+        row=conn.execute('''SELECT c.*,t.expires_at AS credential_expires_at FROM annha_private.device_credentials t JOIN annha.cameras c ON c.id=t.camera_id AND c.device_id=t.device_id
           WHERE t.token_hash=%s AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>now()) AND c.retired_at IS NULL AND EXISTS(SELECT 1 FROM annha.homes h WHERE h.id=c.home_id AND h.archived_at IS NULL)''',(digest(token),)).fetchone()
     if not row: raise HTTPException(401,'Thông tin xác thực thiết bị không hợp lệ.')
     return {**dict(row),'id':str(row['id']),'home_id':str(row['home_id'])}
